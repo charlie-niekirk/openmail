@@ -2,7 +2,13 @@
 
 A fast, native desktop email client for Gmail, written in Rust.
 
-> **Status:** early development. Nothing usable yet. See the roadmap (coming in `docs/ROADMAP.md`).
+> **Status:** early development. Nothing usable yet. See the [roadmap](docs/ROADMAP.md) for what is planned and what is done.
+
+## Documentation
+
+- [Roadmap](docs/ROADMAP.md): phases and PRs, with progress checkboxes.
+- [Architecture](docs/ARCHITECTURE.md): crates, design decisions, threading and sync models.
+- [CLAUDE.md](CLAUDE.md): contributor conventions (branches, commits, gates, PRs).
 
 ## Goals
 
