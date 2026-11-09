@@ -14,6 +14,19 @@ publish = false
 # Shared dependency versions. Crates opt in with `foo.workspace = true`.
 # Add entries here when a PR first needs a dependency, not before.
 [workspace.dependencies]
+# GPUI is pre-1.0: pin exact, mutually compatible versions and upgrade them only in
+# dedicated PRs. gpui-component 0.9.1 requires `gpui-pre =0.3.12` (the published
+# GPUI snapshot), so `gpui` and `gpui-platform` are those packages under their
+# usual names. `runtime_shaders` compiles Metal shaders at runtime, so macOS builds
+# do not need the Xcode Metal toolchain.
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.12", features = [
+  "font-kit",
+  "runtime_shaders",
+  "wayland",
+  "x11",
+] }
+gpui-component = "=0.9.1"
 
 [workspace.lints.rust]
 # Deny rather than forbid, so a crate that genuinely needs FFI (for example the
