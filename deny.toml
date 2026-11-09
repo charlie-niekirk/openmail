@@ -6,9 +6,12 @@ all-features = true
 
 [advisories]
 version = 2
-# Fail on any RustSec vulnerability, unmaintained or unsound advisory, and on
-# yanked crates. Add justified exceptions to `ignore` as { id, reason }.
+# Fail on any RustSec vulnerability or unsound advisory, and on yanked crates.
+# Add justified exceptions to `ignore` as { id, reason }.
 yanked = "deny"
+# Flag unmaintained crates only when we depend on them directly; transitive ones
+# (largely via gpui) are for upstream to replace.
+unmaintained = "workspace"
 ignore = []
 
 [licenses]
