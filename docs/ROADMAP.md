@@ -32,7 +32,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
   - Dependabot, and issue and PR templates.
   - Install the Linux system packages GPUI and wry need: xkbcommon, wayland, vulkan,
     x11-xcb, fontconfig, webkit2gtk-4.1, gtk3.
-- [ ] **0.4 GPUI hello window** ∥ — `feat/0.4-gpui-window`
+- [x] **0.4 GPUI hello window** ∥ — `feat/0.4-gpui-window`
   - `apps/openmail` opens a themed `gpui-component` window with a macOS transparent
     titlebar.
   - Pin `gpui` and `gpui-component` to compatible revisions.
