@@ -1,0 +1,3 @@
+# Check out text files with LF everywhere, so rustfmt (newline_style = "Unix")
+# passes on Windows, where Git would otherwise convert to CRLF.
+* text=auto eol=lf

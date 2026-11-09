@@ -26,7 +26,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
   - Workspace `Cargo.toml` with shared lints, `rust-toolchain.toml`, `rustfmt.toml`.
   - Empty crates under `crates/` and the `apps/openmail` binary.
   - `CLAUDE.md`, `docs/ROADMAP.md` (this file) and `docs/ARCHITECTURE.md`.
-- [ ] **0.3 CI** ∥ — `ci/0.3-ci`
+- [x] **0.3 CI** ∥ — `ci/0.3-ci`
   - GitHub Actions matrix on macOS, Ubuntu and Windows: fmt, clippy, test and
     `cargo-deny` (licenses and advisories), with rust-cache.
   - Dependabot, and issue and PR templates.
