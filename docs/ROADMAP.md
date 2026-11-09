@@ -22,7 +22,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 - [x] **0.1 Create repo** — `chore/0.1-create-repo`
   - Public repo `charlie-niekirk/openmail` with README stub, LICENSE-MIT,
     LICENSE-APACHE and `.gitignore` on `main`.
-- [ ] **0.2 Workspace and conventions** — `chore/0.2-workspace`
+- [x] **0.2 Workspace and conventions** — `chore/0.2-workspace`
   - Workspace `Cargo.toml` with shared lints, `rust-toolchain.toml`, `rustfmt.toml`.
   - Empty crates under `crates/` and the `apps/openmail` binary.
   - `CLAUDE.md`, `docs/ROADMAP.md` (this file) and `docs/ARCHITECTURE.md`.
