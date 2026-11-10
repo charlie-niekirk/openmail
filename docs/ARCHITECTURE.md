@@ -116,11 +116,17 @@ the first page of a label in under 5 ms with 100k threads.
 
 ### Secrets: OS keychain via `keyring`
 
-OAuth refresh and access tokens are stored in the OS credential store (macOS
-Keychain, Windows Credential Manager, Secret Service on Linux) via `keyring`, never
-on disk in plain text and never in the repo. The Google OAuth client ID comes from
-`OPENMAIL_GOOGLE_CLIENT_ID` or user config, so anyone can bring their own client
-while the app is unverified.
+OAuth refresh tokens are stored in the OS credential store (macOS Keychain, Windows
+Credential Manager, Secret Service on Linux) via `keyring`, keyed by account email,
+never on disk in plain text and never in the repo. Access tokens last an hour and are
+kept only in memory, refreshed shortly before they expire. The Google OAuth client
+ID (and the optional secret Google issues to desktop clients) comes from
+`OPENMAIL_GOOGLE_CLIENT_ID` / `OPENMAIL_GOOGLE_CLIENT_SECRET` or user config, so
+anyone can bring their own client while the app is unverified.
+
+Sign-in uses Google's installed-app flow: PKCE (S256), the system browser, and a
+one-shot loopback redirect server on `127.0.0.1:<random port>` that validates
+`state`. The scopes add `openid email` so the ID token names the account.
 
 ## Webview embedding
 
