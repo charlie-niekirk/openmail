@@ -73,8 +73,12 @@ chrome. Electron and Tauri were rejected for footprint and because only the mess
 body needs HTML rendering.
 
 GPUI is pre-1.0, so `gpui` and `gpui-component` are pinned to exact, mutually
-compatible git revisions and upgraded only in dedicated PRs. UI logic lives in plain
-view-model types so it can be tested without a window.
+compatible versions and upgraded only in dedicated PRs. `gpui-component` is
+published on crates.io against `gpui-pre`, a crates.io snapshot of Zed's `gpui`, so
+the workspace depends on `gpui-pre` and `gpui-pre-platform` (the platform backends
+that create the `Application`) under the names `gpui` and `gpui-platform`, at the
+exact version `gpui-component` requires. UI logic lives in plain view-model types so
+it can be tested without a window.
 
 ### Backend: Gmail REST API, not IMAP
 

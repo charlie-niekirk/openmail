@@ -90,7 +90,7 @@ allow it on the smallest possible item with a comment explaining why.
 
 Declare shared versions once in `[workspace.dependencies]` in the root `Cargo.toml`
 and use `foo.workspace = true` in crates. Add a dependency in the PR that first
-needs it. Pin `gpui` and `gpui-component` to exact git revisions and upgrade them
+needs it. Pin `gpui` and `gpui-component` to exact (`=`) versions and upgrade them
 only in dedicated PRs.
 
 ### Tests
