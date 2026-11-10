@@ -45,6 +45,7 @@ pub async fn setup_retrying() -> (MockServer, GmailClient) {
         max_retries: 3,
         initial_backoff: Duration::from_millis(1),
         max_backoff: Duration::from_millis(5),
+        rate_limit_initial_backoff: Duration::from_millis(1),
         rate_limit_max_backoff: Duration::from_millis(5),
         rate_limit_max_wait: Duration::from_millis(50),
     })

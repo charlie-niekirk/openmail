@@ -10,7 +10,9 @@ use std::time::Duration;
 /// sends `Retry-After`, the client waits at least that long, up to `max_backoff`.
 ///
 /// Rate limits (429 and rate-limit 403s) are retried on their own budget, since
-/// Gmail's per-user limit is per minute: delays grow the same way but up to
+/// Gmail's per-user limit is a moving average over a minute and retrying
+/// quickly only keeps the user over it: delays start at
+/// `rate_limit_initial_backoff` and grow the same way up to
 /// `rate_limit_max_backoff`, and retries continue until the delays add up to
 /// `rate_limit_max_wait`. An exhausted daily quota is never retried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,8 @@ pub struct RetryPolicy {
     pub initial_backoff: Duration,
     /// The longest delay between two attempts after a server error or timeout.
     pub max_backoff: Duration,
+    /// The base delay before the first retry after a rate limit.
+    pub rate_limit_initial_backoff: Duration,
     /// The longest delay between two attempts after a rate limit.
     pub rate_limit_max_backoff: Duration,
     /// The most time spent waiting on rate limits for one request before
@@ -32,12 +36,13 @@ pub struct RetryPolicy {
 
 impl Default for RetryPolicy {
     /// Five retries up to 32 s apart for server errors; up to three minutes of
-    /// rate-limit backoff, at most a minute at a time.
+    /// rate-limit backoff, starting at 5 s and at most a minute at a time.
     fn default() -> Self {
         Self {
             max_retries: 5,
             initial_backoff: Duration::from_millis(500),
             max_backoff: Duration::from_secs(32),
+            rate_limit_initial_backoff: Duration::from_secs(5),
             rate_limit_max_backoff: Duration::from_secs(60),
             rate_limit_max_wait: Duration::from_secs(180),
         }
@@ -51,6 +56,7 @@ impl RetryPolicy {
             max_retries: 0,
             initial_backoff: Duration::ZERO,
             max_backoff: Duration::ZERO,
+            rate_limit_initial_backoff: Duration::ZERO,
             rate_limit_max_backoff: Duration::ZERO,
             rate_limit_max_wait: Duration::ZERO,
         }
@@ -65,7 +71,7 @@ impl RetryPolicy {
     /// The delay before retry `attempt` (0 for the first retry) of a rate limit.
     pub fn rate_limit_backoff(&self, attempt: u32, retry_after: Option<Duration>) -> Duration {
         jittered(
-            self.initial_backoff,
+            self.rate_limit_initial_backoff,
             attempt,
             self.rate_limit_max_backoff,
             retry_after,
@@ -228,6 +234,19 @@ mod tests {
         assert!(delays.len() > policy.max_retries as usize, "{delays:?}");
         // Rate-limit retries do not use up server-error retries.
         assert!(retrier.next_delay(false, None).is_some());
+    }
+
+    #[test]
+    fn rate_limits_back_off_for_seconds_not_milliseconds() {
+        let policy = RetryPolicy::default();
+        for _ in 0..100 {
+            let first = policy.rate_limit_backoff(0, None);
+            assert!((Duration::from_millis(2500)..=Duration::from_secs(5)).contains(&first));
+            let third = policy.rate_limit_backoff(2, None);
+            assert!((Duration::from_secs(10)..=Duration::from_secs(20)).contains(&third));
+            // Server errors keep their short backoff.
+            assert!(policy.backoff(0, None) <= Duration::from_millis(500));
+        }
     }
 
     #[test]
