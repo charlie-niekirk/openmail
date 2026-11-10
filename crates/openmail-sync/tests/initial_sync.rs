@@ -839,3 +839,41 @@ async fn a_stored_thread_gone_when_fetched_is_deleted() {
     // covers them and this listing did not include them.
     assert_eq!(done.deleted_threads, 5);
 }
+
+#[tokio::test]
+async fn a_rate_limit_burst_cuts_the_quota_rate_without_pausing_the_sync() {
+    let (server, client) = setup_retrying().await;
+    let mailbox = mailbox();
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    mount_inbox(&server, &mailbox).await;
+    mount_backfill(&server, &mailbox).await;
+    // A burst of rate limits: every thread is turned away once.
+    BatchResponder::new(mailbox)
+        .rate_limit_once(&["t1", "t2", "t3", "t4", "t5"])
+        .mount(&server)
+        .await;
+
+    let start = client.stats().units_per_second.unwrap();
+    let config = InitialSyncConfig {
+        rate_limit_pause: Duration::from_secs(60),
+        ..config()
+    };
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config);
+    let started = Instant::now();
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+
+    assert_eq!(done.threads, 5);
+    assert_eq!(done.rate_limited_requests, 5);
+    // The client slowed down and retried; the 60 s sync-level pause was never
+    // needed.
+    assert_eq!(pauses(&seen), 0);
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    let rate = done.units_per_second.unwrap();
+    assert!(rate < start, "{rate} vs {start}");
+}
