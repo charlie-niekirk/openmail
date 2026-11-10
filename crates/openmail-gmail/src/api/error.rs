@@ -91,6 +91,19 @@ pub(crate) struct Failure {
     pub(crate) retryable: bool,
 }
 
+impl Failure {
+    /// Whether this is a short-window rate limit, retried on its own budget.
+    pub(crate) fn is_rate_limit(&self) -> bool {
+        matches!(
+            self.error,
+            Error::Quota {
+                kind: QuotaKind::RateLimit,
+                ..
+            }
+        )
+    }
+}
+
 /// Reasons Gmail gives (in `error.errors[].reason`) for short-window limits.
 const RATE_LIMIT_REASONS: &[&str] = &[
     "rateLimitExceeded",

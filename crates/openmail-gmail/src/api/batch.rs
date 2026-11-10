@@ -17,6 +17,7 @@ use serde::de::DeserializeOwned;
 use super::client::parse_retry_after;
 use super::error::classify;
 use super::models::format_query;
+use super::retry::Retrier;
 use super::{ApiMessage, ApiThread, Error, GmailClient, MessageFormat, Result, ThreadFormat};
 
 /// The most calls Gmail accepts in one batch. (The API allows 100, but Gmail
@@ -137,16 +138,18 @@ impl GmailClient {
         mut pending: Vec<usize>,
         results: &mut [Option<Result<T>>],
     ) -> Result<()> {
-        let policy = *self.retry_policy();
+        let mut retrier = Retrier::new(*self.retry_policy());
         let mut refreshed = false;
-        let mut attempt = 0;
 
         loop {
             let (responses, token) = self.send_batch(requests, &pending).await?;
 
             let mut retry = Vec::new();
             let mut unauthorized = false;
-            let mut back_off = false;
+            // Items that failed retryably, with their errors in case retries
+            // are used up.
+            let mut retryable = Vec::new();
+            let mut rate_limited = false;
             let mut retry_after: Option<Duration> = None;
             for (index, response) in pending.iter().copied().zip(responses) {
                 let Some(response) = response else {
@@ -166,12 +169,25 @@ impl GmailClient {
                     continue;
                 }
                 let failure = classify(response.status, &response.body, response.retry_after);
-                if failure.retryable && attempt < policy.max_retries {
-                    back_off = true;
+                if failure.retryable {
+                    rate_limited |= failure.is_rate_limit();
                     retry_after = retry_after.max(response.retry_after);
-                    retry.push(index);
+                    retryable.push((index, failure.error));
                 } else {
                     results[index] = Some(Err(failure.error));
+                }
+            }
+
+            let mut delay = None;
+            if !retryable.is_empty() {
+                delay = retrier.next_delay(rate_limited, retry_after);
+                if delay.is_some() {
+                    retry.extend(retryable.iter().map(|(index, _)| *index));
+                    retry.sort_unstable();
+                } else {
+                    for (index, error) in retryable {
+                        results[index] = Some(Err(error));
+                    }
                 }
             }
 
@@ -185,9 +201,8 @@ impl GmailClient {
                     .await
                     .map_err(Error::Token)?;
             }
-            if back_off {
-                tokio::time::sleep(policy.backoff(attempt, retry_after)).await;
-                attempt += 1;
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
             }
             pending = retry;
         }

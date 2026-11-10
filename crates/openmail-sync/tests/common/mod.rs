@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use openmail_gmail::api::{GmailClient, RetryPolicy, TokenFuture, TokenProvider};
 use serde_json::{Value, json};
@@ -39,11 +38,7 @@ pub async fn setup() -> (MockServer, GmailClient) {
     let server = MockServer::start().await;
     let client = GmailClient::builder(Arc::new(StaticToken))
         .base_url(Url::parse(&server.uri()).unwrap())
-        .retry_policy(RetryPolicy {
-            max_retries: 0,
-            initial_backoff: Duration::from_millis(1),
-            max_backoff: Duration::from_millis(1),
-        })
+        .retry_policy(RetryPolicy::none())
         .build()
         .unwrap();
     (server, client)

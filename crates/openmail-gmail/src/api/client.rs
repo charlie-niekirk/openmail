@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::error::{Error, Result, classify};
+use super::retry::Retrier;
 use super::{RetryPolicy, TokenProvider};
 
 /// A typed client for the Gmail REST API (`gmail/v1`), acting as the signed-in
@@ -169,16 +170,18 @@ impl GmailClient {
         let inner = &*self.inner;
         let mut token = inner.tokens.access_token().await.map_err(Error::Token)?;
         let mut refreshed = false;
-        let mut attempt = 0;
+        let mut retrier = Retrier::new(inner.retry);
 
         loop {
             let response = match build(&inner.http).bearer_auth(&token).send().await {
                 Ok(response) => response,
-                Err(err) if err.is_timeout() && attempt < inner.retry.max_retries => {
-                    tokio::time::sleep(inner.retry.backoff(attempt, None)).await;
-                    attempt += 1;
-                    continue;
-                }
+                Err(err) if err.is_timeout() => match retrier.next_delay(false, None) {
+                    Some(delay) => {
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    None => return Err(err.into()),
+                },
                 Err(err) => return Err(err.into()),
             };
 
@@ -199,9 +202,10 @@ impl GmailClient {
             let retry_after = retry_after(&response);
             let body = response.bytes().await.unwrap_or_default();
             let failure = classify(status, &body, retry_after);
-            if failure.retryable && attempt < inner.retry.max_retries {
-                tokio::time::sleep(inner.retry.backoff(attempt, retry_after)).await;
-                attempt += 1;
+            if failure.retryable
+                && let Some(delay) = retrier.next_delay(failure.is_rate_limit(), retry_after)
+            {
+                tokio::time::sleep(delay).await;
                 continue;
             }
             return Err(failure.error);
