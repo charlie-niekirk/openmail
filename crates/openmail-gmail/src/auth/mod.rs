@@ -12,11 +12,13 @@ mod client;
 mod config;
 mod error;
 mod loopback;
+mod store;
 mod token;
 
 pub use client::{Authorization, OAuthClient};
 pub use config::{CLIENT_ID_ENV, CLIENT_SECRET_ENV, OAuthConfig};
 pub use error::AuthError;
+pub use store::{KeyringTokenStore, MemoryTokenStore, TokenStore};
 pub use token::AccessToken;
 
 /// Read, modify and label mail (not permanent deletion).

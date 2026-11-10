@@ -49,6 +49,9 @@ pub enum AuthError {
     /// The ID token was missing or did not carry a verified email address.
     #[error("could not read the account email from the ID token: {0}")]
     InvalidIdToken(String),
+    /// The token store (usually the OS keychain) could not be read or written.
+    #[error("token store failed: {0}")]
+    TokenStore(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl AuthError {
