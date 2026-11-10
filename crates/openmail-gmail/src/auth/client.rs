@@ -112,6 +112,10 @@ impl OAuthClient {
             oauth = oauth.set_client_secret(ClientSecret::new(secret.clone()));
         }
 
+        // reqwest is built without a rustls crypto provider; use ring, which the
+        // rest of the tree already links. An error means one is already installed.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         // The token endpoint never redirects; following one would be a way to leak
         // the authorization code or refresh token.
         let http = reqwest::Client::builder()

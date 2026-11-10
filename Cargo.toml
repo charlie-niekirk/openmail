@@ -33,17 +33,26 @@ gpui-component = "=0.9.1"
 gpui-webview = "=0.9.1"
 wry = { package = "lb-wry", version = "=0.53.3" }
 
-base64 = "0.22.1"
+base64 = "0.23.1"
 keyring = "4.2.0"
 oauth2 = { version = "5.0.0", default-features = false }
 open = "5.4.5"
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+# rustls with the ring provider (already in the tree via gpui), not aws-lc-rs.
+reqwest = { version = "0.13.5", default-features = false, features = [
+  "charset",
+  "http2",
+  "json",
+  "query",
+  "rustls-no-provider",
+  "system-proxy",
+] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10.9"
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["serde"] }
-tokio = "1.54.1"
+tokio = { version = "1.54.1", default-features = false }
 url = "2.5.8"
 wiremock = "0.6.5"
 
