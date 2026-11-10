@@ -50,10 +50,6 @@ impl Store {
     }
 
     /// The underlying connection, for this crate's queries.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the queries added next")
-    )]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -67,9 +63,17 @@ impl Store {
     where
         E: From<Error>,
     {
-        let guard = TxGuard::begin(&self.conn).map_err(Error::from)?;
+        let guard = TxGuard::begin(&self.conn, "BEGIN IMMEDIATE").map_err(Error::from)?;
         let value = f(self)?;
         guard.commit().map_err(Error::from)?;
+        Ok(value)
+    }
+
+    /// Runs read-only `f` on one consistent snapshot, without taking the write lock.
+    pub(crate) fn read<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let guard = TxGuard::begin(&self.conn, "BEGIN DEFERRED")?;
+        let value = f(self)?;
+        guard.commit()?;
         Ok(value)
     }
 }
@@ -97,14 +101,17 @@ struct TxGuard<'c> {
 impl<'c> TxGuard<'c> {
     const SAVEPOINT: &str = "openmail_store";
 
-    fn begin(conn: &'c Connection) -> rusqlite::Result<Self> {
+    /// Begins a transaction with `begin`, or a savepoint inside an outer one.
+    ///
+    /// Writers use `BEGIN IMMEDIATE`, which takes the write lock up front, so a
+    /// transaction that reads before it writes cannot fail to upgrade its lock
+    /// half-way through. Readers use `BEGIN DEFERRED`, which only reads.
+    fn begin(conn: &'c Connection, begin: &str) -> rusqlite::Result<Self> {
         let nested = !conn.is_autocommit();
         if nested {
             conn.execute_batch(&format!("SAVEPOINT {}", Self::SAVEPOINT))?;
         } else {
-            // IMMEDIATE takes the write lock up front, so a transaction that reads
-            // before it writes cannot fail to upgrade its lock half-way through.
-            conn.execute_batch("BEGIN IMMEDIATE")?;
+            conn.execute_batch(begin)?;
         }
         Ok(Self {
             conn,

@@ -41,6 +41,11 @@ pub enum Error {
     #[error("account ID {0:?} cannot be used as a directory name")]
     InvalidAccountId(String),
 
+    /// A row the operation needs is not stored, such as the message whose labels
+    /// are being set.
+    #[error("{0} is not in the store")]
+    NotFound(String),
+
     /// A value does not fit the database's column, such as a `u64` above `i64::MAX`.
     #[error("{0} is out of range for the database")]
     OutOfRange(&'static str),
