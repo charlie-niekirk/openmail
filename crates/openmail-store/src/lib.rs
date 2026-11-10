@@ -4,6 +4,7 @@
 //! can read while sync writes.
 
 mod error;
+mod migrations;
 mod paths;
 mod store;
 

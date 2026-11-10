@@ -7,7 +7,7 @@ use std::time::Duration;
 use openmail_core::AccountId;
 use rusqlite::Connection;
 
-use crate::{DataDir, Error, Result};
+use crate::{DataDir, Error, Result, migrations};
 
 /// How long a statement waits for another connection's lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -43,8 +43,9 @@ impl Store {
         Self::setup(Connection::open_in_memory()?)
     }
 
-    fn setup(conn: Connection) -> Result<Self> {
+    fn setup(mut conn: Connection) -> Result<Self> {
         configure(&conn)?;
+        migrations::migrate(&mut conn)?;
         Ok(Self { conn })
     }
 
