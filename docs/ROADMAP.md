@@ -97,7 +97,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
     `threads.get`), never storing threads that span the cutoff partially.
 - [x] **2.5 Offline ops queue** — `feat/2.5-ops-queue`
   - Optimistic local apply, persisted queue, replay with retries, conflict handling.
-- [ ] **2.6 MailService** — `feat/2.6-mail-service`
+- [x] **2.6 MailService** — `feat/2.6-mail-service`
   - Tokio runtime, command and event channels.
   - Lazy body fetch with prefetch.
   - The public API the UI consumes.
