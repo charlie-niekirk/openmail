@@ -1,11 +1,12 @@
 //! Gmail API calls.
 
-use openmail_core::{LabelId, MessageId, ThreadId};
+use openmail_core::{AttachmentId, LabelId, MessageId, ThreadId};
 
 use super::models::format_query;
 use super::{
-    ApiLabel, ApiMessage, ApiThread, GmailClient, ListLabelsResponse, ListMessagesResponse,
-    ListRequest, ListThreadsResponse, MessageFormat, Profile, Result, ThreadFormat,
+    ApiLabel, ApiMessage, ApiThread, Error, GmailClient, HistoryRequest, ListHistoryResponse,
+    ListLabelsResponse, ListMessagesResponse, ListRequest, ListThreadsResponse, MessageFormat,
+    MessagePartBody, Profile, Result, ThreadFormat,
 };
 
 impl GmailClient {
@@ -61,5 +62,40 @@ impl GmailClient {
     ) -> Result<ApiMessage> {
         let query = format_query(format.as_str(), metadata_headers);
         self.get_json(&["messages", id.as_str()], &query).await
+    }
+
+    /// `messages.attachments.get`: an attachment's content. Decode it with
+    /// [`MessagePartBody::decode_data`].
+    ///
+    /// Gmail attachment IDs change between fetches of a message, so use one
+    /// from a recent `messages.get`.
+    pub async fn get_attachment(
+        &self,
+        message_id: &MessageId,
+        attachment_id: &AttachmentId,
+    ) -> Result<MessagePartBody> {
+        let segments = [
+            "messages",
+            message_id.as_str(),
+            "attachments",
+            attachment_id.as_str(),
+        ];
+        self.get_json(&segments, &[]).await
+    }
+
+    /// `history.list`: one page of mailbox changes after
+    /// `request.start_history_id`, oldest first.
+    ///
+    /// Returns [`Error::HistoryExpired`] if Gmail no longer has history that
+    /// far back (it answers `404`); the caller must then do a full sync.
+    pub async fn list_history(&self, request: &HistoryRequest) -> Result<ListHistoryResponse> {
+        self.get_json(&["history"], &request.to_query())
+            .await
+            .map_err(|err| match err {
+                Error::NotFound { .. } => Error::HistoryExpired {
+                    start: request.start_history_id,
+                },
+                other => other,
+            })
     }
 }

@@ -1,0 +1,52 @@
+{
+  "history": [
+    {
+      "id": "1029381",
+      "messages": [
+        {
+          "id": "18c3a4cc00000004",
+          "threadId": "18c3a1f2b4d5e6f7"
+        }
+      ],
+      "messagesAdded": [
+        {
+          "message": {
+            "id": "18c3a4cc00000004",
+            "threadId": "18c3a1f2b4d5e6f7",
+            "labelIds": [
+              "UNREAD",
+              "INBOX",
+              "CATEGORY_PERSONAL"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "1029390",
+      "messages": [
+        {
+          "id": "18c3a3bb00000003",
+          "threadId": "18c3a1f2b4d5e6f7"
+        }
+      ],
+      "labelsRemoved": [
+        {
+          "message": {
+            "id": "18c3a3bb00000003",
+            "threadId": "18c3a1f2b4d5e6f7",
+            "labelIds": [
+              "INBOX",
+              "Label_12"
+            ]
+          },
+          "labelIds": [
+            "UNREAD"
+          ]
+        }
+      ]
+    }
+  ],
+  "nextPageToken": "history-page-2",
+  "historyId": "1029420"
+}

@@ -359,6 +359,155 @@ pub(crate) fn format_query(format: &str, metadata_headers: &[&str]) -> Vec<(&'st
     query
 }
 
+/// One change record from `history.list`.
+///
+/// Each record lists the messages it touched in `messages`, and what changed in
+/// the typed lists (only the types requested are filled in).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct History {
+    pub id: HistoryId,
+    #[serde(default)]
+    pub messages: Vec<ApiMessage>,
+    #[serde(default)]
+    pub messages_added: Vec<HistoryMessage>,
+    #[serde(default)]
+    pub messages_deleted: Vec<HistoryMessage>,
+    #[serde(default)]
+    pub labels_added: Vec<HistoryLabelChange>,
+    #[serde(default)]
+    pub labels_removed: Vec<HistoryLabelChange>,
+}
+
+/// A message added to or deleted from the mailbox.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HistoryMessage {
+    /// The message's `id`, `thread_id` and (when added) `label_ids`.
+    pub message: ApiMessage,
+}
+
+/// Labels added to or removed from a message.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryLabelChange {
+    /// The message, with its `label_ids` after the change.
+    pub message: ApiMessage,
+    /// The labels that were added or removed.
+    pub label_ids: Vec<LabelId>,
+}
+
+/// The `history.list` response.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListHistoryResponse {
+    #[serde(default)]
+    pub history: Vec<History>,
+    pub next_page_token: Option<String>,
+    /// The mailbox's current history ID: where the next incremental sync starts
+    /// once every page has been applied.
+    pub history_id: HistoryId,
+}
+
+/// A kind of change `history.list` can report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HistoryType {
+    MessageAdded,
+    MessageDeleted,
+    LabelAdded,
+    LabelRemoved,
+}
+
+impl HistoryType {
+    /// Every history type.
+    pub const ALL: [Self; 4] = [
+        Self::MessageAdded,
+        Self::MessageDeleted,
+        Self::LabelAdded,
+        Self::LabelRemoved,
+    ];
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::MessageAdded => "messageAdded",
+            Self::MessageDeleted => "messageDeleted",
+            Self::LabelAdded => "labelAdded",
+            Self::LabelRemoved => "labelRemoved",
+        }
+    }
+}
+
+/// Parameters for `history.list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub struct HistoryRequest {
+    /// Return changes after this history ID, typically the last one stored.
+    pub start_history_id: HistoryId,
+    /// Only report these kinds of change. Empty means all.
+    pub history_types: Vec<HistoryType>,
+    /// Only report changes to messages carrying this label.
+    pub label_id: Option<LabelId>,
+    /// The page to fetch, from a previous response's `next_page_token`.
+    pub page_token: Option<String>,
+    /// Records per page. Gmail defaults to 100 and allows up to 500.
+    pub max_results: Option<u32>,
+}
+
+impl HistoryRequest {
+    /// Every change after `start_history_id`.
+    pub fn new(start_history_id: HistoryId) -> Self {
+        Self {
+            start_history_id,
+            history_types: Vec::new(),
+            label_id: None,
+            page_token: None,
+            max_results: None,
+        }
+    }
+
+    /// Only reports these kinds of change.
+    pub fn history_types(mut self, types: impl IntoIterator<Item = HistoryType>) -> Self {
+        self.history_types = types.into_iter().collect();
+        self
+    }
+
+    /// Only reports changes to messages carrying this label.
+    pub fn label(mut self, id: impl Into<LabelId>) -> Self {
+        self.label_id = Some(id.into());
+        self
+    }
+
+    /// Starts from this page token.
+    pub fn page_token(mut self, token: impl Into<String>) -> Self {
+        self.page_token = Some(token.into());
+        self
+    }
+
+    /// Sets the page size.
+    pub fn max_results(mut self, n: u32) -> Self {
+        self.max_results = Some(n);
+        self
+    }
+
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        let mut query = vec![("startHistoryId", self.start_history_id.to_string())];
+        query.extend(
+            self.history_types
+                .iter()
+                .map(|t| ("historyTypes", t.as_str().to_owned())),
+        );
+        if let Some(id) = &self.label_id {
+            query.push(("labelId", id.as_str().to_owned()));
+        }
+        if let Some(token) = &self.page_token {
+            query.push(("pageToken", token.clone()));
+        }
+        if let Some(n) = self.max_results {
+            query.push(("maxResults", n.to_string()));
+        }
+        query
+    }
+}
+
 /// Base64url as Gmail sends it: URL-safe alphabet, padding optional.
 const BASE64URL: GeneralPurpose = GeneralPurpose::new(
     &URL_SAFE,
@@ -450,6 +599,27 @@ mod tests {
         assert_eq!(
             format_query("full", &["From"]),
             vec![("format", "full".to_owned())]
+        );
+    }
+
+    #[test]
+    fn history_request_builds_its_query() {
+        let query = HistoryRequest::new(HistoryId::new(42))
+            .history_types([HistoryType::MessageAdded, HistoryType::LabelRemoved])
+            .label("INBOX")
+            .page_token("p")
+            .max_results(500)
+            .to_query();
+        assert_eq!(
+            query,
+            vec![
+                ("startHistoryId", "42".to_owned()),
+                ("historyTypes", "messageAdded".to_owned()),
+                ("historyTypes", "labelRemoved".to_owned()),
+                ("labelId", "INBOX".to_owned()),
+                ("pageToken", "p".to_owned()),
+                ("maxResults", "500".to_owned()),
+            ]
         );
     }
 
