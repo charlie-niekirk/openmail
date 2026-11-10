@@ -34,6 +34,8 @@ gpui-webview = "=0.9.1"
 wry = { package = "lb-wry", version = "=0.53.3" }
 
 base64 = "0.23.1"
+fastrand = "2.5.0"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 keyring = "4.2.0"
 oauth2 = { version = "5.0.0", default-features = false }
 open = "5.4.5"
