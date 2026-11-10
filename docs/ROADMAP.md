@@ -80,7 +80,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 - [ ] **2.2 Queries and benchmarks** — `feat/2.2-queries-bench`
   - Keyset-paginated threads by label, unread counts per label, thread detail.
   - Criterion benchmark over 100k synthetic threads; first page loads in < 5 ms.
-- [ ] **2.3 Initial sync** — `feat/2.3-initial-sync`
+- [x] **2.3 Initial sync** — `feat/2.3-initial-sync`
   - Labels → Inbox → backfill, using batched metadata fetches.
   - Checkpointed `historyId` and resumable progress.
 - [ ] **2.4 Incremental sync** — `feat/2.4-incremental-sync`
