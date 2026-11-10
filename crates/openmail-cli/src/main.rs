@@ -26,6 +26,7 @@ use crate::cli::{Cli, Command};
 fn main() -> ExitCode {
     let cli = Cli::parse();
     init_tracing();
+    session::set_quota_per_minute(cli.quota_per_minute);
     // Read the local UTC offset while this is the only thread: the `time` crate
     // refuses to once others are running.
     let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);

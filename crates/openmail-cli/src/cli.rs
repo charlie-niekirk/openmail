@@ -13,6 +13,17 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "EMAIL")]
     pub account: Option<String>,
 
+    /// Your Google Cloud project's Gmail "Units per minute per user" quota
+    /// (6,000 by default for new projects; also read from
+    /// OPENMAIL_GMAIL_QUOTA_PER_MINUTE). Openmail uses 80% of it.
+    #[arg(
+        long,
+        global = true,
+        value_name = "UNITS",
+        value_parser = clap::value_parser!(u32).range(60..)
+    )]
+    pub quota_per_minute: Option<u32>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -289,6 +300,17 @@ mod tests {
             let err = parse(&["sync", "--rate", rate]).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::ValueValidation, "{rate}");
         }
+    }
+
+    #[test]
+    fn quota_per_minute_is_global() {
+        let cli = parse(&["sync", "--quota-per-minute", "15000"]).unwrap();
+        assert_eq!(cli.quota_per_minute, Some(15_000));
+        let cli = parse(&["--quota-per-minute", "6000", "watch"]).unwrap();
+        assert_eq!(cli.quota_per_minute, Some(6_000));
+        assert_eq!(parse(&["watch"]).unwrap().quota_per_minute, None);
+        let err = parse(&["watch", "--quota-per-minute", "0"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
     }
 
     #[test]

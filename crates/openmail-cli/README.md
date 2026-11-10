@@ -55,11 +55,20 @@ cargo run -p openmail-cli -- logout
 | `labels` | Lists system labels, then user labels nested under their parents, with message and unread counts and label IDs. |
 | `threads <label> [-n N] [-q Q]` | Lists the newest threads in a label: thread ID, date, an unread `*`, senders and message count, subject and snippet. The label is an ID (`INBOX`, `Label_12`) or a name (`Drafts`, `Work/Projects`). `--query` takes [Gmail search syntax](https://support.google.com/mail/answer/7190). |
 | `show <thread-id>` | Prints each message's headers, its text body (or text converted from the HTML body) and its attachment names. |
-| `sync [--days N \| --all] [--prefetch N] [--batch-size N] [--batch-concurrency N] [--rate N]` | Runs the initial sync into the account's local store: labels, Inbox threads, then other threads, each with mail in the last `N` days (90 by default; `--all` for the whole mailbox), newest first, with a progress line. `--prefetch` also fetches the bodies of the `N` newest Inbox messages. Ctrl-C stops it; running it again continues where it stopped. Once the sync is complete it does nothing (delete `mail.db` to start over). The progress line counts requests Gmail rate-limited and that were retried; it also shows the quota rate in units per second, which starts at 150, halves whenever Gmail rate-limits a request and climbs back by 10 every 10 s (up to 240) unless `--rate N` fixes it. `--batch-size` (default 10) and `--batch-concurrency` (default 2) tune how thread metadata is batched, and `RUST_LOG=openmail_gmail=debug` logs each batch's size, latency and failures. |
+| `sync [--days N \| --all] [--prefetch N] [--batch-size N] [--batch-concurrency N] [--rate N]` | Runs the initial sync into the account's local store: labels, Inbox threads, then other threads, each with mail in the last `N` days (90 by default; `--all` for the whole mailbox), newest first, with a progress line. `--prefetch` also fetches the bodies of the `N` newest Inbox messages. Ctrl-C stops it; running it again continues where it stopped. Once the sync is complete it does nothing (delete `mail.db` to start over). The progress line counts requests Gmail rate-limited and that were retried; it also shows the quota rate in units per second: 80% of the per-minute quota (see below). If Gmail rate-limits a request anyway, the client stops for 15 s or more, resumes at 70% of the rate that was limited and probes back up by 5 units/s every 30 s, unless `--rate N` fixes the rate. `--batch-size` (default 5) and `--batch-concurrency` (default 2) tune how thread metadata is batched, and `RUST_LOG=openmail_gmail=debug` logs each batch's size, latency and failures. |
 | `watch [--interval S]` | Keeps the local store in sync until Ctrl-C: finishes the initial sync if needed (the last 90 days), then polls Gmail's history every `S` seconds (30 by default) and prints a line per poll with the changes applied: threads fetched or deleted, label changes, and the history ID. Network failures back off (5 s doubling to 5 min) and print `offline`/`online`. If Gmail's history has expired, it runs a full resync. `RUST_LOG=openmail_sync=debug` logs each page of history. |
 
 `--account <email>` picks an account when you have signed in with several; with
-one, it is used by default. Set `RUST_LOG` for logs on stderr, for example
+one, it is used by default.
+
+Gmail limits how many quota units a user may spend each minute, and a Cloud
+project may allow only **6,000 units per minute per user** (Openmail's
+default; it used to be 15,000). Openmail paces itself to 80% of that, so a 30-day `sync` of about
+1,000 threads takes roughly 2 minutes. If you own the project, you can raise
+the limit in [Cloud Console](https://console.cloud.google.com/) under
+**APIs & Services → Gmail API → Quotas** ("Units per minute per user"), then
+tell Openmail with `--quota-per-minute N` or `OPENMAIL_GMAIL_QUOTA_PER_MINUTE=N`.
+`sync --rate N` instead fixes the rate at N units a second. Set `RUST_LOG` for logs on stderr, for example
 `RUST_LOG=debug` or `RUST_LOG=openmail_cli=debug,reqwest=debug`.
 
 ### Where things are kept
