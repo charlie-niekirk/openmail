@@ -356,39 +356,48 @@ thread detail never sort), and
    operator; older threads are left for on-demand fetching), in
    `threads.list` pages of 100. Each page's thread metadata (`format=metadata`
    with From, To, Cc, Subject, Date and Message-ID) is fetched in batches of 10,
-   several in flight (Gmail works through a large batch slowly and throttles it;
-   see the quota note below), and written in one transaction together with a JSON checkpoint (phase, page
-   token, cutoff) in `sync_state.backfill_cursor`, so a failed or cancelled sync
-   resumes at the next page. Threads already stored with the same history ID are
-   not fetched again. Optionally, the newest Inbox bodies are fetched
+   two in flight (Gmail works through a large batch slowly and throttles it;
+   see the quota note below), and written in one transaction together with a
+   JSON checkpoint (phase, page token, cutoff) in `sync_state.backfill_cursor`,
+   so a failed or cancelled sync resumes at the next page. Threads already
+   stored with the same history ID are not fetched again. Optionally, the newest Inbox bodies are fetched
    (`format=raw`, parsed by `openmail-mime`) between the Inbox and the backfill.
 
-   **Gmail quota.** Gmail limits each user to 15,000 quota units a minute, and
-   calls cost from 1 unit (`labels.list`) to 10 (`threads.get`) or more, so one
-   batch of 50 `threads.get` costs 500. `GmailClient` charges every request,
-   and every item of a batch, its documented cost to a token bucket shared by
-   its clones (200 units/s with bursts of 1,000 by default, at most 13,000 in
-   any minute) before sending it. Rate-limit responses are retried on their own
-   budget: delays of up to 60 s, three minutes in all, honouring `Retry-After`.
-   If a rate limit still gets through, `InitialSync` reports the wait, pauses
-   and resumes from its checkpoint within the same run. Batches log their size,
-   latency and failures at debug level, and the client counts retried and
-   rate-limited requests (`GmailClient::stats`) for progress reports.
+   **Gmail quota.** Gmail limits each user to 15,000 quota units a minute (a
+   moving average of about 250 a second), and calls cost from 1 unit
+   (`labels.list`) to 10 (`threads.get`) or more, so one batch of 10
+   `threads.get` costs 100. `GmailClient` charges every request, and every item
+   of a batch, its documented cost to a token bucket shared by its clones
+   before sending it. Bursts are one second's worth at the current rate, so an
+   idle spell or a pause never releases a burst that breaks the moving average
+   on its own.
 
-   **Batch concurrency.** The units budget is not the only limit: Gmail also
-   throttles each user's concurrent requests ("too many concurrent requests for
-   user"), at a level that varies by account and over time. With a fixed four
-   batches of 10 in flight, a real 30-day sync had 74% of its items
-   rate-limited and spent most of its time in backoff. So how many batches are
-   in flight is an AIMD controller (like TCP congestion control) shared by a
-   client's clones: it starts at 2, adds one after 4 clean batches (up to 6),
-   and halves (down to 1) when a batch comes back with rate-limited items, then
-   ignores results for a 3 s cooldown, since batches already in flight were sent
-   at the old level. Retries wait for a slot like new batches. The quota
-   limiter remains the hard cap. `GmailClientBuilder::batch_concurrency` (the
-   CLI's `--batch-concurrency`) fixes the level instead, and
-   `ClientStats::batch_concurrency` reports the current one; changes are logged
-   at debug level.
+   The documented limit is not the effective one: in a real 30-day sync, Gmail
+   started answering "Total Query Cost / Units per minute per user" rate limits
+   about 3 s in, at roughly 570 units/s, and then turned away nearly every item
+   while the client retried every half second (failed calls seem to count
+   too). So by default the bucket's rate adapts, like TCP congestion control
+   (`QuotaPacing::Adaptive`): it starts at 150 units/s; when Gmail rate-limits
+   a request or a batch item, it halves (down to 25) and the bucket is emptied
+   (debt is kept), so nothing goes out in a burst straight after; a rate limit
+   on a request sent before the last halving is ignored, since the old rate
+   caused it; and after every 10 s without a rate limit it rises by 10, up to
+   240. Concurrency is not the binding limit (an earlier AIMD controller over
+   batches in flight ramped up and collapsed every cycle), so two batches of 10
+   are in flight at once by default, enough to hide latency, with the limiter
+   doing the pacing. `GmailClientBuilder::quota_limit` (the CLI's `--rate`)
+   fixes the rate instead, and `batch_concurrency` (`--batch-concurrency`) and
+   `batch_size` (`--batch-size`) tune batching. `ClientStats::units_per_second`
+   reports the current rate, and rate changes are logged at debug level.
+
+   Rate-limit responses are retried on their own budget, starting at 5 s and
+   growing to at most 60 s apart, three minutes in all, honouring
+   `Retry-After`; server errors and timeouts back off from 0.5 s. If a rate
+   limit still outlasts that, `InitialSync` reports the wait, pauses for 60 s
+   and resumes from its checkpoint within the same run, a last resort now that
+   the rate halves on every rate limit. Batches log their size, latency and
+   failures at debug level, and the client counts retried and rate-limited
+   requests (`GmailClient::stats`) for progress reports.
 2. **Incremental sync.** `HistorySync` polls `history.list` from the stored
    `historyId`, in pages of 500 records, once the initial sync is complete.
    Each page is applied in one transaction that also advances the stored
