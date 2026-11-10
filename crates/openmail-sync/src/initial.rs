@@ -118,6 +118,10 @@ pub struct Progress {
     pub skipped_threads: u64,
     /// Message bodies prefetched.
     pub bodies: u64,
+    /// Stored threads deleted because they no longer exist on the server:
+    /// gone when fetched, or (at the end of a sync that started afresh) not
+    /// listed although within the cutoff.
+    pub deleted_threads: u64,
     /// Set while the sync is paused for Gmail's rate limit: how long it waits
     /// before resuming.
     pub rate_limit_wait: Option<std::time::Duration>,
@@ -174,6 +178,29 @@ impl InitialSync {
     /// Gives the store back.
     pub fn into_store(self) -> Store {
         self.store
+    }
+
+    /// Makes the next [`run`](Self::run) a full resync, as when Gmail no
+    /// longer has history back to the stored `historyId`.
+    ///
+    /// Clears the history ID, the checkpoint and `backfill_complete`, so the
+    /// next run starts afresh: it records the mailbox's current history ID,
+    /// lists every thread down to the configured cutoff, and fetches those
+    /// whose history ID differs from the stored copy. Stored rows are kept
+    /// meanwhile. When it finishes, stored threads within the cutoff that it
+    /// did not list are deleted, since they no longer exist (or are now in
+    /// Spam or Trash, which the sync does not list); older threads are kept.
+    pub fn reset(store: &Store) -> Result<()> {
+        store.transaction(|store| {
+            let state = store.sync_state()?;
+            store.set_sync_state(&SyncState {
+                history_id: None,
+                backfill_cursor: None,
+                backfill_complete: false,
+                last_full_sync: state.last_full_sync,
+            })
+        })?;
+        Ok(())
     }
 
     /// Runs (or resumes) the sync until it finishes, fails or `cancel` fires.
@@ -298,7 +325,7 @@ impl InitialSync {
                             .await?;
                     }
                     checkpoint = checkpoint.next_phase();
-                    self.save(Some(&checkpoint))?;
+                    self.save(&checkpoint)?;
                 }
                 CheckpointPhase::Backfill => {
                     report.phase = Phase::Backfill;
@@ -326,8 +353,10 @@ impl InitialSync {
             page_token: None,
             after: self.config.cutoff.after(OffsetDateTime::now_utc()),
             inbox_cutoff: true,
+            sweep: true,
         };
         self.store.transaction(|store| {
+            store.clear_seen_threads()?;
             let state = SyncState {
                 history_id: Some(profile.history_id),
                 backfill_cursor: Some(checkpoint.encode()),
@@ -372,23 +401,30 @@ impl InitialSync {
                 ..request.clone()
             };
             let page = cancellable(cancel, self.client.list_threads(&request)).await?;
-            let listed = page.threads.len();
+            let listed: Vec<ThreadId> = page.threads.iter().map(|t| t.id.clone()).collect();
             let fetch = self.changed_threads(page.threads)?;
-            let threads = self.fetch_threads(cancel, &fetch).await?;
+            let (threads, gone) = self.fetch_threads(cancel, &fetch).await?;
 
             checkpoint = match page.next_page_token.filter(|t| !t.is_empty()) {
                 Some(token) => checkpoint.with_page_token(token),
                 None => checkpoint.next_phase(),
             };
-            let next = (checkpoint.phase != CheckpointPhase::Done).then_some(&checkpoint);
-            self.store.transaction(|store| {
+            let deleted = self.store.transaction(|store| {
                 store.replace_threads(&threads)?;
-                save_checkpoint(store, next)
+                let mut deleted = 0;
+                for id in &gone {
+                    deleted += u64::from(store.delete_thread(id)?);
+                }
+                if checkpoint.sweep {
+                    store.mark_threads_seen(&listed)?;
+                }
+                Ok::<_, Error>(deleted + save_checkpoint(store, &checkpoint)?)
             })?;
 
             report.threads += threads.len() as u64;
             report.messages += threads.iter().map(|(_, m)| m.len() as u64).sum::<u64>();
-            report.skipped_threads += (listed - threads.len()) as u64;
+            report.skipped_threads += (listed.len() - threads.len()) as u64;
+            report.deleted_threads += deleted;
             progress(report);
         }
         Ok(checkpoint)
@@ -406,32 +442,13 @@ impl InitialSync {
     }
 
     /// Fetches thread metadata in batches. Threads deleted since they were
-    /// listed are left out.
+    /// listed are returned separately.
     async fn fetch_threads(
         &mut self,
         cancel: &CancellationToken,
         ids: &[ThreadId],
-    ) -> Result<Vec<(openmail_core::Thread, Vec<openmail_core::Message>)>> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let results = cancellable(
-            cancel,
-            self.client
-                .get_threads(ids, ThreadFormat::Metadata, SYNC_HEADERS),
-        )
-        .await?;
-        let mut threads = Vec::with_capacity(ids.len());
-        for (id, result) in ids.iter().zip(results) {
-            match result {
-                Ok(thread) => threads.push(thread.into_domain()?),
-                Err(api::Error::NotFound { .. }) => {
-                    tracing::debug!(thread = %id, "thread deleted before it was fetched");
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
-        Ok(threads)
+    ) -> Result<FetchedThreads> {
+        fetch_threads(&self.client, cancel, ids).await
     }
 
     /// Fetches and stores bodies for the newest `limit` Inbox messages that do
@@ -478,11 +495,48 @@ impl InitialSync {
         Ok(())
     }
 
-    fn save(&self, checkpoint: Option<&Checkpoint>) -> Result<()> {
-        Ok(self
-            .store
-            .transaction(|store| save_checkpoint(store, checkpoint))?)
+    fn save(&self, checkpoint: &Checkpoint) -> Result<()> {
+        self.store
+            .transaction(|store| save_checkpoint(store, checkpoint))?;
+        Ok(())
     }
+}
+
+/// Fetched threads with their messages, and the IDs of threads that turned
+/// out to be deleted.
+pub(crate) type FetchedThreads = (
+    Vec<(openmail_core::Thread, Vec<openmail_core::Message>)>,
+    Vec<ThreadId>,
+);
+
+/// Fetches thread metadata (with [`SYNC_HEADERS`]) in batches. Threads that
+/// no longer exist are returned separately.
+pub(crate) async fn fetch_threads(
+    client: &GmailClient,
+    cancel: &CancellationToken,
+    ids: &[ThreadId],
+) -> Result<FetchedThreads> {
+    if ids.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let results = cancellable(
+        cancel,
+        client.get_threads(ids, ThreadFormat::Metadata, SYNC_HEADERS),
+    )
+    .await?;
+    let mut threads = Vec::with_capacity(ids.len());
+    let mut gone = Vec::new();
+    for (id, result) in ids.iter().zip(results) {
+        match result {
+            Ok(thread) => threads.push(thread.into_domain()?),
+            Err(api::Error::NotFound { .. }) => {
+                tracing::debug!(thread = %id, "thread deleted before it was fetched");
+                gone.push(id.clone());
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok((threads, gone))
 }
 
 /// Parses a `format=raw` message into a body. A body that does not parse is
@@ -509,26 +563,40 @@ fn parse_body(
     }
 }
 
-/// Saves `checkpoint` as the place to resume from, or marks the sync complete
-/// if there is none.
-fn save_checkpoint(
-    store: &Store,
-    checkpoint: Option<&Checkpoint>,
-) -> Result<(), openmail_store::Error> {
+/// Saves `checkpoint` as the place to resume from or, once it is
+/// [done](CheckpointPhase::Done), marks the sync complete and deletes stored
+/// threads within the cutoff that the sync did not list (if it tracked them).
+/// Returns how many threads were deleted.
+fn save_checkpoint(store: &Store, checkpoint: &Checkpoint) -> Result<u64, openmail_store::Error> {
     let mut state = store.sync_state()?;
-    match checkpoint {
-        Some(checkpoint) => state.backfill_cursor = Some(checkpoint.encode()),
-        None => {
-            state.backfill_cursor = None;
-            state.backfill_complete = true;
-            state.last_full_sync = Some(OffsetDateTime::now_utc());
+    let mut deleted = 0;
+    if checkpoint.phase == CheckpointPhase::Done {
+        state.backfill_cursor = None;
+        state.backfill_complete = true;
+        state.last_full_sync = Some(OffsetDateTime::now_utc());
+        if checkpoint.sweep {
+            let since = checkpoint
+                .after
+                .map(|secs| {
+                    OffsetDateTime::from_unix_timestamp(secs).map_err(|err| {
+                        openmail_store::Error::Corrupt(format!("checkpoint cutoff: {err}"))
+                    })
+                })
+                .transpose()?;
+            deleted = store.delete_unseen_threads(since)? as u64;
+            if deleted > 0 {
+                tracing::info!(deleted, "deleted threads that no longer exist");
+            }
         }
+    } else {
+        state.backfill_cursor = Some(checkpoint.encode());
     }
-    store.set_sync_state(&state)
+    store.set_sync_state(&state)?;
+    Ok(deleted)
 }
 
 /// Waits for `future` unless `cancel` fires first.
-async fn cancellable<T>(
+pub(crate) async fn cancellable<T>(
     cancel: &CancellationToken,
     future: impl Future<Output = api::Result<T>>,
 ) -> Result<T> {
@@ -555,6 +623,11 @@ struct Checkpoint {
     /// unbounded listing.
     #[serde(default)]
     inbox_cutoff: bool,
+    /// Whether listed threads are recorded, so that stored threads the sync
+    /// did not list can be deleted when it finishes. Checkpoints written
+    /// before this lack it, and have not recorded their earlier pages.
+    #[serde(default)]
+    sweep: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -644,10 +717,11 @@ mod tests {
             page_token: None,
             after: Some(1_700_000_000),
             inbox_cutoff: true,
+            sweep: true,
         };
         assert_eq!(
             start.encode(),
-            r#"{"phase":"inbox","after":1700000000,"inbox_cutoff":true}"#
+            r#"{"phase":"inbox","after":1700000000,"inbox_cutoff":true,"sweep":true}"#
         );
         let paged = start.clone().with_page_token("p2".to_owned());
         assert_eq!(Checkpoint::decode(&paged.encode()), Some(paged.clone()));
@@ -668,6 +742,8 @@ mod tests {
         assert_eq!(old.phase, CheckpointPhase::Inbox);
         assert_eq!(old.page_token, None);
         assert!(old.inbox_cutoff);
+        // Its earlier pages were not recorded, so nothing is swept.
+        assert!(!old.sweep);
 
         // Without a cutoff the listing is the same, so the token stays valid.
         let all =
