@@ -198,7 +198,7 @@ async fn inputs_are_split_into_batches_of_the_default_size() {
 
     let mut sizes: Vec<_> = responder.calls().iter().map(|c| c.parts.len()).collect();
     sizes.sort_unstable();
-    assert_eq!(sizes, [5, 10, 10, 10]);
+    assert_eq!(sizes, [5, 5, 5, 5]);
     // Batches finish in any order; results keep the input order.
     let got: Vec<_> = results.into_iter().map(|r| r.unwrap().id).collect();
     assert_eq!(got, ids);

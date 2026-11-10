@@ -27,12 +27,13 @@ use super::{ApiMessage, ApiThread, Error, GmailClient, MessageFormat, Result, Th
 pub const MAX_BATCH_SIZE: usize = 50;
 
 /// Calls per batch by default. Gmail works through a batch's calls slowly
-/// and throttles large batches ("too many concurrent requests for user"), so
-/// several small batches in flight beat one large one.
-pub const DEFAULT_BATCH_SIZE: usize = 10;
+/// and enforces its per-user quota over short windows, so small batches spread
+/// the load: 5 `threads.get` cost 50 units, well under a second of the default
+/// budget.
+pub const DEFAULT_BATCH_SIZE: usize = 5;
 
 /// Batch requests in flight at once by default: enough to hide latency, while
-/// the quota limiter does the pacing.
+/// the quota limiter spaces out when each is sent.
 pub const DEFAULT_BATCH_CONCURRENCY: usize = 2;
 
 /// One call inside a batch: a method on a `users/me` resource.
