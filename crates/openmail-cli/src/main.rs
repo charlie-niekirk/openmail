@@ -89,8 +89,14 @@ async fn run(cli: Cli, offset: UtcOffset) -> anyhow::Result<()> {
             days,
             all,
             prefetch,
+            batch_size,
+            batch_concurrency,
         } => {
-            let (account, client) = session::account_client(account)?;
+            let (account, client) = session::account_client_with(account, |builder| {
+                builder
+                    .batch_size(batch_size)
+                    .batch_concurrency(batch_concurrency)
+            })?;
             let cutoff = if all { Cutoff::All } else { Cutoff::Days(days) };
             sync::run(client, &account, cutoff, prefetch).await
         }

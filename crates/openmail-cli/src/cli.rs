@@ -1,6 +1,8 @@
 //! Command-line arguments.
 
+use clap::builder::TypedValueParser as _;
 use clap::{Parser, Subcommand};
+use openmail_gmail::api::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE};
 
 /// Openmail developer CLI: exercise the Gmail client against a real account
 /// without the desktop UI.
@@ -65,6 +67,22 @@ pub enum Command {
         /// Also fetch the bodies of the N newest Inbox messages.
         #[arg(long, value_name = "N")]
         prefetch: Option<usize>,
+        /// Calls per Gmail batch request (1 to 50), for tuning throughput.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = DEFAULT_BATCH_SIZE,
+            value_parser = clap::value_parser!(u16).range(1..=50).map(usize::from)
+        )]
+        batch_size: usize,
+        /// Batch requests in flight at once (1 to 16), for tuning throughput.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = DEFAULT_BATCH_CONCURRENCY,
+            value_parser = clap::value_parser!(u16).range(1..=16).map(usize::from)
+        )]
+        batch_concurrency: usize,
     },
 }
 
@@ -201,16 +219,31 @@ mod tests {
                 days: 90,
                 all: false,
                 prefetch: None,
+                batch_size: DEFAULT_BATCH_SIZE,
+                batch_concurrency: DEFAULT_BATCH_CONCURRENCY,
             }
         );
 
-        let cli = parse(&["sync", "--days", "7", "--prefetch", "50"]).unwrap();
+        let cli = parse(&[
+            "sync",
+            "--days",
+            "7",
+            "--prefetch",
+            "50",
+            "--batch-size",
+            "20",
+            "--batch-concurrency",
+            "2",
+        ])
+        .unwrap();
         assert_eq!(
             cli.command,
             Command::Sync {
                 days: 7,
                 all: false,
                 prefetch: Some(50),
+                batch_size: 20,
+                batch_concurrency: 2,
             }
         );
 
@@ -224,6 +257,10 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::ValueValidation);
         let err = parse(&["sync", "--days", "7", "--all"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        for size in ["0", "51"] {
+            let err = parse(&["sync", "--batch-size", size]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "{size}");
+        }
     }
 
     #[test]

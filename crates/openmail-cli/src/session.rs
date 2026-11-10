@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use openmail_gmail::GmailClient;
+use openmail_gmail::api::GmailClientBuilder;
 use openmail_gmail::auth::{
     AuthError, CLIENT_ID_ENV, CLIENT_SECRET_ENV, KeyringTokenStore, OAuthClient, OAuthConfig,
     RefreshingTokenProvider, TokenStore,
@@ -70,12 +71,21 @@ pub fn gmail_client(requested: Option<&str>) -> anyhow::Result<GmailClient> {
 
 /// The account picked by `--account` (or the only one), and a Gmail client for it.
 pub fn account_client(requested: Option<&str>) -> anyhow::Result<(String, GmailClient)> {
+    account_client_with(requested, |builder| builder)
+}
+
+/// Like [`account_client`], with the client's settings adjusted by `configure`.
+pub fn account_client_with(
+    requested: Option<&str>,
+    configure: impl FnOnce(GmailClientBuilder) -> GmailClientBuilder,
+) -> anyhow::Result<(String, GmailClient)> {
     let config = oauth_config()?;
     let account = accounts::select(&AccountList::open_default()?.load()?, requested)?;
     tracing::debug!(%account, "using account");
     let provider =
         RefreshingTokenProvider::new(OAuthClient::new(&config)?, keychain(), account.clone());
-    Ok((account, GmailClient::new(Arc::new(provider))?))
+    let client = configure(GmailClient::builder(Arc::new(provider))).build()?;
+    Ok((account, client))
 }
 
 /// Whether `err` means the account has to sign in again.
