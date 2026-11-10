@@ -90,7 +90,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
   - Adaptive quota pacing in `openmail-gmail` for Gmail's per-minute quota
     (6,000 units by default): lockouts and a remembered ceiling instead of
     retrying into rate limits.
-- [ ] **2.5 Offline ops queue** — `feat/2.5-ops-queue`
+- [x] **2.5 Offline ops queue** — `feat/2.5-ops-queue`
   - Optimistic local apply, persisted queue, replay with retries, conflict handling.
 - [ ] **2.6 MailService** — `feat/2.6-mail-service`
   - Tokio runtime, command and event channels.
