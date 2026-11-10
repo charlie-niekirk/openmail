@@ -4,6 +4,7 @@
 
 mod accounts;
 mod cli;
+mod labels;
 mod session;
 
 use std::process::ExitCode;
@@ -58,7 +59,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Login => session::login().await,
         Command::Logout => session::logout(account).await,
-        Command::Labels | Command::Threads { .. } | Command::Show { .. } => {
+        Command::Labels => labels::run(&session::gmail_client(account)?).await,
+        Command::Threads { .. } | Command::Show { .. } => {
             let _client = session::gmail_client(account)?;
             bail!("not implemented yet")
         }

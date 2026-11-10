@@ -17,7 +17,9 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 directories.workspace = true
+futures-util.workspace = true
 open.workspace = true
+openmail-core = { path = "../openmail-core" }
 openmail-gmail = { path = "../openmail-gmail" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tracing.workspace = true
