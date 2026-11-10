@@ -17,3 +17,6 @@ pub use mail::MessageBody;
 pub use paths::{DATA_DIR_ENV, DataDir};
 pub use store::Store;
 pub use sync_state::SyncState;
+
+#[cfg(test)]
+mod tests;
