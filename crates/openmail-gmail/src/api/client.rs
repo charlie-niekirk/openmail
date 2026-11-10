@@ -90,6 +90,18 @@ impl GmailClient {
         &self,
         build: impl Fn(&reqwest::Client) -> RequestBuilder,
     ) -> Result<Response> {
+        self.send_with_token(build)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    /// Like [`send`](Self::send), but also returns the access token the
+    /// successful attempt used, so a caller that sees a `401` inside the
+    /// response (as in a batch) can refresh exactly that token.
+    pub(crate) async fn send_with_token(
+        &self,
+        build: impl Fn(&reqwest::Client) -> RequestBuilder,
+    ) -> Result<(Response, String)> {
         let inner = &*self.inner;
         let mut token = inner.tokens.access_token().await.map_err(Error::Token)?;
         let mut refreshed = false;
@@ -108,7 +120,7 @@ impl GmailClient {
 
             let status = response.status();
             if status.is_success() {
-                return Ok(response);
+                return Ok((response, token));
             }
             if status == StatusCode::UNAUTHORIZED && !refreshed {
                 refreshed = true;
