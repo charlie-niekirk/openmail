@@ -7,6 +7,7 @@ mod address;
 mod error;
 mod id;
 mod label;
+mod message;
 
 pub use address::Address;
 pub use error::{Error, Result};
@@ -15,3 +16,4 @@ pub use label::{
     LABEL_PATH_SEPARATOR, Label, LabelColor, LabelListVisibility, LabelPath, LabelType,
     MessageListVisibility, SystemLabel,
 };
+pub use message::{Attachment, Draft, Message, MessageHeaders, Thread};
