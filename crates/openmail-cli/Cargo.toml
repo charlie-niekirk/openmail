@@ -9,7 +9,16 @@ repository.workspace = true
 homepage.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "openmail-cli"
+path = "src/main.rs"
+
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
