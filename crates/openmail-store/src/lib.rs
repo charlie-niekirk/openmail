@@ -9,12 +9,14 @@ mod labels;
 mod mail;
 mod migrations;
 mod paths;
+mod queries;
 mod store;
 mod sync_state;
 
 pub use error::{Error, Result};
 pub use mail::MessageBody;
 pub use paths::{DATA_DIR_ENV, DataDir};
+pub use queries::{ThreadCursor, ThreadPage, ThreadSummary, ThreadView};
 pub use store::Store;
 pub use sync_state::SyncState;
 
