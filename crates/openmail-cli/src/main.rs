@@ -16,6 +16,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
+use openmail_gmail::api::QuotaLimit;
 use openmail_sync::Cutoff;
 use time::UtcOffset;
 use tracing_subscriber::EnvFilter;
@@ -93,11 +94,14 @@ async fn run(cli: Cli, offset: UtcOffset) -> anyhow::Result<()> {
             prefetch,
             batch_size,
             batch_concurrency,
+            rate,
         } => {
             let (account, client) = session::account_client_with(account, |builder| {
-                let builder = builder.batch_size(batch_size);
-                match batch_concurrency {
-                    Some(n) => builder.batch_concurrency(n),
+                let builder = builder
+                    .batch_size(batch_size)
+                    .batch_concurrency(batch_concurrency);
+                match rate {
+                    Some(rate) => builder.quota_limit(Some(QuotaLimit::per_second(rate))),
                     None => builder,
                 }
             })?;

@@ -2,7 +2,7 @@
 
 use clap::builder::TypedValueParser as _;
 use clap::{Parser, Subcommand};
-use openmail_gmail::api::DEFAULT_BATCH_SIZE;
+use openmail_gmail::api::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE};
 
 /// Openmail developer CLI: exercise the Gmail client against a real account
 /// without the desktop UI.
@@ -75,14 +75,22 @@ pub enum Command {
             value_parser = clap::value_parser!(u16).range(1..=50).map(usize::from)
         )]
         batch_size: usize,
-        /// Keep exactly N batch requests in flight (1 to 16), instead of
-        /// adapting to Gmail's rate limiting.
+        /// Batch requests in flight at once (1 to 16), for tuning throughput.
         #[arg(
             long,
             value_name = "N",
+            default_value_t = DEFAULT_BATCH_CONCURRENCY,
             value_parser = clap::value_parser!(u16).range(1..=16).map(usize::from)
         )]
-        batch_concurrency: Option<usize>,
+        batch_concurrency: usize,
+        /// Spend Gmail quota at a fixed N units a second (1 to 250), instead
+        /// of adapting the rate to Gmail's rate limiting.
+        #[arg(
+            long,
+            value_name = "N",
+            value_parser = clap::value_parser!(u32).range(1..=250)
+        )]
+        rate: Option<u32>,
     },
     /// Keep the local store in sync until Ctrl-C: finish the initial sync if
     /// needed, then poll Gmail's history, printing a line per poll.
@@ -232,7 +240,8 @@ mod tests {
                 all: false,
                 prefetch: None,
                 batch_size: DEFAULT_BATCH_SIZE,
-                batch_concurrency: None,
+                batch_concurrency: DEFAULT_BATCH_CONCURRENCY,
+                rate: None,
             }
         );
 
@@ -245,7 +254,9 @@ mod tests {
             "--batch-size",
             "20",
             "--batch-concurrency",
-            "2",
+            "3",
+            "--rate",
+            "120",
         ])
         .unwrap();
         assert_eq!(
@@ -255,7 +266,8 @@ mod tests {
                 all: false,
                 prefetch: Some(50),
                 batch_size: 20,
-                batch_concurrency: Some(2),
+                batch_concurrency: 3,
+                rate: Some(120),
             }
         );
 
@@ -272,6 +284,10 @@ mod tests {
         for size in ["0", "51"] {
             let err = parse(&["sync", "--batch-size", size]).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::ValueValidation, "{size}");
+        }
+        for rate in ["0", "251"] {
+            let err = parse(&["sync", "--rate", rate]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "{rate}");
         }
     }
 
