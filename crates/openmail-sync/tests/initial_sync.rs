@@ -35,6 +35,8 @@ fn config() -> InitialSyncConfig {
         cutoff: Cutoff::All,
         page_size: 2,
         prefetch_inbox_bodies: None,
+        rate_limit_pause: Duration::from_millis(10),
+        max_rate_limit_pauses: 5,
     }
 }
 
@@ -133,6 +135,7 @@ async fn full_run_syncs_labels_inbox_and_backfill() {
             messages: 5,
             skipped_threads: 1,
             bodies: 0,
+            rate_limit_wait: None,
         }
     );
     // Counts grow page by page.
@@ -484,4 +487,145 @@ async fn the_sync_future_is_send() {
     let (_server, client) = setup().await;
     let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config());
     assert_send(sync.run(&CancellationToken::new(), |_| {}));
+}
+
+/// Gmail's per-user rate-limit response.
+fn rate_limited() -> ResponseTemplate {
+    ResponseTemplate::new(429).set_body_json(serde_json::json!({
+        "error": {
+            "code": 429,
+            "message": "Quota exceeded for quota metric 'Total Query Cost'",
+            "errors": [{"reason": "rateLimitExceeded"}]
+        }
+    }))
+}
+
+/// How many times the sync reported pausing for the rate limit.
+fn pauses(seen: &[Progress]) -> usize {
+    seen.iter().filter(|p| p.rate_limit_wait.is_some()).count()
+}
+
+#[tokio::test]
+async fn rate_limits_mid_backfill_pause_and_resume_in_the_same_run() {
+    let (server, client) = setup().await;
+    // The second backfill page is rate-limited three times, then works.
+    list_page(Listing::Backfill, Some("b2"))
+        .respond_with(rate_limited())
+        .up_to_n_times(3)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    // Every mock in mount_all expects exactly one call, so nothing before the
+    // checkpoint is fetched again.
+    let batch = mount_all(&server).await;
+
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config());
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+
+    assert_eq!(pauses(&seen), 3);
+    assert!(seen.iter().all(
+        |p| p.rate_limit_wait.is_none() || p.rate_limit_wait == Some(Duration::from_millis(10))
+    ));
+    assert_eq!(done.rate_limit_wait, None);
+    assert!(!done.resumed);
+    assert_eq!(done.threads, 5);
+    assert_eq!(done.phase, Phase::Done);
+    let state = sync.store().sync_state().unwrap();
+    assert!(state.backfill_complete);
+    assert_eq!(state.history_id, Some(HistoryId::new(PROFILE_HISTORY_ID)));
+    assert_eq!(batch.requested("threads"), ["t1", "t2", "t3", "t4", "t5"]);
+}
+
+#[tokio::test]
+async fn rate_limited_batches_pause_and_resume() {
+    let (server, client) = setup().await;
+    let mailbox = mailbox();
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &["t1", "t2"], None))
+        .mount(&server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &["t4"], None))
+        .mount(&server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path(common::BATCH))
+        .respond_with(rate_limited())
+        .up_to_n_times(2)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    BatchResponder::new(mailbox).mount(&server).await;
+
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config());
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+    assert_eq!(pauses(&seen), 2);
+    assert_eq!(done.threads, 3);
+    assert!(sync.store().sync_state().unwrap().backfill_complete);
+}
+
+#[tokio::test]
+async fn persistent_rate_limits_give_up_after_the_configured_pauses() {
+    let (server, client) = setup().await;
+    list_page(Listing::Backfill, Some("b2"))
+        .respond_with(rate_limited())
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let mailbox = mailbox();
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    mount_inbox(&server, &mailbox).await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &["t3", "t4"], Some("b2")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    BatchResponder::new(mailbox).mount(&server).await;
+
+    let config = InitialSyncConfig {
+        max_rate_limit_pauses: 2,
+        ..config()
+    };
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config);
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let err = result.unwrap_err();
+    assert!(err.rate_limit_retry_after().is_some(), "{err:?}");
+    assert!(err.is_transient());
+    assert_eq!(pauses(&seen), 2);
+    let cp = checkpoint(sync.store());
+    assert_eq!(cp["phase"], "backfill");
+    assert_eq!(cp["page_token"], "b2");
+}
+
+#[tokio::test]
+async fn cancelling_during_a_rate_limit_pause_stops_the_sync() {
+    let (server, client) = setup().await;
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(rate_limited())
+        .mount(&server)
+        .await;
+
+    let cancel = CancellationToken::new();
+    let config = InitialSyncConfig {
+        rate_limit_pause: Duration::from_secs(60),
+        ..config()
+    };
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config);
+    let started = Instant::now();
+    let result = sync
+        .run(&cancel, |p| {
+            if p.rate_limit_wait.is_some() {
+                cancel.cancel();
+            }
+        })
+        .await;
+    assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+    assert!(started.elapsed() < Duration::from_secs(10));
 }

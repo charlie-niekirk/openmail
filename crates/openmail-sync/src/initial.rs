@@ -60,6 +60,13 @@ pub struct InitialSyncConfig {
     /// Fetch the bodies of this many of the newest Inbox messages after the
     /// Inbox is synced. `None` (the default) fetches no bodies.
     pub prefetch_inbox_bodies: Option<usize>,
+    /// How long to pause when Gmail's per-user rate limit outlasts the
+    /// client's own retries, before resuming from the checkpoint (longer if
+    /// Gmail asks with `Retry-After`).
+    pub rate_limit_pause: std::time::Duration,
+    /// How many such pauses in a row, with no progress between them, before
+    /// the sync gives up with the rate-limit error.
+    pub max_rate_limit_pauses: u32,
 }
 
 impl Default for InitialSyncConfig {
@@ -68,6 +75,8 @@ impl Default for InitialSyncConfig {
             cutoff: Cutoff::default(),
             page_size: 100,
             prefetch_inbox_bodies: None,
+            rate_limit_pause: std::time::Duration::from_secs(60),
+            max_rate_limit_pauses: 5,
         }
     }
 }
@@ -106,6 +115,16 @@ pub struct Progress {
     pub skipped_threads: u64,
     /// Message bodies prefetched.
     pub bodies: u64,
+    /// Set while the sync is paused for Gmail's rate limit: how long it waits
+    /// before resuming.
+    pub rate_limit_wait: Option<std::time::Duration>,
+}
+
+impl Progress {
+    /// Counts that grow whenever the sync gets further.
+    fn advanced(&self) -> (u64, u64, u64) {
+        (self.threads, self.skipped_threads, self.bodies)
+    }
 }
 
 /// Downloads a mailbox's labels and thread metadata into a [`Store`].
@@ -150,21 +169,78 @@ impl InitialSync {
     /// `progress` is called as each phase starts and after each page or batch.
     /// Returns the final progress; if the sync had already finished, that is
     /// [`Phase::Done`] with nothing done.
+    ///
+    /// If Gmail's per-user rate limit outlasts the client's retries, the sync
+    /// reports [`Progress::rate_limit_wait`], pauses for
+    /// [`InitialSyncConfig::rate_limit_pause`] and resumes from its checkpoint,
+    /// up to [`InitialSyncConfig::max_rate_limit_pauses`] times in a row
+    /// without progress.
     pub async fn run(
         &mut self,
         cancel: &CancellationToken,
         mut progress: impl FnMut(&Progress),
     ) -> Result<Progress> {
         let mut report = Progress::default();
+        let mut pauses = 0;
+        let mut at_last_pause = report.advanced();
+        let mut first = true;
+        loop {
+            let err = match self
+                .run_once(cancel, first, &mut report, &mut progress)
+                .await
+            {
+                Ok(()) => return Ok(report),
+                Err(err) => err,
+            };
+            first = false;
+            if report.advanced() != at_last_pause {
+                pauses = 0;
+            }
+            let Some(retry_after) = err.rate_limit_retry_after() else {
+                return Err(err);
+            };
+            if pauses >= self.config.max_rate_limit_pauses {
+                return Err(err);
+            }
+            pauses += 1;
+            at_last_pause = report.advanced();
+
+            let wait = retry_after.map_or(self.config.rate_limit_pause, |after| {
+                after.max(self.config.rate_limit_pause)
+            });
+            tracing::info!(?wait, "Gmail rate limit; pausing the sync");
+            report.rate_limit_wait = Some(wait);
+            progress(&report);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(Error::Cancelled),
+                () = tokio::time::sleep(wait) => {}
+            }
+            report.rate_limit_wait = None;
+        }
+    }
+
+    // The async helpers take `&mut self` so their futures are `Send`: `Store`
+    // is `Send` but not `Sync`.
+
+    /// One attempt at the sync, from the stored checkpoint. `first` is false
+    /// when continuing after a rate-limit pause in the same run.
+    async fn run_once(
+        &mut self,
+        cancel: &CancellationToken,
+        first: bool,
+        report: &mut Progress,
+        progress: &mut impl FnMut(&Progress),
+    ) -> Result<()> {
         let state = self.store.sync_state()?;
         if state.backfill_complete {
             report.phase = Phase::Done;
-            return Ok(report);
+            return Ok(());
         }
 
         let mut checkpoint = match state.backfill_cursor.as_deref().map(Checkpoint::decode) {
             Some(Some(checkpoint)) => {
-                report.resumed = true;
+                report.resumed |= first;
                 checkpoint
             }
             unreadable => {
@@ -175,25 +251,25 @@ impl InitialSync {
             }
         };
 
-        progress(&report);
-        self.sync_labels(cancel, &mut report).await?;
-        progress(&report);
+        progress(report);
+        self.sync_labels(cancel, report).await?;
+        progress(report);
 
         loop {
             match checkpoint.phase {
                 CheckpointPhase::Inbox => {
                     report.phase = Phase::Inbox;
-                    progress(&report);
+                    progress(report);
                     let request = ListRequest::new().label(SystemLabel::Inbox.id());
                     checkpoint = self
-                        .sync_listing(cancel, checkpoint, request, &mut report, &mut progress)
+                        .sync_listing(cancel, checkpoint, request, report, progress)
                         .await?;
                 }
                 CheckpointPhase::Prefetch => {
                     if let Some(limit) = self.config.prefetch_inbox_bodies {
                         report.phase = Phase::Prefetch;
-                        progress(&report);
-                        self.prefetch_bodies(cancel, limit, &mut report, &mut progress)
+                        progress(report);
+                        self.prefetch_bodies(cancel, limit, report, progress)
                             .await?;
                     }
                     checkpoint = checkpoint.next_phase();
@@ -201,13 +277,13 @@ impl InitialSync {
                 }
                 CheckpointPhase::Backfill => {
                     report.phase = Phase::Backfill;
-                    progress(&report);
+                    progress(report);
                     let mut request = ListRequest::new();
                     if let Some(after) = checkpoint.after {
                         request = request.query(format!("after:{after}"));
                     }
                     checkpoint = self
-                        .sync_listing(cancel, checkpoint, request, &mut report, &mut progress)
+                        .sync_listing(cancel, checkpoint, request, report, progress)
                         .await?;
                 }
                 CheckpointPhase::Done => break,
@@ -215,12 +291,9 @@ impl InitialSync {
         }
 
         report.phase = Phase::Done;
-        progress(&report);
-        Ok(report)
+        progress(report);
+        Ok(())
     }
-
-    // The async helpers take `&mut self` so their futures are `Send`: `Store`
-    // is `Send` but not `Sync`.
 
     /// Starts a new sync: records the current history ID and the first
     /// checkpoint together.

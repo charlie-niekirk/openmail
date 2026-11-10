@@ -1,5 +1,7 @@
 //! Sync errors.
 
+use std::time::Duration;
+
 use openmail_gmail::api::{self, QuotaKind};
 
 /// A sync result.
@@ -26,6 +28,19 @@ pub enum Error {
 }
 
 impl Error {
+    /// If this is Gmail's short-window rate limit, `Some` with how long Gmail
+    /// asked to wait (if it said).
+    pub fn rate_limit_retry_after(&self) -> Option<Option<Duration>> {
+        match self {
+            Self::Gmail(api::Error::Quota {
+                kind: QuotaKind::RateLimit,
+                retry_after,
+                ..
+            }) => Some(*retry_after),
+            _ => None,
+        }
+    }
+
     /// Whether running the sync again later may succeed on its own: network
     /// failures, rate limits that outlasted the client's retries, and Gmail
     /// server errors. Sign-in problems, an exhausted daily quota, store errors
