@@ -8,13 +8,16 @@
 //! the client ID (and the optional secret Google issues to desktop clients) comes
 //! from [`OAuthConfig`], usually built with [`OAuthConfig::from_env`].
 
+mod client;
 mod config;
 mod error;
-#[cfg_attr(not(test), expect(dead_code, reason = "used by the sign-in flow"))]
 mod loopback;
+mod token;
 
+pub use client::{Authorization, OAuthClient};
 pub use config::{CLIENT_ID_ENV, CLIENT_SECRET_ENV, OAuthConfig};
 pub use error::AuthError;
+pub use token::AccessToken;
 
 /// Read, modify and label mail (not permanent deletion).
 pub const SCOPE_GMAIL_MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";

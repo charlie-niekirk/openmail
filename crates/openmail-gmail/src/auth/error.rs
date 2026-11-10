@@ -22,4 +22,38 @@ pub enum AuthError {
     /// The redirect was malformed, for example missing the authorization code.
     #[error("invalid OAuth redirect: {0}")]
     InvalidRedirect(String),
+    /// A configured OAuth endpoint was not a valid URL.
+    #[error("invalid OAuth endpoint URL {url:?}: {source}")]
+    InvalidEndpoint {
+        /// The rejected URL.
+        url: String,
+        /// Why it was rejected.
+        source: url::ParseError,
+    },
+    /// The system browser could not be opened.
+    #[error("could not open the browser: {0}")]
+    Browser(#[source] std::io::Error),
+    /// The token endpoint could not be reached or did not answer.
+    #[error("could not reach the OAuth token endpoint: {0}")]
+    Http(#[from] reqwest::Error),
+    /// The token endpoint rejected the request or sent a malformed response.
+    #[error("OAuth token request failed: {0}")]
+    TokenEndpoint(String),
+    /// Google rejected the authorization code or refresh token (`invalid_grant`):
+    /// the code expired, or the refresh token was revoked or expired.
+    #[error("Google rejected the grant ({0}); sign in again")]
+    InvalidGrant(String),
+    /// Google did not issue a refresh token.
+    #[error("Google did not return a refresh token")]
+    MissingRefreshToken,
+    /// The ID token was missing or did not carry a verified email address.
+    #[error("could not read the account email from the ID token: {0}")]
+    InvalidIdToken(String),
+}
+
+impl AuthError {
+    /// Whether the user has to sign in again to recover.
+    pub fn requires_sign_in(&self) -> bool {
+        matches!(self, Self::InvalidGrant(_) | Self::MissingRefreshToken)
+    }
 }
