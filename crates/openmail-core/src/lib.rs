@@ -5,6 +5,11 @@
 
 mod error;
 mod id;
+mod label;
 
 pub use error::{Error, Result};
 pub use id::{AccountId, AttachmentId, DraftId, HistoryId, LabelId, MessageId, ThreadId};
+pub use label::{
+    LABEL_PATH_SEPARATOR, Label, LabelColor, LabelListVisibility, LabelPath, LabelType,
+    MessageListVisibility, SystemLabel,
+};
