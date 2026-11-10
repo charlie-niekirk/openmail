@@ -3,16 +3,19 @@
 //! [`InitialSync`] downloads a mailbox's labels and thread metadata into the
 //! local store, resumably. [`HistorySync`] then keeps it up to date from
 //! Gmail's `history.list`, and [`Scheduler`] runs both: the initial sync
-//! until it is done, then a poll every so often.
+//! until it is done, then a poll every so often. [`OpsQueue`] applies user
+//! actions to the store at once and sends them to Gmail in the background.
 
 mod error;
 mod history;
 mod initial;
+mod ops;
 mod scheduler;
 
 pub use error::{Error, Result};
 pub use history::{Changes, HISTORY_PAGE_SIZE, HistorySync};
 pub use initial::{Cutoff, InitialSync, InitialSyncConfig, Phase, Progress, SYNC_HEADERS};
+pub use ops::{Flush, Op, OpEvent, OpId, OpsConfig, OpsQueue, QueuedOp, Target};
 pub use scheduler::{
     Activity, Connectivity, Scheduler, SchedulerConfig, SchedulerHandle, SyncEvent,
 };

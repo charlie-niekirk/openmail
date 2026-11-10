@@ -8,6 +8,7 @@ mod error;
 mod labels;
 mod mail;
 mod migrations;
+mod ops;
 mod paths;
 mod queries;
 mod store;
@@ -16,6 +17,7 @@ mod sync_writes;
 
 pub use error::{Error, Result};
 pub use mail::MessageBody;
+pub use ops::{LabelDelta, PendingOp, PendingOpState};
 pub use paths::{DATA_DIR_ENV, DataDir};
 pub use queries::{
     LabelCounts, MessageDetail, ThreadCursor, ThreadDetail, ThreadPage, ThreadSummary, ThreadView,

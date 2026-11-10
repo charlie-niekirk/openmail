@@ -6,10 +6,11 @@ use openmail_core::{HistoryId, Label, LabelId, MessageId, SystemLabel, ThreadId}
 use openmail_gmail::GmailClient;
 use openmail_gmail::api::{self, History, HistoryRequest, ListHistoryResponse};
 use openmail_store::Store;
+use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 
 use crate::initial::{FetchedThreads, cancellable, fetch_threads};
-use crate::{Error, InitialSync, Result};
+use crate::{Error, InitialSync, Result, ops};
 
 /// History records per `history.list` page (Gmail allows up to 500).
 pub const HISTORY_PAGE_SIZE: u32 = 500;
@@ -114,6 +115,7 @@ impl HistorySync {
         loop {
             let mut request = HistoryRequest::new(start).max_results(self.page_size);
             request.page_token = page_token.take();
+            let requested_at = OffsetDateTime::now_utc();
             let page = match cancellable(cancel, self.client.list_history(&request)).await {
                 Ok(page) => page,
                 Err(Error::Gmail(api::Error::HistoryExpired { .. })) => {
@@ -126,8 +128,15 @@ impl HistorySync {
                 Err(err) => return Err(err),
             };
             let next = page.next_page_token.clone().filter(|t| !t.is_empty());
-            self.apply_page(store, cancel, &page, next.is_none(), &mut changes)
-                .await?;
+            self.apply_page(
+                store,
+                cancel,
+                &page,
+                next.is_none(),
+                requested_at,
+                &mut changes,
+            )
+            .await?;
             match next {
                 Some(token) => page_token = Some(token),
                 None => return Ok(changes),
@@ -136,12 +145,17 @@ impl HistorySync {
     }
 
     /// Applies one page in one transaction and advances the history ID.
+    ///
+    /// Queued ops on the threads it changes are applied again on top (the
+    /// server wins, but the user's unsent changes still show); `requested_at`
+    /// is when the page was requested, so ops sent after it count as unsent.
     async fn apply_page(
         &self,
         store: &mut Store,
         cancel: &CancellationToken,
         page: &ListHistoryResponse,
         last: bool,
+        requested_at: OffsetDateTime,
         changes: &mut Changes,
     ) -> Result<()> {
         let plan = Plan::new(store, &page.history)?;
@@ -206,6 +220,14 @@ impl HistorySync {
                 if store.modify_message_labels(&change.message, add, remove)? {
                     applied += 1;
                 }
+            }
+            let mut touched = refetched.clone();
+            touched.extend(&gone);
+            touched.extend(plan.label_changes.iter().map(|c| &c.thread));
+            ops::rebase(store, &touched, labels.is_some(), requested_at)?;
+            if last {
+                // Gmail's history now covers every op sent before this page.
+                ops::forget_sent(store, requested_at)?;
             }
             let mut state = store.sync_state()?;
             state.history_id = next;

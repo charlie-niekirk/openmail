@@ -1,6 +1,6 @@
 //! The initial sync: labels, then Inbox threads, then a backfill of older mail.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 
 use openmail_core::{HistoryId, Label, LabelId, MessageId, SystemLabel, ThreadId};
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 use tokio_util::sync::CancellationToken;
 
-use crate::{Error, Result};
+use crate::{Error, Result, ops};
 
 /// The headers kept with thread metadata during the initial sync.
 pub const SYNC_HEADERS: &[&str] = &["From", "To", "Cc", "Subject", "Date", "Message-ID"];
@@ -427,12 +427,16 @@ impl InitialSync {
         cancel: &CancellationToken,
         report: &mut Progress,
     ) -> Result<()> {
+        let requested_at = OffsetDateTime::now_utc();
         let labels: Vec<Label> = cancellable(cancel, self.client.list_labels())
             .await?
             .into_iter()
             .map(Label::from)
             .collect();
-        self.store.replace_labels(&labels)?;
+        self.store.transaction(|store| {
+            store.replace_labels(&labels)?;
+            ops::rebase(store, &HashSet::new(), true, requested_at)
+        })?;
         report.labels = labels.len();
         Ok(())
     }
@@ -454,6 +458,7 @@ impl InitialSync {
                 max_results: Some(self.config.page_size),
                 ..request.clone()
             };
+            let requested_at = OffsetDateTime::now_utc();
             let page = cancellable(cancel, self.client.list_threads(&request)).await?;
             let listed: Vec<ThreadId> = page.threads.iter().map(|t| t.id.clone()).collect();
             let fetch = self.changed_threads(page.threads)?;
@@ -472,6 +477,8 @@ impl InitialSync {
                 if checkpoint.sweep {
                     store.mark_threads_seen(&listed)?;
                 }
+                let written = threads.iter().map(|(t, _)| &t.id).chain(&gone).collect();
+                ops::rebase(store, &written, false, requested_at)?;
                 Ok::<_, Error>(deleted + save_checkpoint(store, &checkpoint)?)
             })?;
 

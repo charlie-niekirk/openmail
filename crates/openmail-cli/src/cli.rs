@@ -1,7 +1,7 @@
 //! Command-line arguments.
 
 use clap::builder::TypedValueParser as _;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use openmail_gmail::api::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE};
 
 /// Openmail developer CLI: exercise the Gmail client against a real account
@@ -115,6 +115,36 @@ pub enum Command {
         )]
         interval: u64,
     },
+    /// Archive threads (remove them from the Inbox), then send the change.
+    Archive(ThreadIds),
+    /// Star threads, then send the change.
+    Star(ThreadIds),
+    /// Unstar threads, then send the change.
+    Unstar(ThreadIds),
+    /// Mark threads read, then send the change.
+    Read(ThreadIds),
+    /// Mark threads unread, then send the change.
+    Unread(ThreadIds),
+    /// Add labels to and remove labels from threads, then send the change.
+    Label {
+        #[command(flatten)]
+        threads: ThreadIds,
+        /// A label to add: an ID such as `STARRED` or `Label_12`, or a name
+        /// such as `Work/Projects`. Repeatable.
+        #[arg(long, value_name = "LABEL")]
+        add: Vec<String>,
+        /// A label to remove, as for `--add`. Repeatable.
+        #[arg(long, value_name = "LABEL")]
+        remove: Vec<String>,
+    },
+}
+
+/// The threads an action applies to.
+#[derive(Debug, PartialEq, Eq, Args)]
+pub struct ThreadIds {
+    /// Thread IDs, as printed by `threads`.
+    #[arg(required = true, value_name = "THREAD_ID")]
+    pub ids: Vec<String>,
 }
 
 #[cfg(test)]
@@ -321,6 +351,45 @@ mod tests {
         assert_eq!(cli.command, Command::Watch { interval: 5 });
         let err = parse(&["watch", "--interval", "0"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn parses_thread_actions() {
+        let ids = |ids: &[&str]| ThreadIds {
+            ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+        };
+        let cli = parse(&["archive", "t1", "t2"]).unwrap();
+        assert_eq!(cli.command, Command::Archive(ids(&["t1", "t2"])));
+        assert_eq!(
+            parse(&["star", "t1"]).unwrap().command,
+            Command::Star(ids(&["t1"]))
+        );
+        assert_eq!(
+            parse(&["unstar", "t1"]).unwrap().command,
+            Command::Unstar(ids(&["t1"]))
+        );
+        assert_eq!(
+            parse(&["read", "t1"]).unwrap().command,
+            Command::Read(ids(&["t1"]))
+        );
+        assert_eq!(
+            parse(&["unread", "t1"]).unwrap().command,
+            Command::Unread(ids(&["t1"]))
+        );
+        let cli = parse(&[
+            "label", "t1", "--add", "Work", "--add", "STARRED", "--remove", "INBOX",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Label {
+                threads: ids(&["t1"]),
+                add: vec!["Work".to_owned(), "STARRED".to_owned()],
+                remove: vec!["INBOX".to_owned()],
+            }
+        );
+        let err = parse(&["archive"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

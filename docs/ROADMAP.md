@@ -95,7 +95,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
     (no lockouts or ratcheting), persisted per account.
   - Fetch single-message threads with `messages.get` (half the quota of
     `threads.get`), never storing threads that span the cutoff partially.
-- [ ] **2.5 Offline ops queue** — `feat/2.5-ops-queue`
+- [x] **2.5 Offline ops queue** — `feat/2.5-ops-queue`
   - Optimistic local apply, persisted queue, replay with retries, conflict handling.
 - [ ] **2.6 MailService** — `feat/2.6-mail-service`
   - Tokio runtime, command and event channels.
