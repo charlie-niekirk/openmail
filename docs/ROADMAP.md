@@ -67,7 +67,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
   - Parse raw messages into text, HTML, inline `cid:` parts and attachments.
   - Build outgoing mail with alternatives and attachments; encode as base64url.
   - Tests against a `.eml` fixture corpus.
-- [ ] **1.6 Dev CLI** — `feat/1.6-dev-cli`
+- [x] **1.6 Dev CLI** — `feat/1.6-dev-cli`
   - `openmail-cli login | labels | threads <label> | show <thread>`.
   - First end-to-end check against a real account (by hand, never in tests).
 

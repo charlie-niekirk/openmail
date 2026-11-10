@@ -33,7 +33,10 @@ gpui-component = "=0.9.1"
 gpui-webview = "=0.9.1"
 wry = { package = "lb-wry", version = "=0.53.3" }
 
+anyhow = "1.0.104"
 base64 = "0.23.1"
+clap = { version = "4.6.7", features = ["derive"] }
+directories = "6.0.0"
 fastrand = "2.5.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 keyring = "4.2.0"
@@ -55,6 +58,8 @@ sha2 = "0.10.9"
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["serde"] }
 tokio = { version = "1.54.1", default-features = false }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
 wiremock = "0.6.5"
 

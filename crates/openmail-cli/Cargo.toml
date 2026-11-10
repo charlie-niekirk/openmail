@@ -9,7 +9,26 @@ repository.workspace = true
 homepage.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "openmail-cli"
+path = "src/main.rs"
+
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
+directories.workspace = true
+futures-util.workspace = true
+open.workspace = true
+openmail-core = { path = "../openmail-core" }
+openmail-gmail = { path = "../openmail-gmail" }
+openmail-mime = { path = "../openmail-mime" }
+time = { workspace = true, features = ["local-offset"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+time = { workspace = true, features = ["macros"] }
 
 [lints]
 workspace = true
