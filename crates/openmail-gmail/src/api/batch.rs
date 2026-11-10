@@ -28,13 +28,13 @@ pub const MAX_BATCH_SIZE: usize = 50;
 
 /// Calls per batch by default. Gmail works through a batch's calls slowly
 /// and enforces its per-user quota over short windows, so small batches spread
-/// the load: 5 `threads.get` cost 50 units, well under a second of the default
-/// budget.
+/// the load: 5 `threads.get` cost 50 units, 5 `messages.get` 25.
 pub const DEFAULT_BATCH_SIZE: usize = 5;
 
-/// Batch requests in flight at once by default: enough to hide latency, while
-/// the quota limiter spaces out when each is sent.
-pub const DEFAULT_BATCH_CONCURRENCY: usize = 2;
+/// Batch requests in flight at once by default. The quota limiter decides
+/// when each is sent; three hide Gmail's batch latency (about a second) at the
+/// default budget's pace even for 25-unit batches of `messages.get`.
+pub const DEFAULT_BATCH_CONCURRENCY: usize = 3;
 
 /// One call inside a batch: a method on a `users/me` resource.
 #[derive(Debug, Clone)]
