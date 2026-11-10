@@ -3,8 +3,10 @@
 use std::collections::{BTreeSet, HashMap};
 
 use openmail_core::{HistoryId, Label, LabelId, Message, MessageId, Thread, ThreadId};
+use rusqlite::OptionalExtension as _;
+use time::OffsetDateTime;
 
-use crate::convert::history_from_sql;
+use crate::convert::{date_to_sql, history_from_sql};
 use crate::{Result, Store};
 
 impl Store {
@@ -89,6 +91,95 @@ impl Store {
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(ids)
+    }
+
+    /// Deletes a thread with its messages, their labels and bodies. Returns
+    /// whether it was stored.
+    pub fn delete_thread(&self, id: &ThreadId) -> Result<bool> {
+        let deleted = self
+            .conn()
+            .execute("DELETE FROM threads WHERE id = ?1", [id.as_str()])?;
+        Ok(deleted > 0)
+    }
+
+    /// Removes `remove` from a stored message's labels, then adds `add`.
+    /// Labels it already has, or lacks, are left alone, so applying the same
+    /// change twice is harmless. Returns `false`, changing nothing, if the
+    /// message is not stored.
+    pub fn modify_message_labels(
+        &self,
+        id: &MessageId,
+        add: &[LabelId],
+        remove: &[LabelId],
+    ) -> Result<bool> {
+        self.transaction(|store| {
+            let conn = store.conn();
+            let thread_id: Option<String> = conn
+                .query_row(
+                    "SELECT thread_id FROM messages WHERE id = ?1",
+                    [id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(thread_id) = thread_id else {
+                return Ok(false);
+            };
+            let mut delete = conn.prepare_cached(
+                "DELETE FROM message_labels WHERE message_id = ?1 AND label_id = ?2",
+            )?;
+            for label in remove {
+                delete.execute([id.as_str(), label.as_str()])?;
+            }
+            let mut insert = conn.prepare_cached(
+                "INSERT INTO message_labels (message_id, label_id, thread_id)
+                 VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+            )?;
+            for label in add {
+                insert.execute([id.as_str(), label.as_str(), &thread_id])?;
+            }
+            Ok(true)
+        })
+    }
+
+    /// Records threads listed by the running initial sync, for
+    /// [`delete_unseen_threads`](Self::delete_unseen_threads).
+    pub fn mark_threads_seen(&self, ids: &[ThreadId]) -> Result<()> {
+        self.transaction(|store| {
+            let mut insert = store.conn().prepare_cached(
+                "INSERT INTO sync_seen_threads (thread_id) VALUES (?1) ON CONFLICT DO NOTHING",
+            )?;
+            for id in ids {
+                insert.execute([id.as_str()])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Forgets which threads were listed.
+    pub fn clear_seen_threads(&self) -> Result<()> {
+        self.conn().execute("DELETE FROM sync_seen_threads", [])?;
+        Ok(())
+    }
+
+    /// Deletes stored threads that the finished initial sync did not list,
+    /// among those whose last message is at or after `since` (or all of them
+    /// with `None`), then forgets the listed threads. Returns how many threads
+    /// were deleted.
+    ///
+    /// Threads older than `since` are outside the sync's range, so they are
+    /// kept whether or not they still exist.
+    pub fn delete_unseen_threads(&self, since: Option<OffsetDateTime>) -> Result<usize> {
+        let since = since.map(date_to_sql).transpose()?.unwrap_or(i64::MIN);
+        self.transaction(|store| {
+            let deleted = store.conn().execute(
+                "DELETE FROM threads
+                 WHERE last_message_date >= ?1
+                   AND id NOT IN (SELECT thread_id FROM sync_seen_threads)",
+                [since],
+            )?;
+            store.clear_seen_threads()?;
+            Ok(deleted)
+        })
     }
 
     /// The IDs of a thread's stored messages.
@@ -225,6 +316,87 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[&ThreadId::new("t")], HistoryId::new(7));
+    }
+
+    #[test]
+    fn delete_thread_removes_its_messages_and_labels() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .replace_threads(&[(thread("t", 1), vec![message("m", "t", 1, &["INBOX"])])])
+            .unwrap();
+        assert!(store.delete_thread(&ThreadId::new("t")).unwrap());
+        assert!(!store.delete_thread(&ThreadId::new("t")).unwrap());
+        assert!(store.message(&MessageId::new("m")).unwrap().is_none());
+        let counts = store.label_counts().unwrap();
+        assert!(counts.iter().all(|c| c.threads_total == 0), "{counts:?}");
+    }
+
+    #[test]
+    fn modify_message_labels_is_idempotent_and_updates_thread_flags() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .replace_threads(&[(thread("t", 1), vec![message("m", "t", 1, &["INBOX"])])])
+            .unwrap();
+        let m = MessageId::new("m");
+        let add = [LabelId::new("UNREAD"), LabelId::new("STARRED")];
+        for _ in 0..2 {
+            assert!(store.modify_message_labels(&m, &add, &[]).unwrap());
+        }
+        let t = store.thread(&ThreadId::new("t")).unwrap().unwrap();
+        assert_eq!(t.label_ids.len(), 3);
+        let summary = &store
+            .thread_page(&crate::ThreadView::Label(LabelId::new("INBOX")), None, 10)
+            .unwrap()
+            .threads[0];
+        assert!(summary.is_unread && summary.is_starred);
+
+        let remove = [LabelId::new("INBOX"), LabelId::new("UNREAD")];
+        for _ in 0..2 {
+            assert!(store.modify_message_labels(&m, &[], &remove).unwrap());
+        }
+        assert_eq!(
+            store.message_label_ids(&m).unwrap(),
+            [LabelId::new("STARRED")]
+        );
+        let summary = &store
+            .thread_page(&crate::ThreadView::Label(LabelId::new("STARRED")), None, 10)
+            .unwrap()
+            .threads[0];
+        assert!(!summary.is_unread && summary.is_starred);
+
+        assert!(
+            !store
+                .modify_message_labels(&MessageId::new("missing"), &add, &[])
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn delete_unseen_threads_keeps_listed_and_older_threads() {
+        let store = Store::open_in_memory().unwrap();
+        let mut old = thread("old", 1);
+        old.last_message_date = date(100);
+        let mut gone = thread("gone", 1);
+        gone.last_message_date = date(300);
+        let mut listed = thread("listed", 1);
+        listed.last_message_date = date(300);
+        store
+            .replace_threads(&[
+                (old, vec![message("m1", "old", 100, &[])]),
+                (gone, vec![message("m2", "gone", 300, &[])]),
+                (listed, vec![message("m3", "listed", 300, &[])]),
+            ])
+            .unwrap();
+        store.mark_threads_seen(&[ThreadId::new("listed")]).unwrap();
+        store.mark_threads_seen(&[ThreadId::new("listed")]).unwrap();
+
+        assert_eq!(store.delete_unseen_threads(Some(date(200))).unwrap(), 1);
+        assert!(store.thread(&ThreadId::new("gone")).unwrap().is_none());
+        assert!(store.thread(&ThreadId::new("old")).unwrap().is_some());
+        assert!(store.thread(&ThreadId::new("listed")).unwrap().is_some());
+
+        // The listed set was cleared, so with no cutoff everything goes.
+        assert_eq!(store.delete_unseen_threads(None).unwrap(), 2);
     }
 
     #[test]
