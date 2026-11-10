@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use common::{
     BatchResponder, Listing, Mailbox, PROFILE_HISTORY_ID, list_page, mount_labels, mount_profile,
-    page, setup,
+    page, setup, setup_retrying,
 };
 use openmail_core::{HistoryId, LabelId, MessageId, ThreadId};
 use openmail_gmail::api;
@@ -683,4 +683,33 @@ async fn cancelling_during_a_rate_limit_pause_stops_the_sync() {
         .await;
     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
     assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn rate_limited_batch_items_are_retried_and_counted() {
+    let (server, client) = setup_retrying().await;
+    let mailbox = mailbox();
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    mount_inbox(&server, &mailbox).await;
+    mount_backfill(&server, &mailbox).await;
+    // Gmail turns away some items of a busy batch; they are resent on their own.
+    let batch = BatchResponder::new(mailbox).rate_limit_once(&["t2", "t4", "t5"]);
+    batch.mount(&server).await;
+
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config());
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+
+    assert_eq!(done.threads, 5);
+    assert_eq!(done.retried_requests, 3);
+    assert_eq!(done.rate_limited_requests, 3);
+    // The client's retries absorbed them: the sync never paused.
+    assert_eq!(pauses(&seen), 0);
+    for t in ["t1", "t2", "t3", "t4", "t5"] {
+        assert!(stored(sync.store(), t), "{t}");
+    }
+    let mut requested = batch.requested("threads");
+    requested.sort();
+    assert_eq!(requested, ["t1", "t2", "t2", "t3", "t4", "t4", "t5", "t5"]);
 }

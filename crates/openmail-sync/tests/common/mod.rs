@@ -2,8 +2,9 @@
 
 #![allow(dead_code)] // Each test binary uses a different subset.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use openmail_gmail::api::{GmailClient, RetryPolicy, TokenFuture, TokenProvider};
 use serde_json::{Value, json};
@@ -35,10 +36,26 @@ impl TokenProvider for StaticToken {
 
 /// A mock server and a client for it that does not retry.
 pub async fn setup() -> (MockServer, GmailClient) {
+    setup_with(RetryPolicy::none()).await
+}
+
+/// A mock server and a client for it that retries quickly.
+pub async fn setup_retrying() -> (MockServer, GmailClient) {
+    setup_with(RetryPolicy {
+        max_retries: 3,
+        initial_backoff: Duration::from_millis(1),
+        max_backoff: Duration::from_millis(5),
+        rate_limit_max_backoff: Duration::from_millis(5),
+        rate_limit_max_wait: Duration::from_millis(50),
+    })
+    .await
+}
+
+async fn setup_with(retry: RetryPolicy) -> (MockServer, GmailClient) {
     let server = MockServer::start().await;
     let client = GmailClient::builder(Arc::new(StaticToken))
         .base_url(Url::parse(&server.uri()).unwrap())
-        .retry_policy(RetryPolicy::none())
+        .retry_policy(retry)
         .build()
         .unwrap();
     (server, client)
@@ -213,6 +230,8 @@ pub struct BatchItem {
 pub struct BatchResponder {
     mailbox: Arc<Mailbox>,
     calls: Arc<Mutex<Vec<Vec<BatchItem>>>>,
+    /// IDs answered with a rate-limit 429 the first time they are requested.
+    rate_limit_once: Arc<Mutex<HashSet<String>>>,
 }
 
 impl BatchResponder {
@@ -220,7 +239,18 @@ impl BatchResponder {
         Self {
             mailbox: Arc::new(mailbox),
             calls: Arc::default(),
+            rate_limit_once: Arc::default(),
         }
+    }
+
+    /// Answers these IDs with a rate-limit 429 the first time they are
+    /// requested, as Gmail does to some items of a busy batch.
+    pub fn rate_limit_once(self, ids: &[&str]) -> Self {
+        self.rate_limit_once
+            .lock()
+            .unwrap()
+            .extend(ids.iter().map(|id| (*id).to_owned()));
+        self
     }
 
     /// Mounts the responder on the batch endpoint.
@@ -254,6 +284,14 @@ impl BatchResponder {
     fn answer(&self, target: &str) -> (u16, Value) {
         let (path, _) = target.split_once('?').unwrap_or((target, ""));
         let rest = path.strip_prefix(USER).unwrap_or(path);
+        let id = rest.rsplit('/').next().unwrap_or_default();
+        if self.rate_limit_once.lock().unwrap().remove(id) {
+            return (
+                429,
+                json!({"error": {"code": 429, "message": "Too many concurrent requests for user",
+                       "errors": [{"reason": "rateLimitExceeded"}]}}),
+            );
+        }
         let found = if let Some(id) = rest.strip_prefix("/threads/") {
             self.mailbox.thread_json(id)
         } else if let Some(id) = rest.strip_prefix("/messages/") {
