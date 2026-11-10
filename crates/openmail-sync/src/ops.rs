@@ -21,6 +21,11 @@
 //!
 //! The queue survives restarts: [`OpsQueue::run`] picks up where it stopped.
 //!
+//! **Conflicts: the server wins.** When incremental (or initial) sync writes
+//! Gmail's version of a thread that has unsent ops, those ops are applied
+//! again on top of it, so the user's pending change shows until it is sent.
+//! A sent op is kept for that purpose until a history sync started after it
+//! was sent has finished; after that, Gmail's state is taken as is.
 
 mod effect;
 mod replay;
@@ -411,6 +416,8 @@ fn save(store: &Store, id: OpId, record: &Record) -> Result<()> {
     store.set_pending_op_payload(id.0, &payload)?;
     Ok(())
 }
+
+pub(crate) use replay::{forget_sent, rebase};
 
 #[cfg(test)]
 mod tests;

@@ -114,6 +114,24 @@ impl Record {
         keys
     }
 
+    /// The threads the op changes or will change.
+    pub(crate) fn threads(&self) -> impl Iterator<Item = &ThreadId> {
+        let targets = match &self.op {
+            Op::ModifyLabels { target, .. }
+            | Op::Trash { target }
+            | Op::Untrash { target }
+            | Op::Delete { target } => match target {
+                Target::Threads(threads) => threads.as_slice(),
+                Target::Messages(_) => &[],
+            },
+            _ => &[],
+        };
+        targets
+            .iter()
+            .chain(self.effect.messages.iter().map(|m| &m.thread))
+            .chain(self.effect.deleted_messages.iter().map(|m| &m.thread_id))
+    }
+
     /// The label IDs the op refers to.
     pub(crate) fn label_ids(&self) -> Vec<&LabelId> {
         match &self.op {

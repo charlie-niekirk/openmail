@@ -672,6 +672,54 @@ fn adopt_label(store: &Store, local: &LabelId, label: &Label) -> Result<()> {
     Ok(())
 }
 
+/// Re-applies queued ops on top of what sync just wrote for `threads` (and
+/// for labels, if `labels_synced`), so the user's pending changes still show.
+/// Data fetched from `fetched_since` on reflects ops sent before then; ops
+/// sent later are re-applied too. Call it in the transaction that wrote the
+/// sync's changes. Returns how many ops were re-applied.
+pub(crate) fn rebase(
+    store: &Store,
+    threads: &HashSet<&ThreadId>,
+    labels_synced: bool,
+    fetched_since: OffsetDateTime,
+) -> Result<usize> {
+    let mut reapplied = 0;
+    for row in store.pending_ops()? {
+        let mut record = load(&row.payload)?;
+        let label_op = matches!(
+            record.op,
+            Op::CreateLabel { .. }
+                | Op::RenameLabel { .. }
+                | Op::RecolorLabel { .. }
+                | Op::DeleteLabel { .. }
+        );
+        let live = match row.state {
+            PendingOpState::Queued | PendingOpState::Sending => true,
+            // A sent label op's label is Gmail's from then on.
+            PendingOpState::Sent => !label_op && row.sent_at.is_some_and(|t| t > fetched_since),
+        };
+        let touched = record.threads().any(|t| threads.contains(t))
+            || (labels_synced && (label_op || !record.label_ids().is_empty()));
+        if !(live && touched) {
+            continue;
+        }
+        let id = OpId(row.id);
+        record.effect = effect::apply(store, id, &record.op, Some(&record.effect))?;
+        save(store, id, &record)?;
+        reapplied += 1;
+    }
+    if reapplied > 0 {
+        tracing::debug!(reapplied, "re-applied queued ops on top of synced changes");
+    }
+    Ok(reapplied)
+}
+
+/// Forgets sent ops that history sync has caught up with: those sent before
+/// `fetched_since`, when a history sync that started then has finished.
+pub(crate) fn forget_sent(store: &Store, fetched_since: OffsetDateTime) -> Result<usize> {
+    Ok(store.delete_sent_ops(fetched_since)?)
+}
+
 /// An error and its sources, joined with `: `.
 fn error_chain(err: &dyn std::error::Error) -> String {
     let mut text = err.to_string();

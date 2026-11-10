@@ -5,14 +5,16 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    BatchResponder, Listing, Mailbox, USER, list_page, mount_labels, mount_profile, page, setup,
+    BatchResponder, FakeThread, Listing, Mailbox, NEWEST_MS, PROFILE_HISTORY_ID, USER,
+    history_list, history_page, labels_added, labels_removed, list_page, message_added,
+    mount_labels, mount_profile, page, setup,
 };
 use openmail_core::{LabelId, MessageId, ThreadId};
 use openmail_gmail::GmailClient;
 use openmail_store::{PendingOpState, Store, ThreadView};
 use openmail_sync::{
-    CancellationToken, Cutoff, InitialSync, InitialSyncConfig, Op, OpEvent, OpsConfig, OpsQueue,
-    Target,
+    CancellationToken, Cutoff, HistorySync, InitialSync, InitialSyncConfig, Op, OpEvent, OpsConfig,
+    OpsQueue, Target,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, method, path};
@@ -627,4 +629,119 @@ async fn pending_ops_survive_a_restart() {
         .unwrap();
     assert_eq!(sent, [Op::archive(thread("t1")), Op::star(thread("t2"))]);
     assert_eq!(view(&store, "STARRED"), ["t2"]);
+}
+
+/// A mailbox whose t1 gained a reply, m1b.
+fn mailbox_with_reply() -> Mailbox {
+    let mut mailbox = mailbox();
+    mailbox.threads.insert(
+        "t1".to_owned(),
+        FakeThread {
+            history_id: 200,
+            messages: vec![
+                (
+                    "m1".to_owned(),
+                    vec!["INBOX".to_owned()],
+                    NEWEST_MS - 86_400_000,
+                ),
+                (
+                    "m1b".to_owned(),
+                    vec!["INBOX".to_owned(), "UNREAD".to_owned()],
+                    NEWEST_MS,
+                ),
+            ],
+        },
+    );
+    mailbox
+}
+
+#[tokio::test]
+async fn history_changes_are_applied_under_pending_ops() {
+    let (server, mut store, client, batch) = synced().await;
+    // Unsent: in its undo window.
+    let queue = OpsQueue::new(client.clone(), OpsConfig::default());
+    let archive = queue.enqueue(&store, Op::archive(thread("t1"))).unwrap();
+    let star = queue.enqueue(&store, Op::star(thread("t2"))).unwrap();
+
+    // Meanwhile, elsewhere: m1 was read, a reply arrived in t1, and t2 got
+    // a user label.
+    batch.set_mailbox(mailbox_with_reply());
+    let start = PROFILE_HISTORY_ID;
+    history_list(start, None)
+        .respond_with(history_page(
+            vec![
+                labels_removed(start + 1, "m1", "t1", &["UNREAD"]),
+                message_added(start + 2, "m1b", "t1", &["INBOX", "UNREAD"]),
+                labels_added(start + 3, "m2", "t2", &["Label_1"]),
+            ],
+            start + 3,
+            None,
+        ))
+        .mount(&server)
+        .await;
+    HistorySync::new(client.clone())
+        .run(&mut store, &CancellationToken::new())
+        .await
+        .unwrap();
+
+    // Gmail's changes are in, and the pending archive still applies, to the
+    // new reply too.
+    assert_eq!(labels_of(&store, "m1"), Vec::<String>::new());
+    assert_eq!(labels_of(&store, "m1b"), ["UNREAD"]);
+    assert_eq!(labels_of(&store, "m2"), ["INBOX", "Label_1", "STARRED"]);
+    assert_eq!(view(&store, "INBOX"), ["t2"]);
+
+    // Undoing the archive puts both messages back in the Inbox.
+    assert!(queue.undo(&store, archive).unwrap());
+    assert_eq!(labels_of(&store, "m1"), ["INBOX"]);
+    assert_eq!(labels_of(&store, "m1b"), ["INBOX", "UNREAD"]);
+    assert!(queue.undo(&store, star).unwrap());
+    assert_eq!(labels_of(&store, "m2"), ["INBOX", "Label_1"]);
+}
+
+#[tokio::test]
+async fn after_an_op_is_sent_history_neither_repeats_nor_fights_it() {
+    let (server, mut store, client, _) = synced().await;
+    let queue = instant_queue(&client);
+    queue.enqueue(&store, Op::archive(thread("t1"))).unwrap();
+    batch_modify(json!({"ids": ["m1"], "removeLabelIds": ["INBOX"]}))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let (flush, _) = flush_once(&queue, &mut store).await;
+    assert_eq!(flush.sent, 1);
+    assert_eq!(queue.queued(&store).unwrap().len(), 1);
+
+    // History echoes the archive: nothing changes, and the sent op is forgotten.
+    let start = PROFILE_HISTORY_ID;
+    history_list(start, None)
+        .respond_with(history_page(
+            vec![labels_removed(start + 1, "m1", "t1", &["INBOX"])],
+            start + 1,
+            None,
+        ))
+        .mount(&server)
+        .await;
+    let history = HistorySync::new(client.clone());
+    history
+        .run(&mut store, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(labels_of(&store, "m1"), ["UNREAD"]);
+    assert!(queue.queued(&store).unwrap().is_empty());
+
+    // Later, t1 is moved back to the Inbox elsewhere: the server wins.
+    history_list(start + 1, None)
+        .respond_with(history_page(
+            vec![labels_added(start + 2, "m1", "t1", &["INBOX"])],
+            start + 2,
+            None,
+        ))
+        .mount(&server)
+        .await;
+    history
+        .run(&mut store, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(view(&store, "INBOX"), ["t1", "t2"]);
 }
