@@ -20,6 +20,15 @@ pub struct SyncState {
     pub last_full_sync: Option<OffsetDateTime>,
 }
 
+/// A per-minute Gmail quota budget learned from rate limiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuotaBudget {
+    /// Units allowed per minute.
+    pub budget: u32,
+    /// The project's per-minute quota it was learned under.
+    pub units_per_minute: u32,
+}
+
 impl Store {
     /// The account's sync progress.
     pub fn sync_state(&self) -> Result<SyncState> {
@@ -54,6 +63,31 @@ impl Store {
                 ":complete": state.backfill_complete,
                 ":last_full_sync": state.last_full_sync.map(date_to_sql).transpose()?,
             },
+        )?;
+        Ok(())
+    }
+
+    /// The quota budget saved for the account, if any.
+    pub fn quota_budget(&self) -> Result<Option<QuotaBudget>> {
+        let (budget, basis): (Option<u32>, Option<u32>) = self.conn().query_row(
+            "SELECT quota_budget, quota_budget_basis FROM sync_state WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(budget
+            .zip(basis)
+            .map(|(budget, units_per_minute)| QuotaBudget {
+                budget,
+                units_per_minute,
+            }))
+    }
+
+    /// Saves (or with `None`, forgets) the account's quota budget. It is kept
+    /// apart from [`SyncState`], so resetting the sync keeps it.
+    pub fn set_quota_budget(&self, budget: Option<QuotaBudget>) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sync_state SET quota_budget = ?1, quota_budget_basis = ?2 WHERE id = 1",
+            rusqlite::params![budget.map(|b| b.budget), budget.map(|b| b.units_per_minute)],
         )?;
         Ok(())
     }
