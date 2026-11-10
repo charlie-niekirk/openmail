@@ -37,3 +37,9 @@ confidence-threshold = 0.9
 # Don't fail just because an allowed license isn't used yet.
 unused-allowed-license = "allow"
 
+# Per-crate exceptions for licenses we accept only where they are needed.
+exceptions = [
+    # The Mozilla CA certificate bundle (via reqwest's rustls-platform-verifier)
+    # is data under a permissive data license.
+    { name = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
+]
