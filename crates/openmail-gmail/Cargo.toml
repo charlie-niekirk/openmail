@@ -11,19 +11,24 @@ publish.workspace = true
 
 [dependencies]
 base64.workspace = true
+fastrand.workspace = true
+futures-util.workspace = true
 keyring.workspace = true
 oauth2.workspace = true
 open.workspace = true
+openmail-core = { path = "../openmail-core" }
 reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 url.workspace = true
 
 [dev-dependencies]
 sha2.workspace = true
+time = { workspace = true, features = ["macros"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock.workspace = true
 
