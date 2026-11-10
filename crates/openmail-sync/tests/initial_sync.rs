@@ -1182,3 +1182,84 @@ async fn a_resync_skips_unchanged_threads_fetched_as_messages() {
     let s3 = sync.store().thread(&ThreadId::new("s3")).unwrap().unwrap();
     assert_eq!(s3.history_id, HistoryId::new(900));
 }
+
+/// A learned budget over 1 s windows: 800 units a window at first, never
+/// below 50, probing every second.
+fn one_second_budget() -> QuotaPacing {
+    QuotaPacing::Budget(MinuteBudget {
+        units_per_minute: 1_000,
+        min: 50,
+        window: Duration::from_secs(1),
+        probe_every: Duration::from_secs(1),
+        ..MinuteBudget::default()
+    })
+}
+
+/// 150 single-message threads, all listed on one backfill page.
+async fn mount_busy_mailbox(server: &MockServer, history: u64) -> BatchResponder {
+    let mut mailbox = Mailbox::default();
+    for n in 1..=150 {
+        mailbox = mailbox.with_single(n, &[]);
+    }
+    for thread in mailbox.threads.values_mut() {
+        thread.history_id += history;
+    }
+    let ids: Vec<String> = (1..=150).map(|n| format!("s{n}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    mount_profile(server, 1).await;
+    mount_labels(server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &[], None))
+        .mount(server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &ids, None))
+        .mount(server)
+        .await;
+    // Gmail trips well below the configured quota, as on the real account
+    // (at about 46% of it), counting rejected calls too.
+    let batch = BatchResponder::new(mailbox).enforce_quota(460, Duration::from_secs(1));
+    batch.mount(server).await;
+    batch
+}
+
+#[tokio::test]
+async fn the_budget_learns_gmails_real_limit_and_the_next_sync_starts_there() {
+    let (server, client) = setup_paced(one_second_budget(), fast_retries()).await;
+    let batch = mount_busy_mailbox(&server, 0).await;
+    let config = InitialSyncConfig {
+        page_size: 500,
+        rate_limit_pause: Duration::from_secs(60),
+        ..config()
+    };
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config.clone());
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+    assert_eq!(done.threads, 150);
+    // Learning the limit costs a few rejected calls (those in flight when it
+    // tripped), with no lockout spiral and no sync-level pause.
+    let rejected = batch.quota_rejections();
+    assert!((1..=15).contains(&rejected), "{rejected} rejected");
+    assert_eq!(pauses(&seen), 0);
+    let learned = sync.store().quota_budget().unwrap().unwrap();
+    assert!(
+        (300..460).contains(&learned.budget),
+        "learned {}",
+        learned.budget
+    );
+
+    // The next sync's client starts at the learned budget, and Gmail turns
+    // (almost) nothing away.
+    let store = sync.into_store();
+    InitialSync::reset(&store).unwrap();
+    let (server, client) = setup_paced(one_second_budget(), fast_retries()).await;
+    let batch = mount_busy_mailbox(&server, 1_000).await;
+    let mut sync = InitialSync::new(client, store, config);
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+    assert_eq!(done.threads, 150);
+    assert!(seen[0].budget_per_minute.unwrap() < 460, "{:?}", seen[0]);
+    let rejected = batch.quota_rejections();
+    assert!(rejected <= 5, "{rejected} rejected");
+    assert_eq!(done.rate_limited_requests, rejected as u64);
+}
