@@ -9,6 +9,7 @@ mod convert;
 mod endpoints;
 mod error;
 mod models;
+mod mutations;
 mod pagination;
 mod retry;
 
@@ -20,7 +21,8 @@ pub use models::{
     ApiLabel, ApiLabelColor, ApiMessage, ApiThread, Header, History, HistoryLabelChange,
     HistoryMessage, HistoryRequest, HistoryType, ListHistoryResponse, ListLabelsResponse,
     ListMessagesResponse, ListRequest, ListThreadsResponse, METADATA_HEADERS, MessageFormat,
-    MessagePart, MessagePartBody, Profile, ThreadFormat,
+    MessagePart, MessagePartBody, ModifyLabels, Profile, ThreadFormat,
 };
+pub use mutations::MAX_BATCH_MODIFY_IDS;
 pub use pagination::{Paginated, paginate};
 pub use retry::RetryPolicy;

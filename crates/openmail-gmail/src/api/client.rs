@@ -3,8 +3,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::header::RETRY_AFTER;
-use reqwest::{RequestBuilder, Response, StatusCode, Url};
+use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
+use reqwest::{Method, RequestBuilder, Response, StatusCode, Url};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::error::{Error, Result, classify};
@@ -97,6 +98,51 @@ impl GmailClient {
         let response = self.send(|http| http.get(url.clone()).query(query)).await?;
         let bytes = response.bytes().await?;
         Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    /// Sends `method` to a `users/me` resource with an optional JSON body, and
+    /// decodes the JSON response.
+    pub(crate) async fn call_json<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        segments: &[&str],
+        body: Option<&(impl Serialize + ?Sized)>,
+    ) -> Result<T> {
+        let bytes = self.call(method, segments, body).await?.bytes().await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    /// Like [`call_json`](Self::call_json), for calls whose success response
+    /// has no body we need.
+    pub(crate) async fn call_empty(
+        &self,
+        method: Method,
+        segments: &[&str],
+        body: Option<&(impl Serialize + ?Sized)>,
+    ) -> Result<()> {
+        self.call(method, segments, body).await?;
+        Ok(())
+    }
+
+    async fn call(
+        &self,
+        method: Method,
+        segments: &[&str],
+        body: Option<&(impl Serialize + ?Sized)>,
+    ) -> Result<Response> {
+        let url = self.user_url(segments);
+        let body = body.map(serde_json::to_vec).transpose()?;
+        self.send(|http| {
+            let request = http.request(method.clone(), url.clone());
+            match &body {
+                Some(body) => request
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(body.clone()),
+                // An explicit empty body, so POSTs carry `Content-Length: 0`.
+                None => request.body(Vec::new()),
+            }
+        })
+        .await
     }
 
     /// Sends a request built by `build`, adding the access token, refreshing it

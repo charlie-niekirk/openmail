@@ -13,7 +13,7 @@ use openmail_core::{
     AttachmentId, HistoryId, LabelId, LabelListVisibility, LabelType, MessageId,
     MessageListVisibility, ThreadId,
 };
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 use super::{Error, Result};
 
@@ -343,6 +343,45 @@ impl ListRequest {
             query.push(("includeSpamTrash", "true".to_owned()));
         }
         query
+    }
+}
+
+/// Labels to add to and remove from messages or threads, for
+/// `messages.modify`, `messages.batchModify` and `threads.modify`.
+///
+/// Gmail applies the additions and removals together. Archiving is removing
+/// `INBOX`; marking read is removing `UNREAD`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[must_use]
+pub struct ModifyLabels {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub add_label_ids: Vec<LabelId>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remove_label_ids: Vec<LabelId>,
+}
+
+impl ModifyLabels {
+    /// No changes.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a label.
+    pub fn add_label(mut self, id: impl Into<LabelId>) -> Self {
+        self.add_label_ids.push(id.into());
+        self
+    }
+
+    /// Removes a label.
+    pub fn remove_label(mut self, id: impl Into<LabelId>) -> Self {
+        self.remove_label_ids.push(id.into());
+        self
+    }
+
+    /// Whether there is nothing to add or remove.
+    pub fn is_empty(&self) -> bool {
+        self.add_label_ids.is_empty() && self.remove_label_ids.is_empty()
     }
 }
 
