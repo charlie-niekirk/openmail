@@ -5,6 +5,7 @@
 mod accounts;
 mod cli;
 mod labels;
+mod ops;
 mod session;
 mod show;
 mod sync;
@@ -21,7 +22,7 @@ use openmail_sync::Cutoff;
 use time::UtcOffset;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, ThreadIds};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -113,5 +114,24 @@ async fn run(cli: Cli, offset: UtcOffset) -> anyhow::Result<()> {
             let (account, client) = session::account_client(account)?;
             watch::run(client, &account, Duration::from_secs(interval), offset).await
         }
+        Command::Archive(threads) => thread_action(account, ops::Action::Archive, threads).await,
+        Command::Star(threads) => thread_action(account, ops::Action::Star, threads).await,
+        Command::Unstar(threads) => thread_action(account, ops::Action::Unstar, threads).await,
+        Command::Read(threads) => thread_action(account, ops::Action::Read, threads).await,
+        Command::Unread(threads) => thread_action(account, ops::Action::Unread, threads).await,
+        Command::Label {
+            threads,
+            add,
+            remove,
+        } => thread_action(account, ops::Action::Label { add, remove }, threads).await,
     }
+}
+
+async fn thread_action(
+    account: Option<&str>,
+    action: ops::Action,
+    threads: ThreadIds,
+) -> anyhow::Result<()> {
+    let (account, client) = session::account_client(account)?;
+    ops::run(client, &account, action, threads.ids).await
 }

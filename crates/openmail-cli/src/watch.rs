@@ -74,7 +74,7 @@ pub async fn run(
 }
 
 /// An error and its sources, joined with `: `.
-fn error_chain(err: &dyn std::error::Error) -> String {
+pub fn error_chain(err: &dyn std::error::Error) -> String {
     let mut text = err.to_string();
     let mut source = err.source();
     while let Some(err) = source {
