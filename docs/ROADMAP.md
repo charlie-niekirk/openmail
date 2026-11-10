@@ -63,7 +63,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 - [ ] **1.4 Batch and mutations** — `feat/1.4-batch-mutations`
   - `multipart/mixed` batch endpoint (≤ 50 requests per batch).
   - messages/threads `modify`, `batchModify`, trash/untrash, delete, labels CRUD.
-- [ ] **1.5 MIME** ∥ — `feat/1.5-mime`
+- [x] **1.5 MIME** ∥ — `feat/1.5-mime`
   - Parse raw messages into text, HTML, inline `cid:` parts and attachments.
   - Build outgoing mail with alternatives and attachments; encode as base64url.
   - Tests against a `.eml` fixture corpus.
