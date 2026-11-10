@@ -228,7 +228,7 @@ pub struct BatchItem {
 /// with `404` for unknown IDs, and records every batch.
 #[derive(Clone)]
 pub struct BatchResponder {
-    mailbox: Arc<Mailbox>,
+    mailbox: Arc<Mutex<Mailbox>>,
     calls: Arc<Mutex<Vec<Vec<BatchItem>>>>,
     /// IDs answered with a rate-limit 429 the first time they are requested.
     rate_limit_once: Arc<Mutex<HashSet<String>>>,
@@ -237,7 +237,7 @@ pub struct BatchResponder {
 impl BatchResponder {
     pub fn new(mailbox: Mailbox) -> Self {
         Self {
-            mailbox: Arc::new(mailbox),
+            mailbox: Arc::new(Mutex::new(mailbox)),
             calls: Arc::default(),
             rate_limit_once: Arc::default(),
         }
@@ -251,6 +251,11 @@ impl BatchResponder {
             .unwrap()
             .extend(ids.iter().map(|id| (*id).to_owned()));
         self
+    }
+
+    /// Replaces the mailbox it serves, as if the server's mail changed.
+    pub fn set_mailbox(&self, mailbox: Mailbox) {
+        *self.mailbox.lock().unwrap() = mailbox;
     }
 
     /// Mounts the responder on the batch endpoint.
@@ -292,10 +297,11 @@ impl BatchResponder {
                        "errors": [{"reason": "rateLimitExceeded"}]}}),
             );
         }
+        let mailbox = self.mailbox.lock().unwrap();
         let found = if let Some(id) = rest.strip_prefix("/threads/") {
-            self.mailbox.thread_json(id)
+            mailbox.thread_json(id)
         } else if let Some(id) = rest.strip_prefix("/messages/") {
-            self.mailbox.raw_message_json(id)
+            mailbox.raw_message_json(id)
         } else {
             None
         };
@@ -343,4 +349,52 @@ impl Respond for BatchResponder {
             &format!("multipart/mixed; boundary={boundary}"),
         )
     }
+}
+
+/// A `history.list` mock for the page starting at `start` (with `token`).
+pub fn history_list(start: u64, token: Option<&str>) -> MockBuilder {
+    let mock = get("history").and(query_param("startHistoryId", start.to_string()));
+    match token {
+        Some(token) => mock.and(query_param("pageToken", token)),
+        None => mock.and(query_param_is_missing("pageToken")),
+    }
+}
+
+/// A `history.list` response.
+pub fn history_page(records: Vec<Value>, history_id: u64, next: Option<&str>) -> ResponseTemplate {
+    let mut body = json!({"history": records, "historyId": history_id.to_string()});
+    if let Some(next) = next {
+        body["nextPageToken"] = json!(next);
+    }
+    ResponseTemplate::new(200).set_body_json(body)
+}
+
+fn history_message(message: &str, thread: &str, labels: &[&str]) -> Value {
+    json!({"id": message, "threadId": thread, "labelIds": labels})
+}
+
+/// A history record of `message` added to `thread`.
+pub fn message_added(id: u64, message: &str, thread: &str, labels: &[&str]) -> Value {
+    let m = history_message(message, thread, labels);
+    json!({"id": id.to_string(), "messages": [m], "messagesAdded": [{"message": m}]})
+}
+
+/// A history record of `message` deleted from `thread`.
+pub fn message_deleted(id: u64, message: &str, thread: &str) -> Value {
+    let m = history_message(message, thread, &[]);
+    json!({"id": id.to_string(), "messages": [m], "messagesDeleted": [{"message": m}]})
+}
+
+/// A history record of `labels` added to `message`.
+pub fn labels_added(id: u64, message: &str, thread: &str, labels: &[&str]) -> Value {
+    let m = history_message(message, thread, labels);
+    json!({"id": id.to_string(), "messages": [m],
+           "labelsAdded": [{"message": m, "labelIds": labels}]})
+}
+
+/// A history record of `labels` removed from `message`.
+pub fn labels_removed(id: u64, message: &str, thread: &str, labels: &[&str]) -> Value {
+    let m = history_message(message, thread, &[]);
+    json!({"id": id.to_string(), "messages": [m],
+           "labelsRemoved": [{"message": m, "labelIds": labels}]})
 }

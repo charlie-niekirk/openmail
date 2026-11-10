@@ -25,6 +25,10 @@ pub enum Error {
     /// The sync was cancelled through its `CancellationToken`.
     #[error("sync was cancelled")]
     Cancelled,
+
+    /// Incremental sync needs the initial sync to have finished first.
+    #[error("the initial sync has not finished")]
+    InitialSyncIncomplete,
 }
 
 impl Error {
@@ -53,7 +57,7 @@ impl Error {
                 api::Error::Api { status, .. } => status.is_server_error(),
                 _ => false,
             },
-            Self::Store(_) | Self::Cancelled => false,
+            Self::Store(_) | Self::Cancelled | Self::InitialSyncIncomplete => false,
         }
     }
 }

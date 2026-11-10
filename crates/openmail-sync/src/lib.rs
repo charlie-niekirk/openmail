@@ -1,12 +1,15 @@
 //! Sync engine, offline operations queue and the tokio-based `MailService` the UI talks to.
 //!
 //! [`InitialSync`] downloads a mailbox's labels and thread metadata into the
-//! local store, resumably.
+//! local store, resumably. [`HistorySync`] then keeps it up to date from
+//! Gmail's `history.list`.
 
 mod error;
+mod history;
 mod initial;
 
 pub use error::{Error, Result};
+pub use history::{Changes, HISTORY_PAGE_SIZE, HistorySync};
 pub use initial::{Cutoff, InitialSync, InitialSyncConfig, Phase, Progress, SYNC_HEADERS};
 pub use tokio_util::sync::CancellationToken;
 

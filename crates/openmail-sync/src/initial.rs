@@ -175,6 +175,11 @@ impl InitialSync {
         &self.store
     }
 
+    /// The store being synced into, mutably (for [`HistorySync::run`](crate::HistorySync::run)).
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
     /// Gives the store back.
     pub fn into_store(self) -> Store {
         self.store
