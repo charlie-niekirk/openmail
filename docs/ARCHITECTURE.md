@@ -289,7 +289,7 @@ Dates are Unix milliseconds, history IDs integers, address lists JSON arrays.
 | `drafts` | Draft IDs, pointing at their message. |
 | `sync_state` | One row: `history_id`, an opaque backfill cursor, backfill-complete, last full sync. |
 | `sync_seen_threads` | Threads listed by the running initial sync or full resync, so it can delete stored threads that no longer exist when it finishes. |
-| `pending_ops` | The offline queue: op type, JSON payload, attempts, next retry, created at, last error. |
+| `pending_ops` | The offline ops queue: a never-reused ID (`AUTOINCREMENT`), op type, JSON payload (the op and what it changed locally), state (`queued`, `sending`, `sent`), attempts, next retry, created at, sent at, last error. |
 | `messages_fts` | FTS5 index over subject, sender, recipients (to, cc, bcc) and body text. |
 
 Triggers keep the derived data consistent, so writers only touch messages and
@@ -456,6 +456,51 @@ thread detail never sort), and
    failures with the retry delay, connectivity) through a callback that
    `MailService` wraps. Gmail push needs Pub/Sub and a server, so desktop
    polling is the deliberate choice.
-3. **Local changes.** User actions apply optimistically to SQLite, are written to the
-   persisted `pending_ops` queue, and replay against the API with retries. After a
-   history refresh, the server's version wins.
+3. **Local changes.** User actions go through `OpsQueue` (`openmail-sync`'s `ops`
+   module): label changes on threads or messages (archive, read and unread, star,
+   important, spam, "move to"), trash and untrash, delete forever, and label
+   create, rename, recolor and delete.
+   - **Optimistic apply.** `enqueue` applies the op to the store in the same
+     transaction that appends it to `pending_ops`, so queries (thread lists, label
+     counts, thread detail) show it at once; the store's triggers keep
+     `thread_labels` and the unread and starred flags right. The payload records
+     what the op actually changed (labels added and removed per message, rows a
+     delete removed, a label's previous name or color), so it can be reverted. A
+     label created offline gets a temporary ID (`openmail-pending-<op>`) that
+     later ops can use; when Gmail creates the label, the store and those ops
+     switch to the real ID, and the ops wait until then.
+   - **Undo.** A new op waits out an undo window (5 s by default, for 5.1's undo
+     toast) before it is sent. Within it, `undo` deletes the op and reverts its
+     change (undoing a label creation also undoes the ops that use the label).
+     The worker claims an op (`sending`) before sending it, so an undo cannot race
+     the send.
+   - **Replay.** `OpsQueue::run` sends due ops in queue order per thread or label:
+     an op waits while an earlier op on the same thread or label is waiting.
+     Label changes with the same labels are coalesced into `messages.batchModify`
+     calls (up to 1,000 messages each; threads with no stored messages use
+     `threads.modify`), and a label change followed by its exact inverse (star,
+     then unstar) cancels out without either being sent; the first waits while
+     its inverse is in its undo window. Trash, untrash and deletes go one call per
+     thread or message ("not found" counts as deleted). Requests go through the
+     client's quota limiter. Network failures, server errors and rate limits
+     retry with backoff (2 s doubling to 5 minutes, at least any `Retry-After`;
+     an exhausted daily quota waits the maximum). Gmail rejecting an op (any
+     other 4xx) drops it and reverts its local change; in a coalesced call that
+     Gmail rejects, the ops are sent one at a time to find the culprit. Sign-in
+     failures stop the worker with an error and keep the queue. Events (`Sent`,
+     `CancelledOut`, `Retrying`, `Failed`) go to a callback that `MailService`
+     wraps. On start the worker resends ops left `sending` by a crash; every send
+     is idempotent.
+   - **Conflicts: the server wins.** History and initial sync write Gmail's
+     version of threads and labels as they are; then, in the same transaction,
+     the queued ops on those threads (and, after a label sync, the label ops and
+     the ops that use labels) are applied again on top, in queue order, so the
+     user's pending change still shows until it is sent. Re-applying keeps the
+     labels the op changed the first time as its own, so undo still reverts them.
+     A sent op stays in the queue (`sent`) until a history sync that was started
+     after it was sent finishes: Gmail data requested before the op was sent may
+     not include it, so the op is re-applied over that data too, and data
+     requested later is taken as is. History entries that echo a sent op change
+     nothing (labels are added and removed, never toggled), and once it is gone,
+     later changes from elsewhere win. Sent label creations and edits are not
+     re-applied: the label is Gmail's from then on.
