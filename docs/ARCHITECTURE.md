@@ -333,6 +333,17 @@ serves views over every thread.
    else back to a configurable date, using batched metadata requests. Progress and
    the starting `historyId` are checkpointed so the sync can resume. Bodies load
    lazily, with background prefetch of recent mail.
+
+   `InitialSync` in `openmail-sync` records the profile's `historyId` before
+   anything else, then syncs labels, every Inbox thread, and a newest-first
+   backfill down to a cutoff (90 days by default; Gmail's `after:` operator), in
+   `threads.list` pages of 100. Each page's thread metadata (`format=metadata`
+   with From, To, Cc, Subject, Date and Message-ID) is fetched in batches of 50
+   and written in one transaction together with a JSON checkpoint (phase, page
+   token, cutoff) in `sync_state.backfill_cursor`, so a failed or cancelled sync
+   resumes at the next page. Threads already stored with the same history ID are
+   not fetched again. Optionally, the newest Inbox bodies are fetched
+   (`format=raw`, parsed by `openmail-mime`) between the Inbox and the backfill.
 2. **Incremental sync.** Poll `history.list` from the stored `historyId` — about every
    30 s while the window is focused, less often when idle — and apply added/deleted
    messages and added/removed labels. If the `historyId` has expired (404), do a full
