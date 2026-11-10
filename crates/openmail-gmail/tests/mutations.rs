@@ -3,8 +3,8 @@
 mod common;
 
 use common::{USER, setup};
-use openmail_core::{LabelId, MessageId, ThreadId};
-use openmail_gmail::api::{Error, MAX_BATCH_MODIFY_IDS, ModifyLabels};
+use openmail_core::{LabelId, LabelListVisibility, MessageId, MessageListVisibility, ThreadId};
+use openmail_gmail::api::{Error, LabelRequest, MAX_BATCH_MODIFY_IDS, ModifyLabels};
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, ResponseTemplate};
@@ -202,4 +202,81 @@ async fn deleting_a_missing_message_is_not_found() {
         .await
         .unwrap_err();
     assert!(matches!(err, Error::NotFound { .. }), "{err:?}");
+}
+
+#[test]
+fn label_request_sends_only_the_fields_set() {
+    let request = LabelRequest::new()
+        .name("Work/Projects")
+        .label_list_visibility(LabelListVisibility::LabelShowIfUnread)
+        .message_list_visibility(MessageListVisibility::Hide)
+        .color("#ffffff", "#16a765");
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        json!({
+            "name": "Work/Projects",
+            "labelListVisibility": "labelShowIfUnread",
+            "messageListVisibility": "hide",
+            "color": {"textColor": "#ffffff", "backgroundColor": "#16a765"}
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(LabelRequest::new()).unwrap(),
+        json!({})
+    );
+}
+
+#[tokio::test]
+async fn create_label() {
+    let (server, client, _) = setup().await;
+    Mock::given(method("POST"))
+        .and(path(format!("{USER}/labels")))
+        .and(body_json(
+            json!({"name": "Receipts", "labelListVisibility": "labelShow"}),
+        ))
+        .respond_with(common::json(200, "label_get.json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = LabelRequest::new()
+        .name("Receipts")
+        .label_list_visibility(LabelListVisibility::LabelShow);
+    let label = client.create_label(&request).await.unwrap();
+    assert!(!label.name.is_empty());
+}
+
+#[tokio::test]
+async fn patch_label_sends_only_the_changes() {
+    let (server, client, _) = setup().await;
+    Mock::given(method("PATCH"))
+        .and(path(format!("{USER}/labels/Label_7")))
+        .and(body_json(
+            json!({"color": {"textColor": "#000000", "backgroundColor": "#fad165"}}),
+        ))
+        .respond_with(common::json(200, "label_get.json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .patch_label(
+            &LabelId::new("Label_7"),
+            &LabelRequest::new().color("#000000", "#fad165"),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn delete_label() {
+    let (server, client, _) = setup().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("{USER}/labels/Label_7")))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client.delete_label(&LabelId::new("Label_7")).await.unwrap();
 }

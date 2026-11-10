@@ -1,10 +1,10 @@
 //! Gmail API calls that change the mailbox.
 
-use openmail_core::{MessageId, ThreadId};
+use openmail_core::{LabelId, MessageId, ThreadId};
 use reqwest::Method;
 use serde::Serialize;
 
-use super::{ApiMessage, ApiThread, GmailClient, ModifyLabels, Result};
+use super::{ApiLabel, ApiMessage, ApiThread, GmailClient, LabelRequest, ModifyLabels, Result};
 
 /// The most message IDs `messages.batchModify` accepts in one call.
 pub const MAX_BATCH_MODIFY_IDS: usize = 1000;
@@ -100,6 +100,25 @@ impl GmailClient {
     /// permanently, skipping Trash.
     pub async fn delete_thread(&self, id: &ThreadId) -> Result<()> {
         self.call_empty(Method::DELETE, &["threads", id.as_str()], NO_BODY)
+            .await
+    }
+
+    /// `labels.create`: creates a user label. `label` needs a name.
+    pub async fn create_label(&self, label: &LabelRequest) -> Result<ApiLabel> {
+        self.call_json(Method::POST, &["labels"], Some(label)).await
+    }
+
+    /// `labels.patch`: changes the fields set in `changes` and leaves the
+    /// rest as they are.
+    pub async fn patch_label(&self, id: &LabelId, changes: &LabelRequest) -> Result<ApiLabel> {
+        self.call_json(Method::PATCH, &["labels", id.as_str()], Some(changes))
+            .await
+    }
+
+    /// `labels.delete`: deletes a user label and removes it from every
+    /// message and thread. The messages themselves are kept.
+    pub async fn delete_label(&self, id: &LabelId) -> Result<()> {
+        self.call_empty(Method::DELETE, &["labels", id.as_str()], NO_BODY)
             .await
     }
 }
