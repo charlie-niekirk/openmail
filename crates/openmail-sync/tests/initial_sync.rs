@@ -267,22 +267,26 @@ async fn resumes_mid_backfill_after_a_failure() {
     assert_eq!(batch.requested("threads"), ["t1", "t2", "t3", "t4", "t5"]);
 }
 
-/// Mounts profile, labels, an empty Inbox and a backfill page that only matches
+/// `mock` matching only with `q` as given (`None`: no `q` at all).
+fn with_q(mock: wiremock::MockBuilder, q: Option<&str>) -> wiremock::MockBuilder {
+    match q {
+        Some(q) => mock.and(query_param("q", q)),
+        None => mock.and(query_param_is_missing("q")),
+    }
+}
+
+/// Mounts profile, labels, an Inbox page and a backfill page that only match
 /// with `q` as given (`None`: no `q` at all).
 async fn mount_cutoff(server: &MockServer, q: Option<&str>) {
     let mailbox = mailbox();
     mount_profile(server, 1).await;
     mount_labels(server).await;
-    list_page(Listing::Inbox, None)
-        .respond_with(page(&mailbox, &[], None))
+    with_q(list_page(Listing::Inbox, None), q)
+        .respond_with(page(&mailbox, &["t1"], None))
+        .expect(1)
         .mount(server)
         .await;
-    let backfill = list_page(Listing::Backfill, None);
-    let backfill = match q {
-        Some(q) => backfill.and(query_param("q", q)),
-        None => backfill.and(query_param_is_missing("q")),
-    };
-    backfill
+    with_q(list_page(Listing::Backfill, None), q)
         .respond_with(page(&mailbox, &["t4"], None))
         .expect(1)
         .mount(server)
@@ -291,7 +295,7 @@ async fn mount_cutoff(server: &MockServer, q: Option<&str>) {
 }
 
 #[tokio::test]
-async fn backfill_stops_at_the_cutoff_date() {
+async fn inbox_and_backfill_stop_at_the_cutoff_date() {
     let since = datetime!(2026-08-01 0:00 UTC);
     let (server, client) = setup().await;
     mount_cutoff(&server, Some(&format!("after:{}", since.unix_timestamp()))).await;
@@ -302,12 +306,13 @@ async fn backfill_stops_at_the_cutoff_date() {
     };
     let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config);
     let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
-    assert_eq!(done.threads, 1);
+    assert_eq!(done.threads, 2);
+    assert!(stored(sync.store(), "t1"));
     assert!(stored(sync.store(), "t4"));
 }
 
 #[tokio::test]
-async fn backfill_defaults_to_the_last_90_days() {
+async fn the_cutoff_defaults_to_the_last_90_days() {
     let (server, client) = setup().await;
     mount_profile(&server, 1).await;
     mount_labels(&server).await;
@@ -330,23 +335,68 @@ async fn backfill_defaults_to_the_last_90_days() {
 
     let expected = (OffsetDateTime::now_utc() - time::Duration::days(90)).unix_timestamp();
     let requests = server.received_requests().await.unwrap();
-    let q = requests
+    // The Inbox and backfill listings both carry the same cutoff.
+    let queries: Vec<String> = requests
         .iter()
-        .find(|r| r.url.path().ends_with("/threads") && !r.url.query().unwrap().contains("INBOX"))
-        .and_then(|r| r.url.query_pairs().find(|(k, _)| k == "q"))
-        .map(|(_, v)| v.into_owned())
-        .expect("a backfill query");
-    let after: i64 = q.strip_prefix("after:").unwrap().parse().unwrap();
-    assert!((after - expected).abs() < 60, "{q} vs {expected}");
+        .filter(|r| r.url.path().ends_with("/threads"))
+        .map(|r| {
+            r.url
+                .query_pairs()
+                .find(|(k, _)| k == "q")
+                .map(|(_, v)| v.into_owned())
+                .expect("a cutoff query")
+        })
+        .collect();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0], queries[1]);
+    let after: i64 = queries[0].strip_prefix("after:").unwrap().parse().unwrap();
+    assert!((after - expected).abs() < 60, "{queries:?} vs {expected}");
 }
 
 #[tokio::test]
-async fn cutoff_all_backfills_without_a_query() {
+async fn cutoff_all_lists_without_a_query() {
     let (server, client) = setup().await;
     mount_cutoff(&server, None).await;
     let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config());
     let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    assert_eq!(done.threads, 2);
+}
+
+#[tokio::test]
+async fn an_old_inbox_checkpoint_restarts_the_inbox_with_the_cutoff() {
+    let (server, client) = setup().await;
+    // A sync started before the Inbox used the cutoff, stopped mid-Inbox.
+    let store = Store::open_in_memory().unwrap();
+    let mut state = store.sync_state().unwrap();
+    state.history_id = Some(HistoryId::new(4000));
+    state.backfill_cursor = Some(
+        r#"{"phase":"inbox","page_token":"old-unbounded-token","after":1785542400}"#.to_owned(),
+    );
+    store.set_sync_state(&state).unwrap();
+    // No profile call: the sync resumes. Both listings start from their first
+    // page with the cutoff.
+    mount_profile(&server, 0).await;
+    let mailbox = mailbox();
+    mount_labels(&server).await;
+    with_q(list_page(Listing::Inbox, None), Some("after:1785542400"))
+        .respond_with(page(&mailbox, &["t1"], None))
+        .expect(1)
+        .mount(&server)
+        .await;
+    with_q(list_page(Listing::Backfill, None), Some("after:1785542400"))
+        .respond_with(page(&mailbox, &[], None))
+        .expect(1)
+        .mount(&server)
+        .await;
+    BatchResponder::new(mailbox).mount(&server).await;
+
+    let mut sync = InitialSync::new(client, store, config());
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    assert!(done.resumed);
     assert_eq!(done.threads, 1);
+    let state = sync.store().sync_state().unwrap();
+    assert!(state.backfill_complete);
+    assert_eq!(state.history_id, Some(HistoryId::new(4000)));
 }
 
 #[tokio::test]

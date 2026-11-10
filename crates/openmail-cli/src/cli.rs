@@ -47,10 +47,11 @@ pub enum Command {
         /// The thread ID, as printed by `threads`.
         thread_id: String,
     },
-    /// Download labels and thread metadata into the local store: the whole
-    /// Inbox, then older mail back to a cutoff. Interrupted syncs resume.
+    /// Download labels and thread metadata into the local store: Inbox
+    /// threads, then the rest of the mailbox, back to a cutoff. Interrupted
+    /// syncs resume.
     Sync {
-        /// How many days of mail outside the Inbox to sync.
+        /// How many days of mail to sync.
         #[arg(
             long,
             default_value_t = 90,

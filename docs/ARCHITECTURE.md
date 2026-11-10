@@ -335,8 +335,9 @@ serves views over every thread.
    lazily, with background prefetch of recent mail.
 
    `InitialSync` in `openmail-sync` records the profile's `historyId` before
-   anything else, then syncs labels, every Inbox thread, and a newest-first
-   backfill down to a cutoff (90 days by default; Gmail's `after:` operator), in
+   anything else, then syncs labels, Inbox threads, and a backfill of the rest,
+   each newest-first down to a cutoff (90 days by default; Gmail's `after:`
+   operator; older threads are left for on-demand fetching), in
    `threads.list` pages of 100. Each page's thread metadata (`format=metadata`
    with From, To, Cc, Subject, Date and Message-ID) is fetched in batches of 50
    and written in one transaction together with a JSON checkpoint (phase, page

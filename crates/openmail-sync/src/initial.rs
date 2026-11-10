@@ -50,7 +50,8 @@ impl Cutoff {
 /// How the initial sync runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialSyncConfig {
-    /// How far back the backfill goes. The Inbox is always synced in full.
+    /// How far back the sync goes, in the Inbox and the backfill alike. Older
+    /// threads are left for on-demand fetching.
     ///
     /// Fixed when a sync starts: a resumed sync keeps the cutoff it started with.
     pub cutoff: Cutoff,
@@ -87,7 +88,7 @@ pub enum Phase {
     /// Syncing the label list.
     #[default]
     Labels,
-    /// Syncing Inbox threads, newest first.
+    /// Syncing Inbox threads, newest first, down to the cutoff.
     Inbox,
     /// Fetching bodies of the newest Inbox messages.
     Prefetch,
@@ -131,8 +132,9 @@ impl Progress {
 ///
 /// The order is: record the mailbox's current `historyId` (so incremental sync
 /// can later catch up on anything that changes meanwhile), sync labels, sync
-/// every Inbox thread, optionally prefetch the newest Inbox bodies, then
-/// backfill the rest of the mailbox newest-first down to the [`Cutoff`].
+/// Inbox threads, optionally prefetch the newest Inbox bodies, then backfill
+/// the rest of the mailbox. Both listings go newest-first down to the
+/// [`Cutoff`].
 ///
 /// Each page of threads is written in one transaction together with a
 /// checkpoint in `sync_state`, so a sync that fails or is cancelled continues
@@ -260,7 +262,7 @@ impl InitialSync {
                 CheckpointPhase::Inbox => {
                     report.phase = Phase::Inbox;
                     progress(report);
-                    let request = ListRequest::new().label(SystemLabel::Inbox.id());
+                    let request = checkpoint.listing().label(SystemLabel::Inbox.id());
                     checkpoint = self
                         .sync_listing(cancel, checkpoint, request, report, progress)
                         .await?;
@@ -278,10 +280,7 @@ impl InitialSync {
                 CheckpointPhase::Backfill => {
                     report.phase = Phase::Backfill;
                     progress(report);
-                    let mut request = ListRequest::new();
-                    if let Some(after) = checkpoint.after {
-                        request = request.query(format!("after:{after}"));
-                    }
+                    let request = checkpoint.listing();
                     checkpoint = self
                         .sync_listing(cancel, checkpoint, request, report, progress)
                         .await?;
@@ -303,6 +302,7 @@ impl InitialSync {
             phase: CheckpointPhase::Inbox,
             page_token: None,
             after: self.config.cutoff.after(OffsetDateTime::now_utc()),
+            inbox_cutoff: true,
         };
         self.store.transaction(|store| {
             let state = SyncState {
@@ -524,9 +524,14 @@ struct Checkpoint {
     /// The next `threads.list` page of the phase; `None` for its first page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     page_token: Option<String>,
-    /// The backfill cutoff in Unix seconds, fixed when the sync starts (page
-    /// tokens belong to one query). `None` backfills everything.
+    /// The cutoff in Unix seconds, fixed when the sync starts (page tokens
+    /// belong to one query). `None` syncs everything.
     after: Option<i64>,
+    /// Whether the Inbox listing uses the cutoff too. Checkpoints written
+    /// before it did lack the field, and their Inbox page token belongs to an
+    /// unbounded listing.
+    #[serde(default)]
+    inbox_cutoff: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -544,10 +549,30 @@ impl Checkpoint {
         serde_json::to_string(self).expect("a checkpoint always serializes")
     }
 
+    /// Reads a stored checkpoint. One from before the Inbox used the cutoff
+    /// restarts the Inbox listing with it (stored threads are not fetched
+    /// again, since their history IDs match).
     fn decode(json: &str) -> Option<Self> {
-        serde_json::from_str(json)
-            .ok()
-            .filter(|c: &Self| c.phase != CheckpointPhase::Done)
+        let mut checkpoint: Self = serde_json::from_str(json).ok()?;
+        if checkpoint.phase == CheckpointPhase::Done {
+            return None;
+        }
+        if !checkpoint.inbox_cutoff {
+            if checkpoint.phase == CheckpointPhase::Inbox && checkpoint.after.is_some() {
+                tracing::info!("restarting the Inbox listing with the sync's cutoff");
+                checkpoint.page_token = None;
+            }
+            checkpoint.inbox_cutoff = true;
+        }
+        Some(checkpoint)
+    }
+
+    /// A `threads.list` request for this checkpoint's cutoff.
+    fn listing(&self) -> ListRequest {
+        match self.after {
+            Some(after) => ListRequest::new().query(format!("after:{after}")),
+            None => ListRequest::new(),
+        }
     }
 
     fn with_page_token(self, token: String) -> Self {
@@ -566,7 +591,7 @@ impl Checkpoint {
         Self {
             phase,
             page_token: None,
-            after: self.after,
+            ..self
         }
     }
 }
@@ -595,8 +620,12 @@ mod tests {
             phase: CheckpointPhase::Inbox,
             page_token: None,
             after: Some(1_700_000_000),
+            inbox_cutoff: true,
         };
-        assert_eq!(start.encode(), r#"{"phase":"inbox","after":1700000000}"#);
+        assert_eq!(
+            start.encode(),
+            r#"{"phase":"inbox","after":1700000000,"inbox_cutoff":true}"#
+        );
         let paged = start.clone().with_page_token("p2".to_owned());
         assert_eq!(Checkpoint::decode(&paged.encode()), Some(paged.clone()));
 
@@ -607,6 +636,27 @@ mod tests {
         assert_eq!(backfill.phase, CheckpointPhase::Backfill);
         assert_eq!(backfill.after, Some(1_700_000_000));
         assert_eq!(backfill.next_phase().phase, CheckpointPhase::Done);
+    }
+
+    #[test]
+    fn checkpoints_from_before_the_inbox_cutoff_restart_the_inbox_listing() {
+        let old = Checkpoint::decode(r#"{"phase":"inbox","page_token":"p9","after":1700000000}"#)
+            .unwrap();
+        assert_eq!(old.phase, CheckpointPhase::Inbox);
+        assert_eq!(old.page_token, None);
+        assert!(old.inbox_cutoff);
+
+        // Without a cutoff the listing is the same, so the token stays valid.
+        let all =
+            Checkpoint::decode(r#"{"phase":"inbox","page_token":"p9","after":null}"#).unwrap();
+        assert_eq!(all.page_token.as_deref(), Some("p9"));
+
+        // The backfill always used the cutoff.
+        let backfill =
+            Checkpoint::decode(r#"{"phase":"backfill","page_token":"b9","after":1700000000}"#)
+                .unwrap();
+        assert_eq!(backfill.page_token.as_deref(), Some("b9"));
+        assert!(backfill.inbox_cutoff);
     }
 
     #[test]
