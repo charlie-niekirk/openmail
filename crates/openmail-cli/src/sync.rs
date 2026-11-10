@@ -121,8 +121,8 @@ pub fn progress_line(progress: &Progress) -> String {
             progress.retried_requests, progress.rate_limited_requests
         ));
     }
-    if progress.batch_concurrency > 0 {
-        line.push_str(&format!(", {} in flight", progress.batch_concurrency));
+    if let Some(rate) = progress.units_per_second {
+        line.push_str(&format!(", {rate} units/s"));
     }
     if let Some(wait) = progress.rate_limit_wait {
         line.push_str(&format!(
@@ -162,17 +162,17 @@ mod tests {
 
         progress.retried_requests = 7;
         progress.rate_limited_requests = 5;
-        progress.batch_concurrency = 3;
+        progress.units_per_second = Some(75);
         assert!(
             progress_line(&progress)
-                .ends_with(", 25 bodies, 7 retried (5 rate-limited), 3 in flight"),
+                .ends_with(", 25 bodies, 7 retried (5 rate-limited), 75 units/s"),
             "{}",
             progress_line(&progress)
         );
 
         progress.rate_limit_wait = Some(std::time::Duration::from_secs(60));
         assert!(
-            progress_line(&progress).ends_with("in flight — waiting 60s for Gmail rate limit"),
+            progress_line(&progress).ends_with("units/s — waiting 60s for Gmail rate limit"),
             "{}",
             progress_line(&progress)
         );

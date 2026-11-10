@@ -5,7 +5,6 @@
 
 mod batch;
 mod client;
-mod concurrency;
 mod convert;
 mod endpoints;
 mod error;
@@ -16,9 +15,8 @@ mod quota;
 mod retry;
 
 pub use crate::auth::{TokenError, TokenFuture, TokenProvider};
-pub use batch::{DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE};
+pub use batch::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE};
 pub use client::{ClientStats, GmailClient, GmailClientBuilder, default_http_client};
-pub use concurrency::{AdaptiveConcurrency, BatchConcurrency};
 pub use error::{Error, QuotaKind, Result};
 pub use models::{
     ApiLabel, ApiLabelColor, ApiMessage, ApiThread, Header, History, HistoryLabelChange,
@@ -28,5 +26,5 @@ pub use models::{
 };
 pub use mutations::MAX_BATCH_MODIFY_IDS;
 pub use pagination::{Paginated, paginate};
-pub use quota::QuotaLimit;
+pub use quota::{AdaptiveRate, QuotaLimit, QuotaPacing};
 pub use retry::RetryPolicy;

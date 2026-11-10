@@ -31,6 +31,10 @@ pub const MAX_BATCH_SIZE: usize = 50;
 /// several small batches in flight beat one large one.
 pub const DEFAULT_BATCH_SIZE: usize = 10;
 
+/// Batch requests in flight at once by default: enough to hide latency, while
+/// the quota limiter does the pacing.
+pub const DEFAULT_BATCH_CONCURRENCY: usize = 2;
+
 /// One call inside a batch: a method on a `users/me` resource.
 #[derive(Debug, Clone)]
 pub(crate) struct BatchRequest {
@@ -111,9 +115,8 @@ impl GmailClient {
     }
 
     /// Sends `requests` in batches of the client's batch size, with up to its
-    /// [batch concurrency](super::BatchConcurrency) in flight, and decodes each
-    /// successful response as `T`. Results come back in the order of
-    /// `requests`.
+    /// batch concurrency in flight, and decodes each successful response as
+    /// `T`. Results come back in the order of `requests`.
     ///
     /// Each batch is charged the quota units of all its calls before it is
     /// sent. Calls that fail with a retryable status (429, rate-limit 403, 5xx)
@@ -132,8 +135,8 @@ impl GmailClient {
             .chunks(self.batch_size())
             .map(<[usize]>::to_vec)
             .collect();
-        // Every batch is polled at once; the client's concurrency gate decides
-        // how many are actually in flight (including retries).
+        // Every batch is polled at once; the client's batch slots decide how
+        // many are actually in flight (including retries).
         let all = chunks.len().max(1);
         let requests = &requests;
         let mut batches = stream::iter(chunks)
@@ -169,9 +172,9 @@ impl GmailClient {
         let mut refreshed = false;
 
         loop {
-            let permit = self.concurrency().acquire().await;
+            let permit = self.batch_slot().await;
             let started = Instant::now();
-            let (responses, token) = self.send_batch(requests, &pending).await?;
+            let (responses, token, sent) = self.send_batch(requests, &pending).await?;
             let elapsed = started.elapsed();
             drop(permit);
             // Failed items by status and reason, for the debug log.
@@ -222,13 +225,15 @@ impl GmailClient {
                 }
             }
 
-            self.concurrency().record(rate_limited_items > 0);
+            if rate_limited_items > 0 {
+                self.rate_limited(sent);
+            }
             tracing::debug!(
                 items = pending.len(),
                 elapsed_ms = elapsed.as_millis(),
                 failed = failures.values().sum::<usize>(),
                 ?failures,
-                in_flight_limit = self.concurrency().limit(),
+                units_per_second = self.stats().units_per_second,
                 "Gmail batch"
             );
 
@@ -272,12 +277,13 @@ impl GmailClient {
     }
 
     /// Sends one batch of `requests[i]` for each `i` in `pending`, and returns
-    /// each item's response (aligned with `pending`) and the token used.
+    /// each item's response (aligned with `pending`), the token used and when
+    /// it was sent.
     async fn send_batch(
         &self,
         requests: &[BatchRequest],
         pending: &[usize],
-    ) -> Result<(Vec<Option<ItemResponse>>, String)> {
+    ) -> Result<(Vec<Option<ItemResponse>>, String, tokio::time::Instant)> {
         let boundary = format!("batch_openmail_{:016x}", fastrand::u64(..));
         let items: Vec<(usize, &BatchRequest)> =
             pending.iter().map(|&i| (i, &requests[i])).collect();
@@ -286,7 +292,7 @@ impl GmailClient {
         let url = self.batch_url();
         let cost = items.iter().map(|(_, r)| r.cost).sum();
 
-        let (response, token) = self
+        let (response, token, sent) = self
             .send_with_token(cost, |http| {
                 http.post(url.clone())
                     .header(CONTENT_TYPE, &content_type)
@@ -315,7 +321,7 @@ impl GmailClient {
             by_index.entry(index).or_insert(part);
         }
         let responses = pending.iter().map(|i| by_index.remove(i)).collect();
-        Ok((responses, token))
+        Ok((responses, token, sent))
     }
 }
 

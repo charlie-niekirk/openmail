@@ -139,8 +139,8 @@ async fn full_run_syncs_labels_inbox_and_backfill() {
             rate_limit_wait: None,
             retried_requests: 0,
             rate_limited_requests: 0,
-            // Four clean batches raise the default adaptive start of 2.
-            batch_concurrency: 3,
+            // The default adaptive rate, with no rate limits to cut it.
+            units_per_second: Some(150),
         }
     );
     // Counts grow page by page.
@@ -218,7 +218,7 @@ async fn a_finished_sync_does_nothing_when_run_again() {
         again,
         Progress {
             phase: Phase::Done,
-            batch_concurrency: again.batch_concurrency,
+            units_per_second: again.units_per_second,
             ..Progress::default()
         }
     );

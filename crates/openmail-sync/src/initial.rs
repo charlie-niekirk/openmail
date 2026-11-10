@@ -130,9 +130,9 @@ pub struct Progress {
     pub retried_requests: u64,
     /// Requests and batch items Gmail rejected with a rate limit.
     pub rate_limited_requests: u64,
-    /// Batch requests the client may have in flight right now (it adapts to
-    /// rate limiting unless fixed).
-    pub batch_concurrency: usize,
+    /// The quota units per second the client allows itself right now (it
+    /// adapts to Gmail's rate limiting unless fixed); `None` if unlimited.
+    pub units_per_second: Option<u32>,
 }
 
 impl Progress {
@@ -232,7 +232,7 @@ impl InitialSync {
             Progress {
                 retried_requests: now.retries - start.retries,
                 rate_limited_requests: now.rate_limited - start.rate_limited,
-                batch_concurrency: now.batch_concurrency,
+                units_per_second: now.units_per_second,
                 ..report.clone()
             }
         };
