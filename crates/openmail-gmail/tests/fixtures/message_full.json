@@ -1,0 +1,169 @@
+{
+  "id": "18c3a2aa00000002",
+  "threadId": "18c3a1f2b4d5e6f7",
+  "labelIds": [
+    "INBOX",
+    "CATEGORY_PERSONAL",
+    "IMPORTANT"
+  ],
+  "snippet": "Yes! I&#39;ll bring the plans.",
+  "historyId": "1029200",
+  "internalDate": "1699266600000",
+  "sizeEstimate": 58231,
+  "payload": {
+    "partId": "",
+    "mimeType": "multipart/mixed",
+    "filename": "",
+    "headers": [
+      {
+        "name": "From",
+        "value": "\"Babbage, Charles\" <charles@example.com>"
+      },
+      {
+        "name": "To",
+        "value": "Ada Lovelace <ada@example.com>"
+      },
+      {
+        "name": "Cc",
+        "value": "grace@example.com"
+      },
+      {
+        "name": "Subject",
+        "value": "Re: Lunch on Friday?"
+      },
+      {
+        "name": "Date",
+        "value": "Mon, 6 Nov 2023 10:30:00 +0000"
+      },
+      {
+        "name": "Message-ID",
+        "value": "<CAB2@mail.example.com>"
+      },
+      {
+        "name": "In-Reply-To",
+        "value": "<CAA1@mail.example.com>"
+      },
+      {
+        "name": "References",
+        "value": "<CAA1@mail.example.com>"
+      },
+      {
+        "name": "Reply-To",
+        "value": "Charles <c.babbage@example.org>"
+      },
+      {
+        "name": "Content-Type",
+        "value": "multipart/mixed; boundary=\"outer\""
+      }
+    ],
+    "body": {
+      "size": 0
+    },
+    "parts": [
+      {
+        "partId": "0",
+        "mimeType": "multipart/related",
+        "filename": "",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "multipart/related; boundary=\"rel\""
+          }
+        ],
+        "body": {
+          "size": 0
+        },
+        "parts": [
+          {
+            "partId": "0.0",
+            "mimeType": "multipart/alternative",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "multipart/alternative; boundary=\"alt\""
+              }
+            ],
+            "body": {
+              "size": 0
+            },
+            "parts": [
+              {
+                "partId": "0.0.0",
+                "mimeType": "text/plain",
+                "filename": "",
+                "headers": [
+                  {
+                    "name": "Content-Type",
+                    "value": "text/plain; charset=\"UTF-8\""
+                  }
+                ],
+                "body": {
+                  "size": 28,
+                  "data": "WWVzISBJJ2xsIGJyaW5nIHRoZSBwbGFucy4NCg"
+                }
+              },
+              {
+                "partId": "0.0.1",
+                "mimeType": "text/html",
+                "filename": "",
+                "headers": [
+                  {
+                    "name": "Content-Type",
+                    "value": "text/html; charset=\"UTF-8\""
+                  }
+                ],
+                "body": {
+                  "size": 72,
+                  "data": "PHA-WWVzISBJJ2xsIGJyaW5nIHRoZSA8Yj5wbGFuczwvYj4uPGltZyBzcmM9ImNpZDpsb2dvQGV4YW1wbGUuY29tIj48L3A-"
+                }
+              }
+            ]
+          },
+          {
+            "partId": "0.1",
+            "mimeType": "image/png",
+            "filename": "logo.png",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "image/png; name=\"logo.png\""
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "inline; filename=\"logo.png\""
+              },
+              {
+                "name": "Content-ID",
+                "value": "<logo@example.com>"
+              }
+            ],
+            "body": {
+              "attachmentId": "ANGjdJ_logo_attachment_id",
+              "size": 2311
+            }
+          }
+        ]
+      },
+      {
+        "partId": "1",
+        "mimeType": "application/pdf",
+        "filename": "plans.pdf",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/pdf; name=\"plans.pdf\""
+          },
+          {
+            "name": "Content-Disposition",
+            "value": "attachment; filename=\"plans.pdf\""
+          }
+        ],
+        "body": {
+          "attachmentId": "ANGjdJ_plans_attachment_id",
+          "size": 51234
+        }
+      }
+    ]
+  }
+}

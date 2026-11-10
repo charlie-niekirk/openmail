@@ -1,0 +1,15 @@
+{
+  "id": "Label_12",
+  "name": "Work/Projects",
+  "messageListVisibility": "show",
+  "labelListVisibility": "labelShowIfUnread",
+  "type": "user",
+  "messagesTotal": 214,
+  "messagesUnread": 3,
+  "threadsTotal": 97,
+  "threadsUnread": 2,
+  "color": {
+    "textColor": "#ffffff",
+    "backgroundColor": "#16a765"
+  }
+}

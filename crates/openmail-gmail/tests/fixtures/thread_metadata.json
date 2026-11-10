@@ -1,0 +1,157 @@
+{
+  "id": "18c3a1f2b4d5e6f7",
+  "historyId": "1029380",
+  "messages": [
+    {
+      "id": "18c3a1f2b4d5e6f7",
+      "threadId": "18c3a1f2b4d5e6f7",
+      "labelIds": [
+        "SENT"
+      ],
+      "snippet": "Shall we get lunch on Friday?",
+      "historyId": "1029100",
+      "internalDate": "1699261200000",
+      "payload": {
+        "partId": "",
+        "mimeType": "multipart/alternative",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Ada Lovelace <ada@example.com>"
+          },
+          {
+            "name": "To",
+            "value": "Charles Babbage <charles@example.com>, team@example.com"
+          },
+          {
+            "name": "Subject",
+            "value": "Lunch on Friday?"
+          },
+          {
+            "name": "Date",
+            "value": "Mon, 6 Nov 2023 09:00:00 +0000"
+          },
+          {
+            "name": "Message-ID",
+            "value": "<CAA1@mail.example.com>"
+          }
+        ],
+        "body": {
+          "size": 0
+        }
+      },
+      "sizeEstimate": 4210
+    },
+    {
+      "id": "18c3a2aa00000002",
+      "threadId": "18c3a1f2b4d5e6f7",
+      "labelIds": [
+        "INBOX",
+        "CATEGORY_PERSONAL",
+        "IMPORTANT"
+      ],
+      "snippet": "Yes! I&#39;ll bring the plans.",
+      "historyId": "1029200",
+      "internalDate": "1699266600000",
+      "payload": {
+        "partId": "",
+        "mimeType": "multipart/mixed",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "\"Babbage, Charles\" <charles@example.com>"
+          },
+          {
+            "name": "To",
+            "value": "Ada Lovelace <ada@example.com>"
+          },
+          {
+            "name": "Cc",
+            "value": "grace@example.com"
+          },
+          {
+            "name": "Subject",
+            "value": "Re: Lunch on Friday?"
+          },
+          {
+            "name": "Date",
+            "value": "Mon, 6 Nov 2023 10:30:00 +0000"
+          },
+          {
+            "name": "Message-ID",
+            "value": "<CAB2@mail.example.com>"
+          },
+          {
+            "name": "In-Reply-To",
+            "value": "<CAA1@mail.example.com>"
+          },
+          {
+            "name": "References",
+            "value": "<CAA1@mail.example.com>"
+          },
+          {
+            "name": "Reply-To",
+            "value": "Charles <c.babbage@example.org>"
+          }
+        ],
+        "body": {
+          "size": 0
+        }
+      },
+      "sizeEstimate": 58231
+    },
+    {
+      "id": "18c3a3bb00000003",
+      "threadId": "18c3a1f2b4d5e6f7",
+      "labelIds": [
+        "INBOX",
+        "UNREAD",
+        "Label_12"
+      ],
+      "snippet": "Sounds good, see you then",
+      "historyId": "1029380",
+      "internalDate": "1699269300000",
+      "payload": {
+        "partId": "",
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Ada Lovelace <ada@example.com>"
+          },
+          {
+            "name": "To",
+            "value": "\"Babbage, Charles\" <charles@example.com>"
+          },
+          {
+            "name": "Subject",
+            "value": "Re: Lunch on Friday?"
+          },
+          {
+            "name": "Date",
+            "value": "Mon, 6 Nov 2023 11:15:00 +0000"
+          },
+          {
+            "name": "Message-ID",
+            "value": "<CAC3@mail.example.com>"
+          },
+          {
+            "name": "In-Reply-To",
+            "value": "<CAB2@mail.example.com>"
+          },
+          {
+            "name": "References",
+            "value": "<CAA1@mail.example.com> <CAB2@mail.example.com>"
+          }
+        ],
+        "body": {
+          "size": 0
+        }
+      },
+      "sizeEstimate": 1820
+    }
+  ]
+}

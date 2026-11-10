@@ -1,0 +1,39 @@
+{
+  "labels": [
+    {
+      "id": "INBOX",
+      "name": "INBOX",
+      "messageListVisibility": "hide",
+      "labelListVisibility": "labelShow",
+      "type": "system"
+    },
+    {
+      "id": "UNREAD",
+      "name": "UNREAD",
+      "type": "system"
+    },
+    {
+      "id": "CATEGORY_SOCIAL",
+      "name": "CATEGORY_SOCIAL",
+      "type": "system"
+    },
+    {
+      "id": "Label_12",
+      "name": "Work/Projects",
+      "messageListVisibility": "show",
+      "labelListVisibility": "labelShowIfUnread",
+      "type": "user",
+      "color": {
+        "textColor": "#ffffff",
+        "backgroundColor": "#16a765"
+      }
+    },
+    {
+      "id": "Label_13",
+      "name": "Receipts",
+      "messageListVisibility": "hide",
+      "labelListVisibility": "labelHide",
+      "type": "user"
+    }
+  ]
+}

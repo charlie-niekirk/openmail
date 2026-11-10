@@ -12,5 +12,9 @@ mod retry;
 pub use crate::auth::{TokenError, TokenFuture, TokenProvider};
 pub use client::{GmailClient, GmailClientBuilder, default_http_client};
 pub use error::{Error, QuotaKind, Result};
-pub use models::Profile;
+pub use models::{
+    ApiLabel, ApiLabelColor, ApiMessage, ApiThread, Header, ListLabelsResponse,
+    ListMessagesResponse, ListRequest, ListThreadsResponse, METADATA_HEADERS, MessageFormat,
+    MessagePart, MessagePartBody, Profile, ThreadFormat,
+};
 pub use retry::RetryPolicy;
