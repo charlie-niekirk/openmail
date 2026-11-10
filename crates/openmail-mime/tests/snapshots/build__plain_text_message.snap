@@ -1,0 +1,23 @@
+---
+source: crates/openmail-mime/tests/build.rs
+expression: "text.replace(\"\\r\\n\", \"\\n\")"
+---
+From: "Ada Lovelace" <ada@example.com>
+Subject: Notes on the engine
+Date: Tue, 7 Jan 2025 08:30:00 +0000
+Message-ID: <fixed-1@example.com>
+To: "Charles Babbage" <charles@example.org>
+Cc: <notes@example.net>
+Bcc: <archive@example.com>
+Reply-To: "Analytical Engines" <engines@example.com>
+In-Reply-To: <parent@example.org>
+References: <root@example.org> <parent@example.org>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Charles,
+
+See the notes.
+
+Ada

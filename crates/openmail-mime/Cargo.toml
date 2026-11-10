@@ -12,6 +12,7 @@ publish.workspace = true
 [dependencies]
 openmail-core = { path = "../openmail-core" }
 base64.workspace = true
+mail-builder.workspace = true
 mail-parser.workspace = true
 thiserror.workspace = true
 time.workspace = true

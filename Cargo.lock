@@ -4170,6 +4170,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
+name = "mail-builder"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aca3ad941e4c466402151719d6b4cea4bdfcb212b11e5970afa75e7d28c6502a"
+dependencies = [
+ "encodify",
+ "web-time",
+]
+
+[[package]]
 name = "mail-parser"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5175,6 +5185,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "insta",
+ "mail-builder",
  "mail-parser",
  "openmail-core",
  "thiserror 2.0.21",

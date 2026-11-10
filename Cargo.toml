@@ -41,6 +41,8 @@ time = { version = "0.3.55", features = ["serde"] }
 # MIME parsing and building. `full_encoding` adds encoding_rs for the legacy
 # multi-byte charsets (ISO-2022-JP, Shift_JIS, GB18030, Big5, …).
 mail-parser = { version = "1.0.1", features = ["full_encoding"] }
+# Without `gethostname`: Message-IDs are generated on the sender's domain instead.
+mail-builder = { version = "2.0.1", default-features = false }
 base64 = "0.23.1"
 insta = "1.49.0"
 
