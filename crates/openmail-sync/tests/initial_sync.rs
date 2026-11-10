@@ -37,6 +37,7 @@ fn config() -> InitialSyncConfig {
         prefetch_inbox_bodies: None,
         rate_limit_pause: Duration::from_millis(10),
         max_rate_limit_pauses: 5,
+        single_message_fetch: true,
     }
 }
 
@@ -970,4 +971,214 @@ async fn the_default_pacing_stays_under_a_6000_per_minute_quota() {
     assert_eq!(batch.quota_rejections(), 0);
     assert_eq!(done.rate_limited_requests, 0);
     assert_eq!(pauses(&seen), 0);
+}
+
+/// The `messages.list` requests the server received, as their query pairs.
+async fn message_listings(server: &MockServer) -> Vec<Vec<(String, String)>> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path().ends_with("/messages"))
+        .map(|r| r.url.query_pairs().into_owned().collect())
+        .collect()
+}
+
+/// Inbox: s1 (one message), t2 (a reply sent after it), t4 (a reply to a
+/// message older than the cutoff). Elsewhere: s3 (one message) and s50 (one
+/// message, older than the cutoff). Thread IDs are their first message's ID,
+/// as in Gmail.
+fn message_level_mailbox() -> Mailbox {
+    Mailbox::default()
+        .with_single(1, &["INBOX", "UNREAD"])
+        .with_thread("t2", &[("t2", &["INBOX"], 6), ("m2b", &["SENT"], 2)])
+        .with_single(3, &[])
+        .with_thread("t4", &[("t4", &["INBOX"], 40), ("m4b", &["INBOX"], 4)])
+        .with_single(50, &[])
+}
+
+/// Mounts `message_level_mailbox()` with the threads after its 30-day cutoff
+/// listed: Inbox [s1, t2, t4], backfill [s1, t2, s3, t4].
+async fn mount_message_level(server: &MockServer) -> BatchResponder {
+    let mailbox = message_level_mailbox();
+    mount_profile(server, 1).await;
+    mount_labels(server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &["s1", "t2", "t4"], None))
+        .mount(server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &["s1", "t2", "s3", "t4"], None))
+        .mount(server)
+        .await;
+    let batch = BatchResponder::new(mailbox);
+    batch.mount(server).await;
+    batch
+}
+
+/// A 30-day cutoff before the newest message.
+fn thirty_days() -> InitialSyncConfig {
+    let newest = OffsetDateTime::from_unix_timestamp(common::NEWEST_MS / 1000).unwrap();
+    InitialSyncConfig {
+        cutoff: Cutoff::Since(newest - time::Duration::days(30)),
+        page_size: 10,
+        ..config()
+    }
+}
+
+#[tokio::test]
+async fn single_message_threads_are_fetched_as_messages() {
+    let (server, client) = setup().await;
+    let batch = mount_message_level(&server).await;
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), thirty_days());
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+
+    assert_eq!(done.threads, 4);
+    assert_eq!(done.messages, 6);
+    // s1, t2 and t4 are listed again by the backfill, unchanged.
+    assert_eq!(done.skipped_threads, 3);
+    // Single-message threads cost a messages.get; the others a threads.get.
+    assert_eq!(batch.requested("messages"), ["s1", "s3"]);
+    let mut whole = batch.requested("threads");
+    whole.sort();
+    assert_eq!(whole, ["t2", "t4"]);
+    for item in batch.calls().iter().flatten() {
+        let query = item.target.split_once('?').unwrap().1;
+        assert!(
+            query.starts_with("format=metadata&metadataHeaders=From"),
+            "{query}"
+        );
+    }
+    // One messages.list page covered both phases, with the sync's cutoff.
+    let listings = message_listings(&server).await;
+    assert_eq!(listings.len(), 1);
+    let after = thirty_days().cutoff;
+    let Cutoff::Since(after) = after else {
+        unreachable!()
+    };
+    assert!(listings[0].contains(&("q".to_owned(), format!("after:{}", after.unix_timestamp()))));
+    assert!(listings[0].contains(&("maxResults".to_owned(), "500".to_owned())));
+
+    let store = sync.store();
+    let s1 = store.thread(&ThreadId::new("s1")).unwrap().unwrap();
+    assert!(s1.is_unread());
+    assert_eq!(s1.message_count, 1);
+    assert_eq!(s1.subject.as_deref(), Some("Subject s1"));
+    // The history ID it was listed with, for the unchanged check.
+    assert_eq!(s1.history_id, HistoryId::new(101));
+    assert!(store.message(&MessageId::new("s1")).unwrap().is_some());
+    let t2 = store.thread(&ThreadId::new("t2")).unwrap().unwrap();
+    assert_eq!(t2.message_count, 2);
+    assert!(!stored(store, "s50"));
+}
+
+#[tokio::test]
+async fn threads_spanning_the_cutoff_are_stored_whole() {
+    let (server, client) = setup().await;
+    let batch = mount_message_level(&server).await;
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), thirty_days());
+    sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+
+    // Only m4b is after the cutoff, but its thread is t4, whose first message
+    // (ID t4) is older: it is fetched whole, never stored partially.
+    assert!(batch.requested("threads").contains(&"t4".to_owned()));
+    assert!(!batch.requested("messages").contains(&"m4b".to_owned()));
+    let store = sync.store();
+    let t4 = store.thread(&ThreadId::new("t4")).unwrap().unwrap();
+    assert_eq!(t4.message_count, 2);
+    assert!(store.message(&MessageId::new("t4")).unwrap().is_some());
+    assert!(store.message(&MessageId::new("m4b")).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn the_message_listing_goes_only_as_far_as_the_threads_need() {
+    let (server, client) = setup().await;
+    // 600 single-message threads, s1 newest: two messages.list pages.
+    let mut mailbox = Mailbox::default();
+    for n in 1..=600 {
+        mailbox = mailbox.with_single(n, &[]);
+    }
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &[], None))
+        .mount(&server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &["s1", "s2"], Some("b2")))
+        .mount(&server)
+        .await;
+    list_page(Listing::Backfill, Some("b2"))
+        .respond_with(page(&mailbox, &["s600"], None))
+        .mount(&server)
+        .await;
+    let batch = BatchResponder::new(mailbox);
+    batch.mount(&server).await;
+
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config());
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    assert_eq!(done.threads, 3);
+    assert_eq!(batch.requested("messages"), ["s1", "s2", "s600"]);
+    assert!(batch.requested("threads").is_empty());
+    // The first page needed one listing page; s600 needed the second.
+    let listings = message_listings(&server).await;
+    assert_eq!(listings.len(), 2);
+    assert!(listings[1].contains(&("pageToken".to_owned(), "500".to_owned())));
+}
+
+#[tokio::test]
+async fn single_message_fetch_can_be_turned_off() {
+    let (server, client) = setup().await;
+    let batch = mount_message_level(&server).await;
+    let config = InitialSyncConfig {
+        single_message_fetch: false,
+        ..thirty_days()
+    };
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config);
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    assert_eq!(done.threads, 4);
+    assert!(batch.requested("messages").is_empty());
+    assert!(message_listings(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_resync_skips_unchanged_threads_fetched_as_messages() {
+    let (server, client) = setup().await;
+    let batch = mount_message_level(&server).await;
+    let mut sync = InitialSync::new(
+        client.clone(),
+        Store::open_in_memory().unwrap(),
+        thirty_days(),
+    );
+    sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    let store = sync.into_store();
+    InitialSync::reset(&store).unwrap();
+
+    // Gmail changes s3 (a label, say): its history ID moves on.
+    let mut mailbox = message_level_mailbox();
+    mailbox.threads.get_mut("s3").unwrap().history_id = 900;
+    let (server, client) = setup().await;
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &["s1", "t2", "t4"], None))
+        .mount(&server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &["s1", "t2", "s3", "t4"], None))
+        .mount(&server)
+        .await;
+    let resync = BatchResponder::new(mailbox);
+    resync.mount(&server).await;
+    drop(batch);
+
+    let mut sync = InitialSync::new(client, store, thirty_days());
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    assert_eq!(done.threads, 1);
+    assert_eq!(done.skipped_threads, 6);
+    assert_eq!(resync.requested("messages"), ["s3"]);
+    assert!(resync.requested("threads").is_empty());
+    let s3 = sync.store().thread(&ThreadId::new("s3")).unwrap().unwrap();
+    assert_eq!(s3.history_id, HistoryId::new(900));
 }

@@ -1,8 +1,9 @@
 //! The initial sync: labels, then Inbox threads, then a backfill of older mail.
 
+use std::collections::HashMap;
 use std::future::Future;
 
-use openmail_core::{Label, LabelId, MessageId, SystemLabel, ThreadId};
+use openmail_core::{HistoryId, Label, LabelId, MessageId, SystemLabel, ThreadId};
 use openmail_gmail::GmailClient;
 use openmail_gmail::api::{
     self, ApiThread, LearnedBudget, ListRequest, MAX_BATCH_SIZE, MessageFormat, ThreadFormat,
@@ -17,6 +18,10 @@ use crate::{Error, Result};
 
 /// The headers kept with thread metadata during the initial sync.
 pub const SYNC_HEADERS: &[&str] = &["From", "To", "Cc", "Subject", "Date", "Message-ID"];
+
+/// Messages per `messages.list` page when indexing which threads have a
+/// single message (Gmail's maximum).
+const INDEX_PAGE_SIZE: u32 = 500;
 
 /// How far back the backfill goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +75,10 @@ pub struct InitialSyncConfig {
     /// How many such pauses in a row, with no progress between them, before
     /// the sync gives up with the rate-limit error.
     pub max_rate_limit_pauses: u32,
+    /// Fetch threads that have a single message with `messages.get` (5 quota
+    /// units) instead of `threads.get` (10). On by default; see
+    /// [`InitialSync`].
+    pub single_message_fetch: bool,
 }
 
 impl Default for InitialSyncConfig {
@@ -80,6 +89,7 @@ impl Default for InitialSyncConfig {
             prefetch_inbox_bodies: None,
             rate_limit_pause: std::time::Duration::from_secs(60),
             max_rate_limit_pauses: 5,
+            single_message_fetch: true,
         }
     }
 }
@@ -161,6 +171,15 @@ impl Progress {
 /// checkpoint in `sync_state`, so a sync that fails or is cancelled continues
 /// from the next page when run again.
 ///
+/// Threads are listed with `threads.list`, and those already stored with the
+/// same history ID are skipped. Most threads have a single message, and those
+/// are fetched with `messages.get`, at half the quota cost of `threads.get`.
+/// To tell them apart without fetching, the sync pages through `messages.list`
+/// with the same cutoff alongside the threads: a thread has a single message
+/// if the newest message listed for it is the thread's first message, whose
+/// ID Gmail uses as the thread ID. A thread whose first message is older than
+/// the cutoff is never listed with its own ID, so it is always fetched whole.
+///
 /// The client's learned quota budget is saved in the store as the sync goes,
 /// and a client that has not learned one yet starts at the saved one.
 #[derive(Debug)]
@@ -170,6 +189,8 @@ pub struct InitialSync {
     config: InitialSyncConfig,
     /// The quota budget last saved in the store.
     saved_budget: Option<QuotaBudget>,
+    /// The `messages.list` index of this run.
+    index: Option<MessageIndex>,
 }
 
 impl InitialSync {
@@ -180,6 +201,7 @@ impl InitialSync {
             store,
             config,
             saved_budget: None,
+            index: None,
         }
     }
 
@@ -253,6 +275,8 @@ impl InitialSync {
         };
         let mut progress = |report: &Progress| progress(&with_stats(report));
         self.seed_budget()?;
+        // Messages may have arrived since an earlier run listed them.
+        self.index = None;
         let mut report = Progress::default();
         let mut pauses = 0;
         let mut at_last_pause = report.advanced();
@@ -433,7 +457,7 @@ impl InitialSync {
             let page = cancellable(cancel, self.client.list_threads(&request)).await?;
             let listed: Vec<ThreadId> = page.threads.iter().map(|t| t.id.clone()).collect();
             let fetch = self.changed_threads(page.threads)?;
-            let (threads, gone) = self.fetch_threads(cancel, &fetch).await?;
+            let (threads, gone) = self.fetch_page(cancel, checkpoint.after, fetch).await?;
 
             checkpoint = match page.next_page_token.filter(|t| !t.is_empty()) {
                 Some(token) => checkpoint.with_page_token(token),
@@ -461,25 +485,52 @@ impl InitialSync {
         Ok(checkpoint)
     }
 
-    /// The listed threads whose stored copy is missing or has another history ID.
-    fn changed_threads(&self, listed: Vec<ApiThread>) -> Result<Vec<ThreadId>> {
+    /// The listed threads whose stored copy is missing or has another history
+    /// ID, with their listed history IDs.
+    fn changed_threads(&self, listed: Vec<ApiThread>) -> Result<Vec<ListedThread>> {
         let ids: Vec<ThreadId> = listed.iter().map(|t| t.id.clone()).collect();
         let stored = self.store.thread_history_ids(&ids)?;
         Ok(listed
             .into_iter()
             .filter(|t| t.history_id.is_none() || t.history_id != stored.get(&t.id).copied())
-            .map(|t| t.id)
+            .map(|t| (t.id, t.history_id))
             .collect())
     }
 
-    /// Fetches thread metadata in batches. Threads deleted since they were
-    /// listed are returned separately.
-    async fn fetch_threads(
+    /// Fetches the metadata of a page's changed threads: those with a single
+    /// message with `messages.get`, the rest with `threads.get`, batched and
+    /// at the same time. Threads deleted since they were listed are returned
+    /// separately.
+    async fn fetch_page(
         &mut self,
         cancel: &CancellationToken,
-        ids: &[ThreadId],
+        after: Option<i64>,
+        fetch: Vec<ListedThread>,
     ) -> Result<FetchedThreads> {
-        fetch_threads(&self.client, cancel, ids).await
+        if fetch.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let (single, whole) = if self.config.single_message_fetch {
+            let index = match &mut self.index {
+                Some(index) if index.after == after => index,
+                index => index.insert(MessageIndex::new(after)),
+            };
+            index.split(&self.client, cancel, fetch).await?
+        } else {
+            (Vec::new(), fetch.into_iter().map(|(id, _)| id).collect())
+        };
+        tracing::debug!(
+            single = single.len(),
+            whole = whole.len(),
+            "fetching thread metadata"
+        );
+        let (mut singles, mut wholes) = tokio::try_join!(
+            fetch_single_messages(&self.client, cancel, &single),
+            fetch_threads(&self.client, cancel, &whole),
+        )?;
+        singles.0.append(&mut wholes.0);
+        singles.1.append(&mut wholes.1);
+        Ok(singles)
     }
 
     /// Fetches and stores bodies for the newest `limit` Inbox messages that do
@@ -572,6 +623,112 @@ pub(crate) type FetchedThreads = (
     Vec<(openmail_core::Thread, Vec<openmail_core::Message>)>,
     Vec<ThreadId>,
 );
+
+/// A thread from `threads.list`, with its history ID there.
+type ListedThread = (ThreadId, Option<HistoryId>);
+
+/// Which threads have a single message, from paging through `messages.list`
+/// (newest first, with the sync's cutoff) as far as the threads asked about.
+#[derive(Debug)]
+struct MessageIndex {
+    /// The cutoff the listing uses.
+    after: Option<i64>,
+    /// The next page, unless the listing is finished.
+    next_page: Option<String>,
+    finished: bool,
+    /// For every thread listed so far: whether the newest of its messages
+    /// listed is its first message (whose ID is the thread ID), so the
+    /// thread has only that message.
+    single: HashMap<ThreadId, bool>,
+}
+
+impl MessageIndex {
+    fn new(after: Option<i64>) -> Self {
+        Self {
+            after,
+            next_page: None,
+            finished: false,
+            single: HashMap::new(),
+        }
+    }
+
+    /// Splits `threads` into those with a single message (to fetch with
+    /// `messages.get`) and the rest (to fetch whole), listing more messages
+    /// until every thread has been seen or the listing ends. A thread never
+    /// seen (its messages are all in Spam or Trash, say) is fetched whole.
+    async fn split(
+        &mut self,
+        client: &GmailClient,
+        cancel: &CancellationToken,
+        threads: Vec<ListedThread>,
+    ) -> Result<(Vec<ListedThread>, Vec<ThreadId>)> {
+        while !self.finished && threads.iter().any(|(id, _)| !self.single.contains_key(id)) {
+            let mut request = match self.after {
+                Some(after) => ListRequest::new().query(format!("after:{after}")),
+                None => ListRequest::new(),
+            };
+            request.page_token = self.next_page.take();
+            request.max_results = Some(INDEX_PAGE_SIZE);
+            let page = cancellable(cancel, client.list_messages(&request)).await?;
+            for message in page.messages {
+                let first = message.id.as_str() == message.thread_id.as_str();
+                // Newest first: only a thread's first listing counts.
+                self.single.entry(message.thread_id).or_insert(first);
+            }
+            self.next_page = page.next_page_token.filter(|t| !t.is_empty());
+            self.finished = self.next_page.is_none();
+        }
+        let (single, whole): (Vec<_>, Vec<_>) = threads
+            .into_iter()
+            .partition(|(id, _)| self.single.get(id).copied().unwrap_or(false));
+        Ok((single, whole.into_iter().map(|(id, _)| id).collect()))
+    }
+}
+
+/// Fetches threads that have a single message, whose ID is the thread ID,
+/// with `messages.get` (metadata, with [`SYNC_HEADERS`]). Each thread keeps
+/// the history ID it was listed with, so the unchanged-thread check compares
+/// like with like. Threads whose message no longer exists are returned
+/// separately.
+async fn fetch_single_messages(
+    client: &GmailClient,
+    cancel: &CancellationToken,
+    threads: &[ListedThread],
+) -> Result<FetchedThreads> {
+    if threads.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let ids: Vec<MessageId> = threads
+        .iter()
+        .map(|(id, _)| MessageId::new(id.as_str()))
+        .collect();
+    let results = cancellable(
+        cancel,
+        client.get_messages(&ids, MessageFormat::Metadata, SYNC_HEADERS),
+    )
+    .await?;
+    let mut fetched = Vec::with_capacity(threads.len());
+    let mut gone = Vec::new();
+    for ((id, history_id), result) in threads.iter().zip(results) {
+        match result {
+            Ok(message) => {
+                let thread = ApiThread {
+                    id: id.clone(),
+                    snippet: None,
+                    history_id: *history_id,
+                    messages: vec![message],
+                };
+                fetched.push(thread.into_domain()?);
+            }
+            Err(api::Error::NotFound { .. }) => {
+                tracing::debug!(thread = %id, "thread deleted before it was fetched");
+                gone.push(id.clone());
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok((fetched, gone))
+}
 
 /// Fetches thread metadata (with [`SYNC_HEADERS`]) in batches. Threads that
 /// no longer exist are returned separately.
