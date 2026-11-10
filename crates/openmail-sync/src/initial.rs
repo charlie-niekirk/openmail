@@ -1,0 +1,545 @@
+//! The initial sync: labels, then Inbox threads, then a backfill of older mail.
+
+use std::future::Future;
+
+use openmail_core::{Label, LabelId, MessageId, SystemLabel, ThreadId};
+use openmail_gmail::GmailClient;
+use openmail_gmail::api::{
+    self, ApiThread, ListRequest, MAX_BATCH_SIZE, MessageFormat, ThreadFormat,
+};
+use openmail_mime::ParsedMessage;
+use openmail_store::{MessageBody, Store, SyncState};
+use serde::{Deserialize, Serialize};
+use time::{Duration, OffsetDateTime};
+use tokio_util::sync::CancellationToken;
+
+use crate::{Error, Result};
+
+/// The headers kept with thread metadata during the initial sync.
+pub const SYNC_HEADERS: &[&str] = &["From", "To", "Cc", "Subject", "Date", "Message-ID"];
+
+/// How far back the backfill goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cutoff {
+    /// The whole mailbox.
+    All,
+    /// Threads with mail in the last this many days.
+    Days(u32),
+    /// Threads with mail after this moment.
+    Since(OffsetDateTime),
+}
+
+impl Default for Cutoff {
+    /// The last 90 days.
+    fn default() -> Self {
+        Self::Days(90)
+    }
+}
+
+impl Cutoff {
+    /// The cutoff as Unix seconds, for Gmail's `after:` search operator.
+    fn after(self, now: OffsetDateTime) -> Option<i64> {
+        match self {
+            Self::All => None,
+            Self::Days(days) => Some((now - Duration::days(i64::from(days))).unix_timestamp()),
+            Self::Since(date) => Some(date.unix_timestamp()),
+        }
+    }
+}
+
+/// How the initial sync runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialSyncConfig {
+    /// How far back the backfill goes. The Inbox is always synced in full.
+    ///
+    /// Fixed when a sync starts: a resumed sync keeps the cutoff it started with.
+    pub cutoff: Cutoff,
+    /// Threads per `threads.list` page. Each page is fetched in batches of
+    /// [`MAX_BATCH_SIZE`] and written in one transaction.
+    pub page_size: u32,
+    /// Fetch the bodies of this many of the newest Inbox messages after the
+    /// Inbox is synced. `None` (the default) fetches no bodies.
+    pub prefetch_inbox_bodies: Option<usize>,
+}
+
+impl Default for InitialSyncConfig {
+    fn default() -> Self {
+        Self {
+            cutoff: Cutoff::default(),
+            page_size: 100,
+            prefetch_inbox_bodies: None,
+        }
+    }
+}
+
+/// Where the initial sync is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Phase {
+    /// Syncing the label list.
+    #[default]
+    Labels,
+    /// Syncing Inbox threads, newest first.
+    Inbox,
+    /// Fetching bodies of the newest Inbox messages.
+    Prefetch,
+    /// Syncing the rest of the mailbox, newest first, down to the cutoff.
+    Backfill,
+    /// Finished.
+    Done,
+}
+
+/// Counts reported as the sync goes, for this run only (a resumed sync starts
+/// from zero).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub phase: Phase,
+    /// Whether this run continued an interrupted sync.
+    pub resumed: bool,
+    /// Labels stored.
+    pub labels: usize,
+    /// Threads fetched and stored.
+    pub threads: u64,
+    /// Messages stored with those threads.
+    pub messages: u64,
+    /// Listed threads not fetched because they were already stored unchanged
+    /// (or were deleted before they could be fetched).
+    pub skipped_threads: u64,
+    /// Message bodies prefetched.
+    pub bodies: u64,
+}
+
+/// Downloads a mailbox's labels and thread metadata into a [`Store`].
+///
+/// The order is: record the mailbox's current `historyId` (so incremental sync
+/// can later catch up on anything that changes meanwhile), sync labels, sync
+/// every Inbox thread, optionally prefetch the newest Inbox bodies, then
+/// backfill the rest of the mailbox newest-first down to the [`Cutoff`].
+///
+/// Each page of threads is written in one transaction together with a
+/// checkpoint in `sync_state`, so a sync that fails or is cancelled continues
+/// from the next page when run again.
+#[derive(Debug)]
+pub struct InitialSync {
+    client: GmailClient,
+    store: Store,
+    config: InitialSyncConfig,
+}
+
+impl InitialSync {
+    /// A sync of the account `client` is signed in to, into `store`.
+    pub fn new(client: GmailClient, store: Store, config: InitialSyncConfig) -> Self {
+        Self {
+            client,
+            store,
+            config,
+        }
+    }
+
+    /// The store being synced into.
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// Gives the store back.
+    pub fn into_store(self) -> Store {
+        self.store
+    }
+
+    /// Runs (or resumes) the sync until it finishes, fails or `cancel` fires.
+    ///
+    /// `progress` is called as each phase starts and after each page or batch.
+    /// Returns the final progress; if the sync had already finished, that is
+    /// [`Phase::Done`] with nothing done.
+    pub async fn run(
+        &mut self,
+        cancel: &CancellationToken,
+        mut progress: impl FnMut(&Progress),
+    ) -> Result<Progress> {
+        let mut report = Progress::default();
+        let state = self.store.sync_state()?;
+        if state.backfill_complete {
+            report.phase = Phase::Done;
+            return Ok(report);
+        }
+
+        let mut checkpoint = match state.backfill_cursor.as_deref().map(Checkpoint::decode) {
+            Some(Some(checkpoint)) => {
+                report.resumed = true;
+                checkpoint
+            }
+            unreadable => {
+                if unreadable.is_some() {
+                    tracing::warn!("unreadable sync checkpoint; starting the sync again");
+                }
+                self.start(cancel).await?
+            }
+        };
+
+        progress(&report);
+        self.sync_labels(cancel, &mut report).await?;
+        progress(&report);
+
+        loop {
+            match checkpoint.phase {
+                CheckpointPhase::Inbox => {
+                    report.phase = Phase::Inbox;
+                    progress(&report);
+                    let request = ListRequest::new().label(SystemLabel::Inbox.id());
+                    checkpoint = self
+                        .sync_listing(cancel, checkpoint, request, &mut report, &mut progress)
+                        .await?;
+                }
+                CheckpointPhase::Prefetch => {
+                    if let Some(limit) = self.config.prefetch_inbox_bodies {
+                        report.phase = Phase::Prefetch;
+                        progress(&report);
+                        self.prefetch_bodies(cancel, limit, &mut report, &mut progress)
+                            .await?;
+                    }
+                    checkpoint = checkpoint.next_phase();
+                    self.save(Some(&checkpoint))?;
+                }
+                CheckpointPhase::Backfill => {
+                    report.phase = Phase::Backfill;
+                    progress(&report);
+                    let mut request = ListRequest::new();
+                    if let Some(after) = checkpoint.after {
+                        request = request.query(format!("after:{after}"));
+                    }
+                    checkpoint = self
+                        .sync_listing(cancel, checkpoint, request, &mut report, &mut progress)
+                        .await?;
+                }
+                CheckpointPhase::Done => break,
+            }
+        }
+
+        report.phase = Phase::Done;
+        progress(&report);
+        Ok(report)
+    }
+
+    // The async helpers take `&mut self` so their futures are `Send`: `Store`
+    // is `Send` but not `Sync`.
+
+    /// Starts a new sync: records the current history ID and the first
+    /// checkpoint together.
+    async fn start(&mut self, cancel: &CancellationToken) -> Result<Checkpoint> {
+        let profile = cancellable(cancel, self.client.get_profile()).await?;
+        let checkpoint = Checkpoint {
+            phase: CheckpointPhase::Inbox,
+            page_token: None,
+            after: self.config.cutoff.after(OffsetDateTime::now_utc()),
+        };
+        self.store.transaction(|store| {
+            let state = SyncState {
+                history_id: Some(profile.history_id),
+                backfill_cursor: Some(checkpoint.encode()),
+                backfill_complete: false,
+                last_full_sync: None,
+            };
+            store.set_sync_state(&state)
+        })?;
+        Ok(checkpoint)
+    }
+
+    async fn sync_labels(
+        &mut self,
+        cancel: &CancellationToken,
+        report: &mut Progress,
+    ) -> Result<()> {
+        let labels: Vec<Label> = cancellable(cancel, self.client.list_labels())
+            .await?
+            .into_iter()
+            .map(Label::from)
+            .collect();
+        self.store.replace_labels(&labels)?;
+        report.labels = labels.len();
+        Ok(())
+    }
+
+    /// Syncs every page of `request` from the checkpoint's page token, and
+    /// returns the checkpoint for the next phase.
+    async fn sync_listing(
+        &mut self,
+        cancel: &CancellationToken,
+        mut checkpoint: Checkpoint,
+        request: ListRequest,
+        report: &mut Progress,
+        progress: &mut impl FnMut(&Progress),
+    ) -> Result<Checkpoint> {
+        let phase = checkpoint.phase;
+        while checkpoint.phase == phase {
+            let request = ListRequest {
+                page_token: checkpoint.page_token.clone(),
+                max_results: Some(self.config.page_size),
+                ..request.clone()
+            };
+            let page = cancellable(cancel, self.client.list_threads(&request)).await?;
+            let listed = page.threads.len();
+            let fetch = self.changed_threads(page.threads)?;
+            let threads = self.fetch_threads(cancel, &fetch).await?;
+
+            checkpoint = match page.next_page_token.filter(|t| !t.is_empty()) {
+                Some(token) => checkpoint.with_page_token(token),
+                None => checkpoint.next_phase(),
+            };
+            let next = (checkpoint.phase != CheckpointPhase::Done).then_some(&checkpoint);
+            self.store.transaction(|store| {
+                store.replace_threads(&threads)?;
+                save_checkpoint(store, next)
+            })?;
+
+            report.threads += threads.len() as u64;
+            report.messages += threads.iter().map(|(_, m)| m.len() as u64).sum::<u64>();
+            report.skipped_threads += (listed - threads.len()) as u64;
+            progress(report);
+        }
+        Ok(checkpoint)
+    }
+
+    /// The listed threads whose stored copy is missing or has another history ID.
+    fn changed_threads(&self, listed: Vec<ApiThread>) -> Result<Vec<ThreadId>> {
+        let ids: Vec<ThreadId> = listed.iter().map(|t| t.id.clone()).collect();
+        let stored = self.store.thread_history_ids(&ids)?;
+        Ok(listed
+            .into_iter()
+            .filter(|t| t.history_id.is_none() || t.history_id != stored.get(&t.id).copied())
+            .map(|t| t.id)
+            .collect())
+    }
+
+    /// Fetches thread metadata in batches. Threads deleted since they were
+    /// listed are left out.
+    async fn fetch_threads(
+        &mut self,
+        cancel: &CancellationToken,
+        ids: &[ThreadId],
+    ) -> Result<Vec<(openmail_core::Thread, Vec<openmail_core::Message>)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let results = cancellable(
+            cancel,
+            self.client
+                .get_threads(ids, ThreadFormat::Metadata, SYNC_HEADERS),
+        )
+        .await?;
+        let mut threads = Vec::with_capacity(ids.len());
+        for (id, result) in ids.iter().zip(results) {
+            match result {
+                Ok(thread) => threads.push(thread.into_domain()?),
+                Err(api::Error::NotFound { .. }) => {
+                    tracing::debug!(thread = %id, "thread deleted before it was fetched");
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Ok(threads)
+    }
+
+    /// Fetches and stores bodies for the newest `limit` Inbox messages that do
+    /// not have one yet.
+    async fn prefetch_bodies(
+        &mut self,
+        cancel: &CancellationToken,
+        limit: usize,
+        report: &mut Progress,
+        progress: &mut impl FnMut(&Progress),
+    ) -> Result<()> {
+        let ids = self
+            .store
+            .recent_messages_without_body(&LabelId::from(SystemLabel::Inbox), limit)?;
+        for chunk in ids.chunks(MAX_BATCH_SIZE) {
+            let results = cancellable(
+                cancel,
+                self.client.get_messages(chunk, MessageFormat::Raw, &[]),
+            )
+            .await?;
+            let fetched_at = OffsetDateTime::now_utc();
+            let mut bodies = Vec::with_capacity(chunk.len());
+            for (id, result) in chunk.iter().zip(results) {
+                match result {
+                    Ok(message) => {
+                        if let Some(body) = parse_body(id, message.raw.as_deref(), fetched_at) {
+                            bodies.push((id, body));
+                        }
+                    }
+                    Err(api::Error::NotFound { .. }) => {
+                        tracing::debug!(message = %id, "message deleted before its body was fetched");
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+            self.store.transaction(|store| {
+                bodies
+                    .iter()
+                    .try_for_each(|(id, body)| store.upsert_body(id, body))
+            })?;
+            report.bodies += bodies.len() as u64;
+            progress(report);
+        }
+        Ok(())
+    }
+
+    fn save(&self, checkpoint: Option<&Checkpoint>) -> Result<()> {
+        Ok(self
+            .store
+            .transaction(|store| save_checkpoint(store, checkpoint))?)
+    }
+}
+
+/// Parses a `format=raw` message into a body. A body that does not parse is
+/// skipped with a warning: it will be fetched again when the message is opened.
+fn parse_body(
+    id: &MessageId,
+    raw: Option<&str>,
+    fetched_at: OffsetDateTime,
+) -> Option<MessageBody> {
+    let Some(raw) = raw else {
+        tracing::warn!(message = %id, "Gmail returned no raw message");
+        return None;
+    };
+    match ParsedMessage::parse_base64url(raw) {
+        Ok(parsed) => Some(MessageBody {
+            text: parsed.plain_text(),
+            html: parsed.html,
+            fetched_at,
+        }),
+        Err(err) => {
+            tracing::warn!(message = %id, %err, "could not parse a message body");
+            None
+        }
+    }
+}
+
+/// Saves `checkpoint` as the place to resume from, or marks the sync complete
+/// if there is none.
+fn save_checkpoint(
+    store: &Store,
+    checkpoint: Option<&Checkpoint>,
+) -> Result<(), openmail_store::Error> {
+    let mut state = store.sync_state()?;
+    match checkpoint {
+        Some(checkpoint) => state.backfill_cursor = Some(checkpoint.encode()),
+        None => {
+            state.backfill_cursor = None;
+            state.backfill_complete = true;
+            state.last_full_sync = Some(OffsetDateTime::now_utc());
+        }
+    }
+    store.set_sync_state(&state)
+}
+
+/// Waits for `future` unless `cancel` fires first.
+async fn cancellable<T>(
+    cancel: &CancellationToken,
+    future: impl Future<Output = api::Result<T>>,
+) -> Result<T> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(Error::Cancelled),
+        result = future => result.map_err(Error::from),
+    }
+}
+
+/// Where an interrupted sync resumes, stored as JSON in
+/// `sync_state.backfill_cursor`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Checkpoint {
+    phase: CheckpointPhase,
+    /// The next `threads.list` page of the phase; `None` for its first page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page_token: Option<String>,
+    /// The backfill cutoff in Unix seconds, fixed when the sync starts (page
+    /// tokens belong to one query). `None` backfills everything.
+    after: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckpointPhase {
+    Inbox,
+    Prefetch,
+    Backfill,
+    /// Never stored: a finished sync has no checkpoint.
+    Done,
+}
+
+impl Checkpoint {
+    fn encode(&self) -> String {
+        serde_json::to_string(self).expect("a checkpoint always serializes")
+    }
+
+    fn decode(json: &str) -> Option<Self> {
+        serde_json::from_str(json)
+            .ok()
+            .filter(|c: &Self| c.phase != CheckpointPhase::Done)
+    }
+
+    fn with_page_token(self, token: String) -> Self {
+        Self {
+            page_token: Some(token),
+            ..self
+        }
+    }
+
+    fn next_phase(self) -> Self {
+        let phase = match self.phase {
+            CheckpointPhase::Inbox => CheckpointPhase::Prefetch,
+            CheckpointPhase::Prefetch => CheckpointPhase::Backfill,
+            CheckpointPhase::Backfill | CheckpointPhase::Done => CheckpointPhase::Done,
+        };
+        Self {
+            phase,
+            page_token: None,
+            after: self.after,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::datetime;
+
+    use super::*;
+
+    #[test]
+    fn cutoff_resolves_to_unix_seconds() {
+        let now = datetime!(2026-11-10 12:00 UTC);
+        assert_eq!(Cutoff::All.after(now), None);
+        assert_eq!(
+            Cutoff::Days(90).after(now),
+            Some(datetime!(2026-08-12 12:00 UTC).unix_timestamp())
+        );
+        assert_eq!(Cutoff::Since(now).after(now), Some(now.unix_timestamp()));
+        assert_eq!(Cutoff::default(), Cutoff::Days(90));
+    }
+
+    #[test]
+    fn checkpoints_round_trip_and_advance() {
+        let start = Checkpoint {
+            phase: CheckpointPhase::Inbox,
+            page_token: None,
+            after: Some(1_700_000_000),
+        };
+        assert_eq!(start.encode(), r#"{"phase":"inbox","after":1700000000}"#);
+        let paged = start.clone().with_page_token("p2".to_owned());
+        assert_eq!(Checkpoint::decode(&paged.encode()), Some(paged.clone()));
+
+        let prefetch = paged.next_phase();
+        assert_eq!(prefetch.phase, CheckpointPhase::Prefetch);
+        assert_eq!(prefetch.page_token, None);
+        let backfill = prefetch.next_phase();
+        assert_eq!(backfill.phase, CheckpointPhase::Backfill);
+        assert_eq!(backfill.after, Some(1_700_000_000));
+        assert_eq!(backfill.next_phase().phase, CheckpointPhase::Done);
+    }
+
+    #[test]
+    fn unreadable_checkpoints_are_ignored() {
+        assert_eq!(Checkpoint::decode("not json"), None);
+        assert_eq!(Checkpoint::decode(r#"{"phase":"later"}"#), None);
+        assert_eq!(Checkpoint::decode(r#"{"phase":"done","after":null}"#), None);
+    }
+}
