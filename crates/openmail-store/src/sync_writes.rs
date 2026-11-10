@@ -183,7 +183,7 @@ impl Store {
     }
 
     /// The IDs of a thread's stored messages.
-    fn thread_message_ids(&self, id: &ThreadId) -> Result<Vec<MessageId>> {
+    pub fn thread_message_ids(&self, id: &ThreadId) -> Result<Vec<MessageId>> {
         let mut stmt = self
             .conn()
             .prepare_cached("SELECT id FROM messages WHERE thread_id = ?1")?;
