@@ -5,12 +5,16 @@
 //! Gmail's `history.list`, and [`Scheduler`] runs both: the initial sync
 //! until it is done, then a poll every so often. [`OpsQueue`] applies user
 //! actions to the store at once and sends them to Gmail in the background.
+//! [`MailService`] runs all of this on a tokio runtime of its own and is what
+//! the UI talks to: commands through a [`MailHandle`], events through
+//! [`MailEvents`].
 
 mod error;
 mod history;
 mod initial;
 mod ops;
 mod scheduler;
+mod service;
 
 pub use error::{Error, Result};
 pub use history::{Changes, HISTORY_PAGE_SIZE, HistorySync};
@@ -19,6 +23,7 @@ pub use ops::{Flush, Op, OpEvent, OpId, OpsConfig, OpsQueue, QueuedOp, Target};
 pub use scheduler::{
     Activity, Connectivity, Scheduler, SchedulerConfig, SchedulerHandle, SyncEvent,
 };
+pub use service::{MailEvent, MailEvents, MailHandle, MailService, MailServiceConfig, SyncStatus};
 pub use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
