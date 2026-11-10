@@ -288,6 +288,7 @@ Dates are Unix milliseconds, history IDs integers, address lists JSON arrays.
 | `attachments` | Attachment metadata keyed by message and MIME part ID, with an optional local path. |
 | `drafts` | Draft IDs, pointing at their message. |
 | `sync_state` | One row: `history_id`, an opaque backfill cursor, backfill-complete, last full sync. |
+| `sync_seen_threads` | Threads listed by the running initial sync or full resync, so it can delete stored threads that no longer exist when it finishes. |
 | `pending_ops` | The offline queue: op type, JSON payload, attempts, next retry, created at, last error. |
 | `messages_fts` | FTS5 index over subject, sender, recipients (to, cc, bcc) and body text. |
 
@@ -355,8 +356,8 @@ thread detail never sort), and
    operator; older threads are left for on-demand fetching), in
    `threads.list` pages of 100. Each page's thread metadata (`format=metadata`
    with From, To, Cc, Subject, Date and Message-ID) is fetched in batches of 10,
-   four in flight (Gmail works through a large batch slowly and throttles it),
-   and written in one transaction together with a JSON checkpoint (phase, page
+   several in flight (Gmail works through a large batch slowly and throttles it;
+   see the quota note below), and written in one transaction together with a JSON checkpoint (phase, page
    token, cutoff) in `sync_state.backfill_cursor`, so a failed or cancelled sync
    resumes at the next page. Threads already stored with the same history ID are
    not fetched again. Optionally, the newest Inbox bodies are fetched
@@ -373,11 +374,65 @@ thread detail never sort), and
    and resumes from its checkpoint within the same run. Batches log their size,
    latency and failures at debug level, and the client counts retried and
    rate-limited requests (`GmailClient::stats`) for progress reports.
-2. **Incremental sync.** Poll `history.list` from the stored `historyId` — about every
-   30 s while the window is focused, less often when idle — and apply added/deleted
-   messages and added/removed labels. If the `historyId` has expired (404), do a full
-   resync. Online/offline state is tracked so polling pauses when offline. Gmail push
-   needs Pub/Sub and a server, so desktop polling is the deliberate choice.
+
+   **Batch concurrency.** The units budget is not the only limit: Gmail also
+   throttles each user's concurrent requests ("too many concurrent requests for
+   user"), at a level that varies by account and over time. With a fixed four
+   batches of 10 in flight, a real 30-day sync had 74% of its items
+   rate-limited and spent most of its time in backoff. So how many batches are
+   in flight is an AIMD controller (like TCP congestion control) shared by a
+   client's clones: it starts at 2, adds one after 4 clean batches (up to 6),
+   and halves (down to 1) when a batch comes back with rate-limited items, then
+   ignores results for a 3 s cooldown, since batches already in flight were sent
+   at the old level. Retries wait for a slot like new batches. The quota
+   limiter remains the hard cap. `GmailClientBuilder::batch_concurrency` (the
+   CLI's `--batch-concurrency`) fixes the level instead, and
+   `ClientStats::batch_concurrency` reports the current one; changes are logged
+   at debug level.
+2. **Incremental sync.** `HistorySync` polls `history.list` from the stored
+   `historyId`, in pages of 500 records, once the initial sync is complete.
+   Each page is applied in one transaction that also advances the stored
+   `historyId`: to the page's newest record, or to the response's (current)
+   `historyId` after the last page, so an interrupted poll resumes where it
+   stopped.
+   - Threads that gained or lost messages are fetched again (metadata, in
+     batches) and replaced, which keeps the thread's snippet, date, message
+     count and labels right; threads that are gone (404) are deleted.
+   - Label additions and removals are applied to stored messages, and the
+     store's triggers roll them up into `thread_labels` and the unread and
+     starred flags. A thread fetched in the same page is already current, so
+     its label changes are skipped. Changes to messages that are not stored
+     (older than the cutoff) are ignored, except that a message moved to the
+     Inbox has its thread fetched.
+   - A change that refers to a user label the store does not know re-syncs
+     the label list first.
+   - Replaying a page is harmless: threads are replaced with the server's
+     copy, and label changes add or remove rather than toggle.
+
+   **Expired history.** If Gmail answers `404` (it keeps history for typically
+   about a week), `InitialSync::reset` clears the `historyId`, the checkpoint and
+   `backfill_complete`, keeping stored rows, and the initial sync runs again
+   from scratch: a new `historyId` from the profile, then the listings with
+   the configured cutoff. Threads whose history ID is unchanged are not
+   fetched again. A sync that starts afresh records every thread it lists in
+   `sync_seen_threads`; when it finishes, stored threads within its cutoff
+   that it did not list are deleted (they are gone, or in Spam or Trash, which
+   the sync does not list) and older ones are kept. A checkpoint written
+   before this bookkeeping existed skips that sweep.
+
+   **Scheduling.** `Scheduler` runs the initial sync until it is complete,
+   then polls every 30 s while the app is active and every 3 minutes when idle
+   (`SchedulerHandle::set_activity`), or at once on `poll_now` (for example on
+   window focus). Transient failures back off exponentially from 5 s to
+   5 minutes, waiting at least any `Retry-After`. Connectivity comes from the
+   requests themselves: one that never gets an HTTP response marks the
+   account offline, and the next success marks it online; there is no OS
+   reachability check. An expired history triggers the resync at once. Other
+   errors (sign-in, an exhausted daily quota, the store) stop the scheduler.
+   It reports `SyncEvent`s (initial-sync progress, each poll's `Changes`,
+   failures with the retry delay, connectivity) through a callback that
+   `MailService` wraps. Gmail push needs Pub/Sub and a server, so desktop
+   polling is the deliberate choice.
 3. **Local changes.** User actions apply optimistically to SQLite, are written to the
    persisted `pending_ops` queue, and replay against the API with retries. After a
    history refresh, the server's version wins.
