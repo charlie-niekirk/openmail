@@ -16,7 +16,7 @@ mod retry;
 
 pub use crate::auth::{TokenError, TokenFuture, TokenProvider};
 pub use batch::MAX_BATCH_SIZE;
-pub use client::{GmailClient, GmailClientBuilder, default_http_client};
+pub use client::{ClientStats, GmailClient, GmailClientBuilder, default_http_client};
 pub use error::{Error, QuotaKind, Result};
 pub use models::{
     ApiLabel, ApiLabelColor, ApiMessage, ApiThread, Header, History, HistoryLabelChange,

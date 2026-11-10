@@ -8,7 +8,7 @@ use common::batch::{BATCH, BatchResponder, Call, Part, error_json};
 use common::{fast_retries, setup, setup_with};
 use openmail_core::{MessageId, ThreadId};
 use openmail_gmail::api::{
-    Error, GmailClient, MAX_BATCH_SIZE, MessageFormat, QuotaLimit, ThreadFormat,
+    ClientStats, Error, GmailClient, MAX_BATCH_SIZE, MessageFormat, QuotaLimit, ThreadFormat,
 };
 use reqwest::StatusCode;
 use wiremock::matchers::{method, path};
@@ -224,6 +224,13 @@ async fn only_failed_retryable_items_are_resent() {
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[1].ids(), [1, 2, 3]);
     assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(
+        client.stats(),
+        ClientStats {
+            retries: 3,
+            rate_limited: 2
+        }
+    );
 }
 
 #[tokio::test]

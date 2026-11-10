@@ -6,8 +6,8 @@
 //! requests by `Content-ID`, and resends only the calls that failed with a
 //! retryable status.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
 
 use openmail_core::{MessageId, ThreadId};
 use reqwest::header::CONTENT_TYPE;
@@ -147,7 +147,12 @@ impl GmailClient {
         let mut refreshed = false;
 
         loop {
+            let started = Instant::now();
             let (responses, token) = self.send_batch(requests, &pending).await?;
+            let elapsed = started.elapsed();
+            // Failed items by status and reason, for the debug log.
+            let mut failures: BTreeMap<String, usize> = BTreeMap::new();
+            let mut rate_limited_items = 0;
 
             let mut retry = Vec::new();
             let mut unauthorized = false;
@@ -169,11 +174,16 @@ impl GmailClient {
                     continue;
                 }
                 if response.status == StatusCode::UNAUTHORIZED && !refreshed {
+                    *failures.entry("401".to_owned()).or_default() += 1;
                     unauthorized = true;
                     retry.push(index);
                     continue;
                 }
                 let failure = classify(response.status, &response.body, response.retry_after);
+                *failures
+                    .entry(failure_label(response.status, &failure.error))
+                    .or_default() += 1;
+                rate_limited_items += usize::from(failure.is_rate_limit());
                 if failure.retryable {
                     rate_limited |= failure.is_rate_limit();
                     retry_after = retry_after.max(response.retry_after);
@@ -182,6 +192,14 @@ impl GmailClient {
                     results[index] = Some(Err(failure.error));
                 }
             }
+
+            tracing::debug!(
+                items = pending.len(),
+                elapsed_ms = elapsed.as_millis(),
+                failed = failures.values().sum::<usize>(),
+                ?failures,
+                "Gmail batch"
+            );
 
             let mut delay = None;
             if !retryable.is_empty() {
@@ -196,9 +214,16 @@ impl GmailClient {
                 }
             }
 
+            self.count(retry.len(), rate_limited_items);
             if retry.is_empty() {
                 return Ok(());
             }
+            tracing::debug!(
+                items = retry.len(),
+                ?delay,
+                rate_limited,
+                "retrying Gmail batch items"
+            );
             if unauthorized {
                 refreshed = true;
                 self.tokens()
@@ -258,6 +283,19 @@ impl GmailClient {
         }
         let responses = pending.iter().map(|i| by_index.remove(i)).collect();
         Ok((responses, token))
+    }
+}
+
+/// A short label for a failed item, such as `429 rate limit` or
+/// `400 invalidArgument`.
+fn failure_label(status: StatusCode, error: &Error) -> String {
+    match error {
+        Error::Quota { kind, .. } => format!("{} {kind}", status.as_u16()),
+        Error::Api {
+            reason: Some(reason),
+            ..
+        } => format!("{} {reason}", status.as_u16()),
+        _ => status.as_u16().to_string(),
     }
 }
 

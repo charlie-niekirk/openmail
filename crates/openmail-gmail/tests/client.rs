@@ -117,6 +117,8 @@ async fn rate_limits_are_retried() {
         .await;
 
     client.get_profile().await.unwrap();
+    assert_eq!(client.stats().retries, 1);
+    assert_eq!(client.stats().rate_limited, 1);
 }
 
 #[tokio::test]

@@ -1,6 +1,7 @@
 //! The HTTP client: base URL, authentication, and the retry loop.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
@@ -34,6 +35,18 @@ struct Inner {
     tokens: Arc<dyn TokenProvider>,
     retry: RetryPolicy,
     quota: Option<QuotaLimiter>,
+    retries: AtomicU64,
+    rate_limited: AtomicU64,
+}
+
+/// Counts of a client's (and its clones') retries since it was built, for
+/// progress reports and diagnosis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClientStats {
+    /// Requests and batch items sent again after a retryable failure.
+    pub retries: u64,
+    /// Responses and batch items Gmail rejected with a rate limit.
+    pub rate_limited: u64,
 }
 
 impl std::fmt::Debug for GmailClient {
@@ -94,6 +107,24 @@ impl GmailClient {
 
     pub(crate) fn retry_policy(&self) -> &RetryPolicy {
         &self.inner.retry
+    }
+
+    /// How many requests have been retried, and rate-limited, so far.
+    pub fn stats(&self) -> ClientStats {
+        ClientStats {
+            retries: self.inner.retries.load(Ordering::Relaxed),
+            rate_limited: self.inner.rate_limited.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Records `retries` resent requests or items, `rate_limited` of them for
+    /// a rate limit.
+    pub(crate) fn count(&self, retries: usize, rate_limited: usize) {
+        let inner = &*self.inner;
+        inner.retries.fetch_add(retries as u64, Ordering::Relaxed);
+        inner
+            .rate_limited
+            .fetch_add(rate_limited as u64, Ordering::Relaxed);
     }
 
     /// Sends a GET for a `users/me` resource and decodes the JSON response.
@@ -199,6 +230,8 @@ impl GmailClient {
                 Ok(response) => response,
                 Err(err) if err.is_timeout() => match retrier.next_delay(false, None) {
                     Some(delay) => {
+                        tracing::debug!(?delay, "Gmail request timed out; retrying");
+                        self.count(1, 0);
                         tokio::time::sleep(delay).await;
                         continue;
                     }
@@ -224,12 +257,22 @@ impl GmailClient {
             let retry_after = retry_after(&response);
             let body = response.bytes().await.unwrap_or_default();
             let failure = classify(status, &body, retry_after);
+            let rate_limited = failure.is_rate_limit();
             if failure.retryable
-                && let Some(delay) = retrier.next_delay(failure.is_rate_limit(), retry_after)
+                && let Some(delay) = retrier.next_delay(rate_limited, retry_after)
             {
+                tracing::debug!(
+                    status = status.as_u16(),
+                    error = %failure.error,
+                    ?delay,
+                    "Gmail request failed; retrying"
+                );
+                self.count(1, usize::from(rate_limited));
                 tokio::time::sleep(delay).await;
                 continue;
             }
+            self.count(0, usize::from(rate_limited));
+            tracing::debug!(status = status.as_u16(), error = %failure.error, "Gmail request failed");
             return Err(failure.error);
         }
     }
@@ -304,6 +347,8 @@ impl GmailClientBuilder {
                 tokens: self.tokens,
                 retry: self.retry,
                 quota: self.quota.map(QuotaLimiter::new),
+                retries: AtomicU64::new(0),
+                rate_limited: AtomicU64::new(0),
             }),
         })
     }
