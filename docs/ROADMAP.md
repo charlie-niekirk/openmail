@@ -73,7 +73,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## Phase 2 — Local store and sync engine
 
-- [ ] **2.1 SQLite store** — `feat/2.1-sqlite-store`
+- [x] **2.1 SQLite store** — `feat/2.1-sqlite-store`
   - Tables: accounts, labels, threads, messages, message_labels, bodies, attachments,
     drafts, sync_state, pending_ops.
   - FTS5 index, WAL mode, migrations, per-account data directory.

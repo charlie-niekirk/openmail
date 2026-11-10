@@ -49,7 +49,7 @@ openmail/
   text, HTML, inline `cid:` parts and attachments; builds outgoing mail
   (`mail-builder`) and encodes it as base64url. Tested against a `.eml` corpus.
 - **`openmail-store`** — The local cache: SQLite via bundled `rusqlite` with FTS5,
-  WAL mode, `rusqlite_migration` migrations, one data directory per account
+  WAL mode, embedded SQL migrations, one data directory per account
   (`directories`). Owns all SQL and exposes typed queries (keyset-paginated thread
   lists, unread counts, thread detail).
 - **`openmail-sync`** — The sync engine, the offline `pending_ops` queue, and
@@ -113,6 +113,8 @@ accounts, labels, threads, messages, message-label links, bodies, attachments,
 drafts, sync state and pending operations. FTS5 powers offline search. WAL mode lets
 the UI read while sync writes. Thread lists use keyset pagination; the target is
 the first page of a label in under 5 ms with 100k threads.
+
+The schema is described under [Local store](#local-store).
 
 ### Secrets: OS keychain via `keyring`
 
@@ -256,6 +258,54 @@ and `libgtk-3-dev`), but it has not been run on Linux.
    reference.
 4. **If overlays over the body become essential** before a GPUI Fast upgrade: hide
    the webview while such overlays are open, or show them in a separate window.
+
+## Local store
+
+`openmail-store` keeps one SQLite database per account at
+`<data dir>/accounts/<account id>/mail.db`. The data directory is the platform's
+(`~/Library/Application Support/Openmail` on macOS, `~/.local/share/openmail` on
+Linux, `%APPDATA%\Openmail\data` on Windows), or `OPENMAIL_DATA_DIR` if set; tests
+pass their own directory. Every connection sets `journal_mode=WAL`,
+`synchronous=NORMAL`, `foreign_keys=ON` and a 5 s busy timeout.
+
+Migrations are the SQL files in `crates/openmail-store/migrations/`, embedded with
+`include_str!` and applied in one transaction; `PRAGMA user_version` counts those
+applied. They are append-only. (`rusqlite_migration` was the plan, but its latest
+release pins `rusqlite` 0.40, whose bundled SQLite has RUSTSEC-2026-0459; the
+in-crate runner does the same job in a few lines.)
+
+Dates are Unix milliseconds, history IDs integers, address lists JSON arrays.
+
+| Table | Holds |
+| --- | --- |
+| `accounts` | The account the database belongs to (id, email, display name). |
+| `labels` | Gmail labels: type, colors, label-list and message-list visibility. |
+| `threads` | Thread summaries: subject, snippet, last-message date, message count, senders, `history_id`, and `is_unread` / `is_starred` flags. |
+| `messages` | Message metadata: headers (subject, from/to/cc/bcc/reply-to, Message-ID, In-Reply-To, References), internal date, size, `has_attachments`. |
+| `message_labels` | Labels per message: the source of truth for labels. |
+| `thread_labels` | Labels per thread (the union over its messages), with a per-label message count and a copy of the thread's last-message date. |
+| `bodies` | Lazily fetched bodies: text, HTML, fetched-at. |
+| `attachments` | Attachment metadata keyed by message and MIME part ID, with an optional local path. |
+| `drafts` | Draft IDs, pointing at their message. |
+| `sync_state` | One row: `history_id`, an opaque backfill cursor, backfill-complete, last full sync. |
+| `pending_ops` | The offline queue: op type, JSON payload, attempts, next retry, created at, last error. |
+| `messages_fts` | FTS5 index over subject, sender, recipients (to, cc, bcc) and body text. |
+
+Triggers keep the derived data consistent, so writers only touch messages and
+their labels:
+
+- Inserting or deleting a `message_labels` row adjusts `thread_labels`
+  (adding the row, counting, or removing it when no message has the label).
+- `thread_labels` rows for `UNREAD` and `STARRED` set the thread's flags.
+- A thread's new last-message date is copied to its `thread_labels` rows.
+- Changes to a message's subject or addresses, or to its body text, rebuild its
+  `messages_fts` row. The FTS table is contentless (`contentless_delete=1`), so the
+  text is not stored twice; its rowid is the message's integer `pk`.
+
+Label views page with keysets over the index
+`thread_labels (label_id, last_message_date DESC, thread_id DESC)`, so a page is
+an index range scan with no sort; `threads (last_message_date DESC, id DESC)`
+serves views over every thread.
 
 ## Threading model
 
