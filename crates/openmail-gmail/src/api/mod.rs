@@ -7,6 +7,7 @@ mod client;
 mod endpoints;
 mod error;
 mod models;
+mod pagination;
 mod retry;
 
 pub use crate::auth::{TokenError, TokenFuture, TokenProvider};
@@ -18,4 +19,5 @@ pub use models::{
     ListMessagesResponse, ListRequest, ListThreadsResponse, METADATA_HEADERS, MessageFormat,
     MessagePart, MessagePartBody, Profile, ThreadFormat,
 };
+pub use pagination::{Paginated, paginate};
 pub use retry::RetryPolicy;
