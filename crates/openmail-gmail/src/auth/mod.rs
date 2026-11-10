@@ -10,7 +10,8 @@
 //!
 //! The refresh token is kept in a [`TokenStore`] (the OS keychain in the app), keyed
 //! by the account's email address. Access tokens live only in memory: a
-//! [`TokenProvider`] hands the REST client a valid one, refreshing it as needed.
+//! [`TokenProvider`] hands the REST client a valid one, refreshing it as needed and
+//! again when the API rejects it.
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), openmail_gmail::auth::AuthError> {
@@ -31,8 +32,12 @@
 //!
 //! // Later runs: pick the account up from the store.
 //! let provider = RefreshingTokenProvider::new(client, store, provider.account());
-//! let token = provider.access_token().await?;
+//! let token = provider.token().await?;
 //! println!("Authorization: Bearer {}", token.secret());
+//!
+//! // The REST client takes it as a trait object.
+//! let provider: Arc<dyn TokenProvider> = Arc::new(provider);
+//! # let _ = provider;
 //! # Ok(())
 //! # }
 //! ```
@@ -49,7 +54,8 @@ pub use client::{Authorization, OAuthClient};
 pub use config::{CLIENT_ID_ENV, CLIENT_SECRET_ENV, OAuthConfig};
 pub use error::AuthError;
 pub use provider::{
-    REFRESH_MARGIN, RefreshingTokenProvider, StaticTokenProvider, TokenFuture, TokenProvider,
+    REFRESH_MARGIN, RefreshingTokenProvider, StaticTokenProvider, TokenError, TokenFuture,
+    TokenProvider,
 };
 pub use store::{KeyringTokenStore, MemoryTokenStore, TokenStore};
 pub use token::AccessToken;

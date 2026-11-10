@@ -12,34 +12,43 @@ use super::{AccessToken, AuthError, Authorization, OAuthClient, TokenStore};
 /// and the time a request spends in flight.
 pub const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 
-/// The future returned by [`TokenProvider::access_token`].
-pub type TokenFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<AccessToken, AuthError>> + Send + 'a>>;
-
-/// Supplies access tokens to the Gmail REST client.
+/// An error from a [`TokenProvider`], such as a failed refresh or a revoked grant.
 ///
-/// The trait is object safe, so a client can hold an `Arc<dyn TokenProvider>`.
+/// For the providers in this module it is an [`AuthError`]; downcast it to ask
+/// [`AuthError::requires_sign_in`].
+pub type TokenError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The future a [`TokenProvider`] returns: an access token or an error.
+pub type TokenFuture<'a> = Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send + 'a>>;
+
+/// Supplies OAuth access tokens to the Gmail REST client.
+///
+/// The client asks for a token before each request, and asks for a fresh one once
+/// when Gmail rejects a token with `401 Unauthorized`. The trait is object safe, so
+/// the client can hold an `Arc<dyn TokenProvider>`.
 pub trait TokenProvider: Send + Sync {
-    /// Returns an access token that is valid now, refreshing it first if needed.
+    /// Returns a valid access token, refreshing it first if it has expired.
     fn access_token(&self) -> TokenFuture<'_>;
 
-    /// Reports that the API rejected `rejected` (HTTP 401), so the next call to
-    /// [`access_token`](Self::access_token) fetches a new one. Has no effect if a
-    /// newer token has already replaced it.
-    fn invalidate(&self, rejected: &AccessToken);
+    /// Returns a new access token after Gmail rejected `rejected`.
+    ///
+    /// Implementations should refresh unless the current token already differs
+    /// from `rejected` (another request refreshed it first), in which case they
+    /// can return the current one.
+    fn refresh_access_token<'a>(&'a self, rejected: &'a str) -> TokenFuture<'a>;
 }
 
 /// A provider that always returns the same token. Useful in tests.
 #[derive(Debug, Clone)]
 pub struct StaticTokenProvider {
-    token: AccessToken,
+    token: String,
 }
 
 impl StaticTokenProvider {
-    /// A provider returning `secret`, which never expires.
-    pub fn new(secret: impl Into<String>) -> Self {
+    /// A provider that always returns `token`.
+    pub fn new(token: impl Into<String>) -> Self {
         Self {
-            token: AccessToken::new(secret, None),
+            token: token.into(),
         }
     }
 }
@@ -49,15 +58,17 @@ impl TokenProvider for StaticTokenProvider {
         Box::pin(ready(Ok(self.token.clone())))
     }
 
-    fn invalidate(&self, _rejected: &AccessToken) {}
+    fn refresh_access_token<'a>(&'a self, _rejected: &'a str) -> TokenFuture<'a> {
+        self.access_token()
+    }
 }
 
 /// Keeps one account's access token fresh using its stored refresh token.
 ///
 /// The access token is cached in memory and refreshed when it is within
-/// [`REFRESH_MARGIN`] of expiring or after [`invalidate`](TokenProvider::invalidate).
-/// Concurrent callers share a single refresh. The refresh token is read from the
-/// [`TokenStore`] on each refresh, and replaced there if Google rotates it.
+/// [`REFRESH_MARGIN`] of expiring, or when the API rejects it. Concurrent callers
+/// share a single refresh. The refresh token is read from the [`TokenStore`] on
+/// each refresh, and replaced there if Google rotates it.
 pub struct RefreshingTokenProvider {
     client: OAuthClient,
     store: Arc<dyn TokenStore>,
@@ -107,13 +118,34 @@ impl RefreshingTokenProvider {
         &self.account
     }
 
-    async fn current(&self) -> Result<AccessToken, AuthError> {
-        if let Some(token) = self.cached_fresh() {
+    /// Returns an access token that is valid now, refreshing it first if needed.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::NotSignedIn`] if no refresh token is stored,
+    /// [`AuthError::InvalidGrant`] if Google revoked it, otherwise a token
+    /// endpoint or token store error.
+    pub async fn token(&self) -> Result<AccessToken, AuthError> {
+        self.usable_or_refresh(None).await
+    }
+
+    /// Returns a new access token after the API rejected `rejected`, or the
+    /// current one if it has already been replaced.
+    ///
+    /// # Errors
+    ///
+    /// As for [`token`](Self::token).
+    pub async fn token_after_rejection(&self, rejected: &str) -> Result<AccessToken, AuthError> {
+        self.usable_or_refresh(Some(rejected)).await
+    }
+
+    async fn usable_or_refresh(&self, rejected: Option<&str>) -> Result<AccessToken, AuthError> {
+        if let Some(token) = self.cached_usable(rejected) {
             return Ok(token);
         }
         let _refreshing = self.refreshing.lock().await;
         // Another caller may have refreshed while this one waited.
-        if let Some(token) = self.cached_fresh() {
+        if let Some(token) = self.cached_usable(rejected) {
             return Ok(token);
         }
 
@@ -131,10 +163,12 @@ impl RefreshingTokenProvider {
         Ok(refreshed.access_token)
     }
 
-    fn cached_fresh(&self) -> Option<AccessToken> {
+    /// The cached token, unless it is about to expire or is the rejected one.
+    fn cached_usable(&self, rejected: Option<&str>) -> Option<AccessToken> {
         self.lock_cached()
             .as_ref()
             .filter(|token| !token.expires_within(REFRESH_MARGIN))
+            .filter(|token| rejected != Some(token.secret()))
             .cloned()
     }
 
@@ -157,17 +191,17 @@ impl RefreshingTokenProvider {
 
 impl TokenProvider for RefreshingTokenProvider {
     fn access_token(&self) -> TokenFuture<'_> {
-        Box::pin(self.current())
+        Box::pin(async move {
+            let token = self.token().await?;
+            Ok(token.secret().to_owned())
+        })
     }
 
-    fn invalidate(&self, rejected: &AccessToken) {
-        let mut cached = self.lock_cached();
-        if cached
-            .as_ref()
-            .is_some_and(|token| token.secret() == rejected.secret())
-        {
-            *cached = None;
-        }
+    fn refresh_access_token<'a>(&'a self, rejected: &'a str) -> TokenFuture<'a> {
+        Box::pin(async move {
+            let token = self.token_after_rejection(rejected).await?;
+            Ok(token.secret().to_owned())
+        })
     }
 }
 
@@ -240,8 +274,8 @@ mod tests {
         mock_refresh(&server, token("ya29.first", 3599), 1).await;
         let provider = provider(&server, signed_in_store());
 
-        let first = provider.access_token().await.unwrap();
-        let second = provider.access_token().await.unwrap();
+        let first = provider.token().await.unwrap();
+        let second = provider.token().await.unwrap();
         assert_eq!(first.secret(), "ya29.first");
         assert_eq!(second.secret(), "ya29.first");
 
@@ -262,33 +296,66 @@ mod tests {
         mock_refresh(&server, token("ya29.short", 30), 2).await;
         let provider = provider(&server, signed_in_store());
 
-        provider.access_token().await.unwrap();
-        provider.access_token().await.unwrap();
+        provider.token().await.unwrap();
+        provider.token().await.unwrap();
     }
 
     #[tokio::test]
-    async fn invalidate_forces_a_refresh() {
+    async fn a_rejected_token_is_refreshed() {
         let server = MockServer::start().await;
-        mock_refresh(&server, token("ya29.token", 3599), 2).await;
+        Mock::given(method("POST"))
+            .respond_with(token("ya29.first", 3599))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        mock_refresh(&server, token("ya29.second", 3599), 1).await;
         let provider = provider(&server, signed_in_store());
 
-        let rejected = provider.access_token().await.unwrap();
-        provider.invalidate(&rejected);
-        provider.access_token().await.unwrap();
+        let rejected = provider.token().await.unwrap();
+        let fresh = provider
+            .token_after_rejection(rejected.secret())
+            .await
+            .unwrap();
+        assert_eq!(fresh.secret(), "ya29.second");
+        assert_eq!(provider.token().await.unwrap().secret(), "ya29.second");
     }
 
     #[tokio::test]
-    async fn invalidating_an_old_token_keeps_the_current_one() {
+    async fn rejecting_an_old_token_returns_the_current_one() {
         let server = MockServer::start().await;
         mock_refresh(&server, token("ya29.current", 3599), 1).await;
         let provider = provider(&server, signed_in_store());
 
-        provider.access_token().await.unwrap();
-        provider.invalidate(&AccessToken::new("ya29.old", None));
-        assert_eq!(
-            provider.access_token().await.unwrap().secret(),
-            "ya29.current"
-        );
+        provider.token().await.unwrap();
+        let current = provider.token_after_rejection("ya29.old").await.unwrap();
+        assert_eq!(current.secret(), "ya29.current");
+    }
+
+    #[tokio::test]
+    async fn concurrent_rejections_share_one_refresh() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(token("ya29.first", 3599))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let slow = token("ya29.second", 3599).set_delay(Duration::from_millis(200));
+        mock_refresh(&server, slow, 1).await;
+        let provider = Arc::new(provider(&server, signed_in_store()));
+
+        let rejected = provider.token().await.unwrap().secret().to_owned();
+        let calls: Vec<_> = (0..8)
+            .map(|_| {
+                let provider = Arc::clone(&provider);
+                let rejected = rejected.clone();
+                tokio::spawn(async move { provider.token_after_rejection(&rejected).await })
+            })
+            .collect();
+        for call in calls {
+            assert_eq!(call.await.unwrap().unwrap().secret(), "ya29.second");
+        }
     }
 
     #[tokio::test]
@@ -301,7 +368,7 @@ mod tests {
         let calls: Vec<_> = (0..8)
             .map(|_| {
                 let provider = Arc::clone(&provider);
-                tokio::spawn(async move { provider.access_token().await })
+                tokio::spawn(async move { provider.token().await })
             })
             .collect();
         for call in calls {
@@ -322,7 +389,7 @@ mod tests {
         let store = signed_in_store();
         let provider = provider(&server, Arc::clone(&store));
 
-        provider.access_token().await.unwrap();
+        provider.token().await.unwrap();
         assert_eq!(store.load(ACCOUNT).unwrap().as_deref(), Some("1//rotated"));
     }
 
@@ -337,7 +404,7 @@ mod tests {
         let store = signed_in_store();
         let provider = provider(&server, Arc::clone(&store));
 
-        let error = provider.access_token().await.unwrap_err();
+        let error = provider.token().await.unwrap_err();
         assert!(matches!(error, AuthError::InvalidGrant(ref d) if d.contains("revoked")));
         assert!(error.requires_sign_in());
         // The token is left for the caller to remove, so a misconfigured client
@@ -355,7 +422,7 @@ mod tests {
         mock_refresh(&server, unauthorized, 1).await;
         let provider = provider(&server, signed_in_store());
 
-        let error = provider.access_token().await.unwrap_err();
+        let error = provider.token().await.unwrap_err();
         assert!(matches!(error, AuthError::TokenEndpoint(_)), "{error:?}");
         assert!(!error.requires_sign_in());
     }
@@ -366,7 +433,7 @@ mod tests {
         mock_refresh(&server, token("ya29.token", 3599), 0).await;
         let provider = provider(&server, Arc::new(MemoryTokenStore::new()));
 
-        let error = provider.access_token().await.unwrap_err();
+        let error = provider.token().await.unwrap_err();
         assert!(matches!(error, AuthError::NotSignedIn(ref a) if a == ACCOUNT));
         assert!(error.requires_sign_in());
     }
@@ -391,21 +458,43 @@ mod tests {
         .unwrap();
         assert_eq!(provider.account(), ACCOUNT);
         assert_eq!(store.load(ACCOUNT).unwrap().as_deref(), Some("1//new"));
-        assert_eq!(
-            provider.access_token().await.unwrap().secret(),
-            "ya29.signed-in"
-        );
+        assert_eq!(provider.token().await.unwrap().secret(), "ya29.signed-in");
     }
 
     #[tokio::test]
     async fn providers_work_as_trait_objects() {
-        let providers: Vec<Arc<dyn TokenProvider>> =
-            vec![Arc::new(StaticTokenProvider::new("static"))];
-        for provider in providers {
-            let token = provider.access_token().await.unwrap();
-            assert_eq!(token.secret(), "static");
-            provider.invalidate(&token);
-            assert_eq!(provider.access_token().await.unwrap().secret(), "static");
-        }
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(token("ya29.first", 3599))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        mock_refresh(&server, token("ya29.second", 3599), 1).await;
+
+        let refreshing: Arc<dyn TokenProvider> = Arc::new(provider(&server, signed_in_store()));
+        let first = refreshing.access_token().await.unwrap();
+        assert_eq!(first, "ya29.first");
+        assert_eq!(
+            refreshing.refresh_access_token(&first).await.unwrap(),
+            "ya29.second"
+        );
+
+        let fixed: Arc<dyn TokenProvider> = Arc::new(StaticTokenProvider::new("static"));
+        assert_eq!(fixed.access_token().await.unwrap(), "static");
+        assert_eq!(
+            fixed.refresh_access_token("static").await.unwrap(),
+            "static"
+        );
+    }
+
+    #[tokio::test]
+    async fn trait_errors_downcast_to_auth_errors() {
+        let server = MockServer::start().await;
+        let provider: Arc<dyn TokenProvider> =
+            Arc::new(provider(&server, Arc::new(MemoryTokenStore::new())));
+
+        let error = provider.access_token().await.unwrap_err();
+        let auth_error = error.downcast_ref::<AuthError>().unwrap();
+        assert!(auth_error.requires_sign_in());
     }
 }
