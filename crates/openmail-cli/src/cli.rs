@@ -13,6 +13,17 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "EMAIL")]
     pub account: Option<String>,
 
+    /// Your Google Cloud project's Gmail "Units per minute per user" quota
+    /// (6,000 by default for new projects; also read from
+    /// OPENMAIL_GMAIL_QUOTA_PER_MINUTE). Openmail uses 80% of it.
+    #[arg(
+        long,
+        global = true,
+        value_name = "UNITS",
+        value_parser = clap::value_parser!(u32).range(60..)
+    )]
+    pub quota_per_minute: Option<u32>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -83,6 +94,26 @@ pub enum Command {
             value_parser = clap::value_parser!(u16).range(1..=16).map(usize::from)
         )]
         batch_concurrency: usize,
+        /// Spend Gmail quota at a fixed N units a second (1 to 250), instead
+        /// of adapting the rate to Gmail's rate limiting.
+        #[arg(
+            long,
+            value_name = "N",
+            value_parser = clap::value_parser!(u32).range(1..=250)
+        )]
+        rate: Option<u32>,
+    },
+    /// Keep the local store in sync until Ctrl-C: finish the initial sync if
+    /// needed, then poll Gmail's history, printing a line per poll.
+    Watch {
+        /// Seconds between polls.
+        #[arg(
+            long,
+            value_name = "S",
+            default_value_t = 30,
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        interval: u64,
     },
 }
 
@@ -221,6 +252,7 @@ mod tests {
                 prefetch: None,
                 batch_size: DEFAULT_BATCH_SIZE,
                 batch_concurrency: DEFAULT_BATCH_CONCURRENCY,
+                rate: None,
             }
         );
 
@@ -233,7 +265,9 @@ mod tests {
             "--batch-size",
             "20",
             "--batch-concurrency",
-            "2",
+            "3",
+            "--rate",
+            "120",
         ])
         .unwrap();
         assert_eq!(
@@ -243,7 +277,8 @@ mod tests {
                 all: false,
                 prefetch: Some(50),
                 batch_size: 20,
-                batch_concurrency: 2,
+                batch_concurrency: 3,
+                rate: Some(120),
             }
         );
 
@@ -261,6 +296,31 @@ mod tests {
             let err = parse(&["sync", "--batch-size", size]).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::ValueValidation, "{size}");
         }
+        for rate in ["0", "251"] {
+            let err = parse(&["sync", "--rate", rate]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "{rate}");
+        }
+    }
+
+    #[test]
+    fn quota_per_minute_is_global() {
+        let cli = parse(&["sync", "--quota-per-minute", "15000"]).unwrap();
+        assert_eq!(cli.quota_per_minute, Some(15_000));
+        let cli = parse(&["--quota-per-minute", "6000", "watch"]).unwrap();
+        assert_eq!(cli.quota_per_minute, Some(6_000));
+        assert_eq!(parse(&["watch"]).unwrap().quota_per_minute, None);
+        let err = parse(&["watch", "--quota-per-minute", "0"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn parses_watch() {
+        let cli = parse(&["watch"]).unwrap();
+        assert_eq!(cli.command, Command::Watch { interval: 30 });
+        let cli = parse(&["watch", "--interval", "5"]).unwrap();
+        assert_eq!(cli.command, Command::Watch { interval: 5 });
+        let err = parse(&["watch", "--interval", "0"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
     }
 
     #[test]

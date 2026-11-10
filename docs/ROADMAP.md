@@ -83,10 +83,13 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 - [x] **2.3 Initial sync** — `feat/2.3-initial-sync`
   - Labels → Inbox → backfill, using batched metadata fetches.
   - Checkpointed `historyId` and resumable progress.
-- [ ] **2.4 Incremental sync** — `feat/2.4-incremental-sync`
+- [x] **2.4 Incremental sync** — `feat/2.4-incremental-sync`
   - Apply `history.list` entries (messages added or deleted, labels added or removed).
   - Full resync when the `historyId` has expired (404).
   - Polling scheduler with online and offline detection.
+  - Adaptive quota pacing in `openmail-gmail` for Gmail's per-minute quota
+    (6,000 units by default): lockouts and a remembered ceiling instead of
+    retrying into rate limits.
 - [ ] **2.5 Offline ops queue** — `feat/2.5-ops-queue`
   - Optimistic local apply, persisted queue, replay with retries, conflict handling.
 - [ ] **2.6 MailService** — `feat/2.6-mail-service`

@@ -47,6 +47,7 @@ pub fn fast_retries(max_retries: u32) -> RetryPolicy {
         max_retries,
         initial_backoff: Duration::from_millis(1),
         max_backoff: Duration::from_millis(5),
+        rate_limit_initial_backoff: Duration::from_millis(1),
         rate_limit_max_backoff: Duration::from_millis(5),
         rate_limit_max_wait: Duration::from_millis(5) * max_retries,
     }
@@ -57,12 +58,15 @@ pub async fn setup() -> (MockServer, GmailClient, Arc<TestTokens>) {
     setup_with(fast_retries(3)).await
 }
 
+/// Like [`setup`], with this retry policy. The client has no quota limiter
+/// (tests of pacing build their own), so rate limits do not lock it out.
 pub async fn setup_with(retry: RetryPolicy) -> (MockServer, GmailClient, Arc<TestTokens>) {
     let server = MockServer::start().await;
     let tokens = Arc::new(TestTokens::default());
     let client = GmailClient::builder(tokens.clone())
         .base_url(Url::parse(&server.uri()).unwrap())
         .retry_policy(retry)
+        .quota_limit(None)
         .build()
         .unwrap();
     (server, client, tokens)

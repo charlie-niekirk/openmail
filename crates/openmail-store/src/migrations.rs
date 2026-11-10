@@ -10,7 +10,10 @@ use crate::{Error, Result};
 
 /// Every migration, in order. Migration `n` (1-based) moves the schema from
 /// version `n - 1` to `n`.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_initial.sql"),
+    include_str!("../migrations/0002_resync_seen.sql"),
+];
 
 /// Brings the database's schema up to date, all in one transaction.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
@@ -91,6 +94,7 @@ mod tests {
                 "messages",
                 "messages_fts",
                 "pending_ops",
+                "sync_seen_threads",
                 "sync_state",
                 "thread_labels",
                 "threads",

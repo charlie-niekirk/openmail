@@ -9,22 +9,26 @@ use reqwest::{Method, RequestBuilder, Response, StatusCode, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use tokio::sync::Semaphore;
+
 use super::batch::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE};
 use super::error::{Error, Result, classify};
 use super::quota::{self, QuotaLimiter};
 use super::retry::Retrier;
-use super::{QuotaLimit, RetryPolicy, TokenProvider};
+use super::{QuotaLimit, QuotaPacing, RetryPolicy, TokenProvider};
 
 /// A typed client for the Gmail REST API (`gmail/v1`), acting as the signed-in
 /// user (`users/me`).
 ///
-/// Cloning is cheap and shares the connection pool and quota limiter. Every
+/// Cloning is cheap and shares the connection pool, quota limiter and batch
+/// slots. Every
 /// request gets its access token from the [`TokenProvider`]. A `401` triggers
 /// one token refresh and a retry; `429`, rate-limit `403`s, `5xx` and timeouts
 /// are retried with exponential backoff and jitter, per the [`RetryPolicy`].
 /// Before each attempt the request's Gmail quota cost is charged to the
-/// [`QuotaLimit`], waiting if needed, so a busy client stays under Gmail's
-/// per-user rate limit.
+/// client's [`QuotaPacing`], waiting if needed, so a busy client stays under
+/// Gmail's per-user rate limit; by default, if Gmail rate-limits a request
+/// anyway, the client stops sending for a while and resumes more slowly.
 #[derive(Clone)]
 pub struct GmailClient {
     inner: Arc<Inner>,
@@ -37,19 +41,23 @@ struct Inner {
     retry: RetryPolicy,
     quota: Option<QuotaLimiter>,
     batch_size: usize,
-    batch_concurrency: usize,
+    /// One permit per batch request allowed in flight.
+    batch_slots: Semaphore,
     retries: AtomicU64,
     rate_limited: AtomicU64,
 }
 
-/// Counts of a client's (and its clones') retries since it was built, for
-/// progress reports and diagnosis.
+/// Counts of a client's (and its clones') retries since it was built, and its
+/// current quota rate, for progress reports and diagnosis.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClientStats {
     /// Requests and batch items sent again after a retryable failure.
     pub retries: u64,
     /// Responses and batch items Gmail rejected with a rate limit.
     pub rate_limited: u64,
+    /// The quota units per second the client currently allows itself, or
+    /// `None` with no client-side limit (see [`QuotaPacing`]).
+    pub units_per_second: Option<u32>,
 }
 
 impl std::fmt::Debug for GmailClient {
@@ -57,7 +65,10 @@ impl std::fmt::Debug for GmailClient {
         f.debug_struct("GmailClient")
             .field("base_url", &self.inner.base_url.as_str())
             .field("retry", &self.inner.retry)
-            .field("quota", &self.inner.quota.as_ref().map(QuotaLimiter::limit))
+            .field(
+                "quota_rate",
+                &self.inner.quota.as_ref().map(QuotaLimiter::rate),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -78,7 +89,7 @@ impl GmailClient {
             base_url: None,
             http: None,
             retry: RetryPolicy::default(),
-            quota: Some(QuotaLimit::default()),
+            quota: QuotaPacing::default(),
             batch_size: DEFAULT_BATCH_SIZE,
             batch_concurrency: DEFAULT_BATCH_CONCURRENCY,
         }
@@ -114,9 +125,27 @@ impl GmailClient {
         &self.inner.retry
     }
 
-    /// Calls per batch, and batches in flight at once.
-    pub(crate) fn batch_settings(&self) -> (usize, usize) {
-        (self.inner.batch_size, self.inner.batch_concurrency)
+    /// Calls per batch.
+    pub(crate) fn batch_size(&self) -> usize {
+        self.inner.batch_size
+    }
+
+    /// Waits for a slot to send a batch request in; the batch is in flight
+    /// until the permit is dropped.
+    pub(crate) async fn batch_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.inner
+            .batch_slots
+            .acquire()
+            .await
+            .expect("the batch semaphore is never closed")
+    }
+
+    /// Records that Gmail rate-limited a request sent at `sent`, which slows
+    /// an adaptive quota rate.
+    pub(crate) fn rate_limited(&self, sent: tokio::time::Instant) {
+        if let Some(quota) = &self.inner.quota {
+            quota.rate_limited(sent);
+        }
     }
 
     /// How many requests have been retried, and rate-limited, so far.
@@ -124,6 +153,7 @@ impl GmailClient {
         ClientStats {
             retries: self.inner.retries.load(Ordering::Relaxed),
             rate_limited: self.inner.rate_limited.load(Ordering::Relaxed),
+            units_per_second: self.inner.quota.as_ref().map(QuotaLimiter::rate),
         }
     }
 
@@ -211,7 +241,7 @@ impl GmailClient {
     ) -> Result<Response> {
         self.send_with_token(cost, build)
             .await
-            .map(|(response, _)| response)
+            .map(|(response, _, _)| response)
     }
 
     /// Waits until `cost` quota units may be spent.
@@ -223,12 +253,13 @@ impl GmailClient {
 
     /// Like [`send`](Self::send), but also returns the access token the
     /// successful attempt used, so a caller that sees a `401` inside the
-    /// response (as in a batch) can refresh exactly that token.
+    /// response (as in a batch) can refresh exactly that token, and when that
+    /// attempt was sent, for reporting rate limits found inside it.
     pub(crate) async fn send_with_token(
         &self,
         cost: u32,
         build: impl Fn(&reqwest::Client) -> RequestBuilder,
-    ) -> Result<(Response, String)> {
+    ) -> Result<(Response, String, tokio::time::Instant)> {
         let inner = &*self.inner;
         let mut token = inner.tokens.access_token().await.map_err(Error::Token)?;
         let mut refreshed = false;
@@ -236,6 +267,7 @@ impl GmailClient {
 
         loop {
             self.charge(cost).await;
+            let sent = tokio::time::Instant::now();
             let response = match build(&inner.http).bearer_auth(&token).send().await {
                 Ok(response) => response,
                 Err(err) if err.is_timeout() => match retrier.next_delay(false, None) {
@@ -252,7 +284,7 @@ impl GmailClient {
 
             let status = response.status();
             if status.is_success() {
-                return Ok((response, token));
+                return Ok((response, token, sent));
             }
             if status == StatusCode::UNAUTHORIZED && !refreshed {
                 refreshed = true;
@@ -268,6 +300,9 @@ impl GmailClient {
             let body = response.bytes().await.unwrap_or_default();
             let failure = classify(status, &body, retry_after);
             let rate_limited = failure.is_rate_limit();
+            if rate_limited {
+                self.rate_limited(sent);
+            }
             if failure.retryable
                 && let Some(delay) = retrier.next_delay(rate_limited, retry_after)
             {
@@ -305,7 +340,7 @@ pub struct GmailClientBuilder {
     base_url: Option<Url>,
     http: Option<reqwest::Client>,
     retry: RetryPolicy,
-    quota: Option<QuotaLimit>,
+    quota: QuotaPacing,
     batch_size: usize,
     batch_concurrency: usize,
 }
@@ -330,10 +365,27 @@ impl GmailClientBuilder {
         self
     }
 
-    /// Sets how fast the client may spend Gmail quota units, or `None` for no
-    /// client-side limit. Defaults to [`QuotaLimit::default`].
+    /// Spends Gmail quota units at a fixed rate, instead of adapting it, or
+    /// `None` for no client-side limit.
     pub fn quota_limit(mut self, limit: Option<QuotaLimit>) -> Self {
-        self.quota = limit;
+        self.quota = limit.map_or(QuotaPacing::Off, QuotaPacing::Fixed);
+        self
+    }
+
+    /// Paces quota adaptively for a project whose "Units per minute per user"
+    /// quota is `units_per_minute` (Gmail's default for new projects is
+    /// [`DEFAULT_QUOTA_PER_MINUTE`](super::DEFAULT_QUOTA_PER_MINUTE)).
+    pub fn quota_per_minute(self, units_per_minute: u32) -> Self {
+        self.quota_pacing(QuotaPacing::Adaptive(super::AdaptiveRate::per_minute(
+            units_per_minute.max(1),
+        )))
+    }
+
+    /// Sets how the client paces the quota units it spends. Defaults to
+    /// [`QuotaPacing::Adaptive`] with
+    /// [`AdaptiveRate::default`](super::AdaptiveRate::default).
+    pub fn quota_pacing(mut self, pacing: QuotaPacing) -> Self {
+        self.quota = pacing;
         self
     }
 
@@ -344,9 +396,9 @@ impl GmailClientBuilder {
         self
     }
 
-    /// Sets how many batch requests one batched call keeps in flight at once
-    /// (at least 1; [`DEFAULT_BATCH_CONCURRENCY`] by default). The quota
-    /// limiter still caps the overall rate.
+    /// Sets how many batch requests the client and its clones keep in
+    /// flight at once (at least 1; [`DEFAULT_BATCH_CONCURRENCY`] by default).
+    /// A few hide latency; the quota limiter does the pacing.
     pub fn batch_concurrency(mut self, concurrency: usize) -> Self {
         self.batch_concurrency = concurrency.max(1);
         self
@@ -373,9 +425,9 @@ impl GmailClientBuilder {
                 base_url,
                 tokens: self.tokens,
                 retry: self.retry,
-                quota: self.quota.map(QuotaLimiter::new),
+                quota: QuotaLimiter::new(self.quota),
                 batch_size: self.batch_size,
-                batch_concurrency: self.batch_concurrency,
+                batch_slots: Semaphore::new(self.batch_concurrency),
                 retries: AtomicU64::new(0),
                 rate_limited: AtomicU64::new(0),
             }),

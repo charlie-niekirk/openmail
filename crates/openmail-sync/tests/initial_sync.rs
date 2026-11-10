@@ -5,11 +5,11 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{
-    BatchResponder, Listing, Mailbox, PROFILE_HISTORY_ID, list_page, mount_labels, mount_profile,
-    page, setup, setup_retrying,
+    BatchResponder, Listing, Mailbox, PROFILE_HISTORY_ID, fast_retries, list_page, mount_labels,
+    mount_profile, page, setup, setup_paced, setup_retrying,
 };
 use openmail_core::{HistoryId, LabelId, MessageId, ThreadId};
-use openmail_gmail::api;
+use openmail_gmail::api::{self, AdaptiveRate, QuotaPacing};
 use openmail_store::Store;
 use openmail_sync::{
     CancellationToken, Cutoff, Error, InitialSync, InitialSyncConfig, Phase, Progress,
@@ -135,9 +135,12 @@ async fn full_run_syncs_labels_inbox_and_backfill() {
             messages: 5,
             skipped_threads: 1,
             bodies: 0,
+            deleted_threads: 0,
             rate_limit_wait: None,
             retried_requests: 0,
             rate_limited_requests: 0,
+            // The test client has no quota limiter.
+            units_per_second: None,
         }
     );
     // Counts grow page by page.
@@ -215,6 +218,7 @@ async fn a_finished_sync_does_nothing_when_run_again() {
         again,
         Progress {
             phase: Phase::Done,
+            units_per_second: again.units_per_second,
             ..Progress::default()
         }
     );
@@ -712,4 +716,209 @@ async fn rate_limited_batch_items_are_retried_and_counted() {
     let mut requested = batch.requested("threads");
     requested.sort();
     assert_eq!(requested, ["t1", "t2", "t2", "t3", "t4", "t4", "t5", "t5"]);
+}
+
+/// A store holding a full sync of `mailbox()` plus `extra` threads, as left
+/// by an earlier sync, then reset for a full resync.
+async fn synced_then_reset(extra: Mailbox) -> Store {
+    let (server, client) = setup().await;
+    mount_all(&server).await;
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config());
+    sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    let store = sync.into_store();
+    for (id, thread) in &extra.threads {
+        let (mid, labels, date) = &thread.messages[0];
+        let date =
+            OffsetDateTime::from_unix_timestamp_nanos(i128::from(*date) * 1_000_000).unwrap();
+        let t = openmail_core::Thread {
+            id: ThreadId::new(id),
+            history_id: HistoryId::new(thread.history_id),
+            subject: None,
+            snippet: String::new(),
+            last_message_date: date,
+            message_count: 1,
+            label_ids: Vec::new(),
+            senders: Vec::new(),
+            has_attachments: false,
+        };
+        let m = openmail_core::Message {
+            id: MessageId::new(mid),
+            thread_id: ThreadId::new(id),
+            history_id: HistoryId::new(thread.history_id),
+            label_ids: labels.iter().map(|l| LabelId::new(l.as_str())).collect(),
+            snippet: String::new(),
+            internal_date: date,
+            size_estimate: 1,
+            headers: openmail_core::MessageHeaders::default(),
+            has_attachments: false,
+        };
+        store.replace_threads(&[(t, vec![m])]).unwrap();
+    }
+    InitialSync::reset(&store).unwrap();
+    store
+}
+
+#[tokio::test]
+async fn reset_clears_the_history_id_and_checkpoint_but_keeps_rows() {
+    let store = synced_then_reset(Mailbox::default()).await;
+    let state = store.sync_state().unwrap();
+    assert_eq!(state.history_id, None);
+    assert_eq!(state.backfill_cursor, None);
+    assert!(!state.backfill_complete);
+    assert!(state.last_full_sync.is_some());
+    assert!(stored(&store, "t1"));
+}
+
+#[tokio::test]
+async fn a_full_resync_refetches_nothing_unchanged_and_drops_vanished_threads() {
+    // t8 vanished from the server; t400 is older than the resync's cutoff.
+    let store = synced_then_reset(Mailbox::default().with(8, &["INBOX"]).with(400, &[])).await;
+    let since = datetime!(2026-01-01 0:00 UTC);
+    let q = format!("after:{}", since.unix_timestamp());
+    let (server, client) = setup().await;
+    let mailbox = mailbox();
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    with_q(list_page(Listing::Inbox, None), Some(&q))
+        .respond_with(page(&mailbox, &["t1", "t2", "t3"], None))
+        .mount(&server)
+        .await;
+    with_q(list_page(Listing::Backfill, None), Some(&q))
+        .respond_with(page(&mailbox, &["t3", "t4", "t5"], None))
+        .mount(&server)
+        .await;
+    let batch = BatchResponder::new(mailbox);
+    batch.mount(&server).await;
+
+    let config = InitialSyncConfig {
+        cutoff: Cutoff::Since(since),
+        ..config()
+    };
+    let mut sync = InitialSync::new(client, store, config);
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+
+    assert_eq!(done.threads, 0);
+    assert_eq!(done.skipped_threads, 6);
+    assert_eq!(done.deleted_threads, 1);
+    assert!(batch.calls().is_empty());
+    let store = sync.store();
+    assert!(!stored(store, "t8"));
+    assert!(stored(store, "t400"));
+    for t in ["t1", "t2", "t3", "t4", "t5"] {
+        assert!(stored(store, t), "{t}");
+    }
+    let state = store.sync_state().unwrap();
+    assert_eq!(state.history_id, Some(HistoryId::new(PROFILE_HISTORY_ID)));
+    assert!(state.backfill_complete);
+}
+
+#[tokio::test]
+async fn a_stored_thread_gone_when_fetched_is_deleted() {
+    let (server, client) = setup().await;
+    let mut changed = mailbox();
+    changed.threads.get_mut("t2").unwrap().history_id += 1;
+    let mut fetched = changed.clone();
+    fetched.threads.remove("t2");
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&changed, &["t2"], None))
+        .mount(&server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&changed, &[], None))
+        .mount(&server)
+        .await;
+    BatchResponder::new(fetched).mount(&server).await;
+
+    let store = synced_then_reset(Mailbox::default()).await;
+    let mut sync = InitialSync::new(client, store, config());
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    assert!(!stored(sync.store(), "t2"));
+    // t2 when fetched; t1, t3, t4 and t5 at the end, since Cutoff::All
+    // covers them and this listing did not include them.
+    assert_eq!(done.deleted_threads, 5);
+}
+
+/// Adaptive pacing at 800 units/s, with lockouts and probes in milliseconds.
+fn fast_adaptive() -> QuotaPacing {
+    QuotaPacing::Adaptive(AdaptiveRate {
+        units_per_minute: 60_000,
+        lockout: Duration::from_millis(50),
+        max_lockout: Duration::from_millis(100),
+        probe_every: Duration::from_millis(50),
+        ..AdaptiveRate::default()
+    })
+}
+
+#[tokio::test]
+async fn a_rate_limit_burst_slows_the_client_without_pausing_the_sync() {
+    let (server, client) = setup_paced(fast_adaptive(), fast_retries()).await;
+    let mailbox = mailbox();
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    mount_inbox(&server, &mailbox).await;
+    mount_backfill(&server, &mailbox).await;
+    // A burst of rate limits: every thread is turned away once.
+    BatchResponder::new(mailbox)
+        .rate_limit_once(&["t1", "t2", "t3", "t4", "t5"])
+        .mount(&server)
+        .await;
+
+    let start = client.stats().units_per_second.unwrap();
+    let config = InitialSyncConfig {
+        rate_limit_pause: Duration::from_secs(60),
+        ..config()
+    };
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config);
+    let started = Instant::now();
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+
+    assert_eq!(done.threads, 5);
+    assert_eq!(done.rate_limited_requests, 5);
+    // The client locked itself out briefly, slowed down and retried; the 60 s
+    // sync-level pause was never needed.
+    assert_eq!(pauses(&seen), 0);
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    let rate = done.units_per_second.unwrap();
+    assert!(rate < start, "{rate} vs {start}");
+}
+
+#[tokio::test]
+async fn the_default_pacing_stays_under_a_6000_per_minute_quota() {
+    // Gmail's default quota, enforced over short windows: 100 units a second,
+    // counted over any 3 s.
+    let (server, client) = setup_paced(QuotaPacing::default(), fast_retries()).await;
+    let mut mailbox = Mailbox::default();
+    for n in 1..=36 {
+        mailbox = mailbox.with(n, &[]);
+    }
+    let ids: Vec<String> = (1..=36).map(|n| format!("t{n}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &[], None))
+        .mount(&server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &ids, None))
+        .mount(&server)
+        .await;
+    let batch = BatchResponder::new(mailbox).enforce_quota(300, Duration::from_secs(3));
+    batch.mount(&server).await;
+
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config());
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+
+    assert_eq!(done.threads, 36);
+    assert_eq!(batch.quota_rejections(), 0);
+    assert_eq!(done.rate_limited_requests, 0);
+    assert_eq!(pauses(&seen), 0);
 }

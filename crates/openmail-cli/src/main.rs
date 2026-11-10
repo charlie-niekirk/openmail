@@ -10,10 +10,13 @@ mod show;
 mod sync;
 mod text;
 mod threads;
+mod watch;
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Parser;
+use openmail_gmail::api::QuotaLimit;
 use openmail_sync::Cutoff;
 use time::UtcOffset;
 use tracing_subscriber::EnvFilter;
@@ -23,6 +26,7 @@ use crate::cli::{Cli, Command};
 fn main() -> ExitCode {
     let cli = Cli::parse();
     init_tracing();
+    session::set_quota_per_minute(cli.quota_per_minute);
     // Read the local UTC offset while this is the only thread: the `time` crate
     // refuses to once others are running.
     let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
@@ -91,14 +95,23 @@ async fn run(cli: Cli, offset: UtcOffset) -> anyhow::Result<()> {
             prefetch,
             batch_size,
             batch_concurrency,
+            rate,
         } => {
             let (account, client) = session::account_client_with(account, |builder| {
-                builder
+                let builder = builder
                     .batch_size(batch_size)
-                    .batch_concurrency(batch_concurrency)
+                    .batch_concurrency(batch_concurrency);
+                match rate {
+                    Some(rate) => builder.quota_limit(Some(QuotaLimit::per_second(rate))),
+                    None => builder,
+                }
             })?;
             let cutoff = if all { Cutoff::All } else { Cutoff::Days(days) };
             sync::run(client, &account, cutoff, prefetch).await
+        }
+        Command::Watch { interval } => {
+            let (account, client) = session::account_client(account)?;
+            watch::run(client, &account, Duration::from_secs(interval), offset).await
         }
     }
 }

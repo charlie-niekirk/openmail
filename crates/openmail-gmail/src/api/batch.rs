@@ -27,12 +27,14 @@ use super::{ApiMessage, ApiThread, Error, GmailClient, MessageFormat, Result, Th
 pub const MAX_BATCH_SIZE: usize = 50;
 
 /// Calls per batch by default. Gmail works through a batch's calls slowly
-/// and throttles large batches ("too many concurrent requests for user"), so
-/// several small batches in flight beat one large one.
-pub const DEFAULT_BATCH_SIZE: usize = 10;
+/// and enforces its per-user quota over short windows, so small batches spread
+/// the load: 5 `threads.get` cost 50 units, well under a second of the default
+/// budget.
+pub const DEFAULT_BATCH_SIZE: usize = 5;
 
-/// Batches in flight at once by default.
-pub const DEFAULT_BATCH_CONCURRENCY: usize = 4;
+/// Batch requests in flight at once by default: enough to hide latency, while
+/// the quota limiter spaces out when each is sent.
+pub const DEFAULT_BATCH_CONCURRENCY: usize = 2;
 
 /// One call inside a batch: a method on a `users/me` resource.
 #[derive(Debug, Clone)]
@@ -128,14 +130,19 @@ impl GmailClient {
     ) -> Result<Vec<Result<T>>> {
         let mut results: Vec<Option<Result<T>>> = requests.iter().map(|_| None).collect();
         let indices: Vec<usize> = (0..requests.len()).collect();
-        let (size, concurrency) = self.batch_settings();
         // Owned chunks: a stream over borrowed slices would make callers'
         // futures not `Send` (a higher-ranked lifetime limitation).
-        let chunks: Vec<Vec<usize>> = indices.chunks(size).map(<[usize]>::to_vec).collect();
+        let chunks: Vec<Vec<usize>> = indices
+            .chunks(self.batch_size())
+            .map(<[usize]>::to_vec)
+            .collect();
+        // Every batch is polled at once; the client's batch slots decide how
+        // many are actually in flight (including retries).
+        let all = chunks.len().max(1);
         let requests = &requests;
         let mut batches = stream::iter(chunks)
             .map(|chunk| self.run_batch(requests, chunk))
-            .buffer_unordered(concurrency);
+            .buffer_unordered(all);
         while let Some(batch) = batches.next().await {
             for (index, result) in batch? {
                 results[index] = Some(result);
@@ -166,9 +173,11 @@ impl GmailClient {
         let mut refreshed = false;
 
         loop {
+            let permit = self.batch_slot().await;
             let started = Instant::now();
-            let (responses, token) = self.send_batch(requests, &pending).await?;
+            let (responses, token, sent) = self.send_batch(requests, &pending).await?;
             let elapsed = started.elapsed();
+            drop(permit);
             // Failed items by status and reason, for the debug log.
             let mut failures: BTreeMap<String, usize> = BTreeMap::new();
             let mut rate_limited_items = 0;
@@ -217,11 +226,15 @@ impl GmailClient {
                 }
             }
 
+            if rate_limited_items > 0 {
+                self.rate_limited(sent);
+            }
             tracing::debug!(
                 items = pending.len(),
                 elapsed_ms = elapsed.as_millis(),
                 failed = failures.values().sum::<usize>(),
                 ?failures,
+                units_per_second = self.stats().units_per_second,
                 "Gmail batch"
             );
 
@@ -265,12 +278,13 @@ impl GmailClient {
     }
 
     /// Sends one batch of `requests[i]` for each `i` in `pending`, and returns
-    /// each item's response (aligned with `pending`) and the token used.
+    /// each item's response (aligned with `pending`), the token used and when
+    /// it was sent.
     async fn send_batch(
         &self,
         requests: &[BatchRequest],
         pending: &[usize],
-    ) -> Result<(Vec<Option<ItemResponse>>, String)> {
+    ) -> Result<(Vec<Option<ItemResponse>>, String, tokio::time::Instant)> {
         let boundary = format!("batch_openmail_{:016x}", fastrand::u64(..));
         let items: Vec<(usize, &BatchRequest)> =
             pending.iter().map(|&i| (i, &requests[i])).collect();
@@ -279,7 +293,7 @@ impl GmailClient {
         let url = self.batch_url();
         let cost = items.iter().map(|(_, r)| r.cost).sum();
 
-        let (response, token) = self
+        let (response, token, sent) = self
             .send_with_token(cost, |http| {
                 http.post(url.clone())
                     .header(CONTENT_TYPE, &content_type)
@@ -308,7 +322,7 @@ impl GmailClient {
             by_index.entry(index).or_insert(part);
         }
         let responses = pending.iter().map(|i| by_index.remove(i)).collect();
-        Ok((responses, token))
+        Ok((responses, token, sent))
     }
 }
 
