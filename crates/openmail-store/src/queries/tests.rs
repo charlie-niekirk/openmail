@@ -1,4 +1,4 @@
-//! Query tests: paging.
+//! Query tests: paging, counts and thread detail.
 
 use openmail_core::{
     Address, HistoryId, LabelId, Message, MessageHeaders, MessageId, Thread, ThreadId,
@@ -6,7 +6,7 @@ use openmail_core::{
 use time::OffsetDateTime;
 
 use super::{ThreadCursor, ThreadPage, ThreadView};
-use crate::Store;
+use crate::{MessageBody, Store};
 
 fn date(secs: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(secs).unwrap()
@@ -240,4 +240,110 @@ fn all_mail_leaves_out_threads_entirely_in_spam_or_trash() {
         all_pages(&store, &ThreadView::AllMail, 2),
         ["inbox", "archived", "partly", "sent"]
     );
+}
+
+#[test]
+fn label_counts_count_threads_and_unread_threads() {
+    let store = Store::open_in_memory().unwrap();
+    assert!(store.label_counts().unwrap().is_empty());
+
+    put_thread(
+        &store,
+        "a",
+        100,
+        &[&["INBOX", "UNREAD"], &["INBOX", "UNREAD"]],
+    );
+    put_thread(
+        &store,
+        "b",
+        200,
+        &[&["INBOX"], &["INBOX", "UNREAD", "Label_1"]],
+    );
+    put_thread(&store, "c", 300, &[&["INBOX", "Label_1"]]);
+    put_thread(&store, "d", 400, &[&["SENT"]]);
+
+    let counts: Vec<(String, u32, u32)> = store
+        .label_counts()
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.label_id.into_string(), c.threads_total, c.threads_unread))
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            ("INBOX".to_owned(), 3, 2),
+            ("Label_1".to_owned(), 2, 1),
+            ("SENT".to_owned(), 1, 0),
+            ("UNREAD".to_owned(), 2, 2),
+        ]
+    );
+}
+
+#[test]
+fn thread_detail_has_messages_oldest_first_with_labels_and_bodies() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(store.thread_detail(&ThreadId::new("t")).unwrap(), None);
+
+    put_thread(
+        &store,
+        "t",
+        100,
+        &[&["INBOX", "UNREAD"], &["SENT"], &["INBOX"]],
+    );
+    put_thread(&store, "other", 50, &[&["INBOX"]]);
+    let body = MessageBody {
+        text: Some("Hello".to_owned()),
+        html: None,
+        fetched_at: date(1_000),
+    };
+    store.upsert_body(&MessageId::new("t-m1"), &body).unwrap();
+
+    let detail = store.thread_detail(&ThreadId::new("t")).unwrap().unwrap();
+    assert_eq!(
+        detail.thread,
+        store.thread(&ThreadId::new("t")).unwrap().unwrap()
+    );
+    let messages: Vec<&str> = detail
+        .messages
+        .iter()
+        .map(|m| m.message.id.as_str())
+        .collect();
+    assert_eq!(messages, ["t-m0", "t-m1", "t-m2"]);
+    for m in &detail.messages {
+        assert_eq!(
+            Some(&m.message),
+            store.message(&m.message.id).unwrap().as_ref()
+        );
+    }
+    assert_eq!(detail.messages[0].body, None);
+    assert_eq!(detail.messages[1].body.as_ref(), Some(&body));
+    assert_eq!(detail.messages[2].body, None);
+}
+
+#[test]
+fn thread_detail_orders_same_date_messages_by_insertion() {
+    let store = Store::open_in_memory().unwrap();
+    put_thread(&store, "t", 100, &[]);
+    for id in ["z", "a", "m"] {
+        store
+            .upsert_message(&Message {
+                id: MessageId::new(id),
+                thread_id: ThreadId::new("t"),
+                history_id: HistoryId::new(1),
+                label_ids: Vec::new(),
+                snippet: String::new(),
+                internal_date: date(100),
+                size_estimate: 0,
+                headers: MessageHeaders::default(),
+                has_attachments: false,
+            })
+            .unwrap();
+    }
+    let detail = store.thread_detail(&ThreadId::new("t")).unwrap().unwrap();
+    let messages: Vec<&str> = detail
+        .messages
+        .iter()
+        .map(|m| m.message.id.as_str())
+        .collect();
+    assert_eq!(messages, ["z", "a", "m"]);
 }

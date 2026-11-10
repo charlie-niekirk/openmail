@@ -318,7 +318,7 @@ impl ThreadRow {
 }
 
 /// A `messages` row as stored.
-struct MessageRow {
+pub(crate) struct MessageRow {
     id: String,
     thread_id: String,
     history_id: i64,
@@ -338,7 +338,7 @@ struct MessageRow {
 }
 
 impl MessageRow {
-    fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
+    pub(crate) fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get(0)?,
             thread_id: row.get(1)?,
@@ -359,7 +359,7 @@ impl MessageRow {
         })
     }
 
-    fn into_message(self, label_ids: Vec<LabelId>) -> Result<Message> {
+    pub(crate) fn into_message(self, label_ids: Vec<LabelId>) -> Result<Message> {
         Ok(Message {
             id: MessageId::new(self.id),
             thread_id: ThreadId::new(self.thread_id),

@@ -1,15 +1,16 @@
-//! Read queries for the UI: paged thread lists.
+//! Read queries for the UI: paged thread lists, label counts and thread detail.
 //!
 //! Thread lists page with keysets over `(last_message_date, thread_id)`, newest
 //! first, so each page is an index range scan however deep it is.
 
-use openmail_core::{Address, LabelId, SystemLabel, ThreadId};
+use openmail_core::{Address, LabelId, Message, SystemLabel, Thread, ThreadId};
 use rusqlite::Row;
 use rusqlite::types::Value;
 use time::OffsetDateTime;
 
 use crate::convert::{addresses_from_sql, date_from_sql, date_to_sql};
-use crate::{Error, Result, Store};
+use crate::mail::MessageRow;
+use crate::{Error, MessageBody, Result, Store};
 
 /// Which threads a thread list shows.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -68,6 +69,32 @@ pub struct ThreadSummary {
     pub label_ids: Vec<LabelId>,
 }
 
+/// Thread counts for one label, as the sidebar shows them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelCounts {
+    pub label_id: LabelId,
+    /// Threads with the label.
+    pub threads_total: u32,
+    /// Threads with the label and an unread message.
+    pub threads_unread: u32,
+}
+
+/// A thread with its messages, for the conversation view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadDetail {
+    pub thread: Thread,
+    /// The thread's messages, oldest first.
+    pub messages: Vec<MessageDetail>,
+}
+
+/// A message in a [`ThreadDetail`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageDetail {
+    pub message: Message,
+    /// The body, if it has been fetched.
+    pub body: Option<MessageBody>,
+}
+
 impl Store {
     /// A page of up to `limit` threads in `view`, newest first, starting after
     /// `after` (or at the newest thread). A `limit` of 0 is treated as 1.
@@ -112,6 +139,41 @@ impl Store {
             })
             .transpose()?;
         Ok(ThreadPage { threads, next })
+    }
+
+    /// Total and unread thread counts for every label with at least one thread,
+    /// sorted by label ID. Labels missing from the result have no threads.
+    pub fn label_counts(&self) -> Result<Vec<LabelCounts>> {
+        let mut stmt = self.conn().prepare_cached(LABEL_COUNTS_SQL)?;
+        let counts = stmt
+            .query_map([], |row| {
+                Ok(LabelCounts {
+                    label_id: LabelId::new(row.get::<_, String>(0)?),
+                    threads_total: row.get(1)?,
+                    threads_unread: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(counts)
+    }
+
+    /// The thread with this ID and its messages, oldest first, with their labels
+    /// and any bodies already fetched.
+    pub fn thread_detail(&self, id: &ThreadId) -> Result<Option<ThreadDetail>> {
+        self.read(|store| {
+            let Some(thread) = store.thread(id)? else {
+                return Ok(None);
+            };
+            let mut stmt = store.conn().prepare_cached(THREAD_MESSAGES_SQL)?;
+            let rows = stmt
+                .query_map([id.as_str()], DetailRow::read)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let messages = rows
+                .into_iter()
+                .map(DetailRow::into_detail)
+                .collect::<Result<_>>()?;
+            Ok(Some(ThreadDetail { thread, messages }))
+        })
     }
 }
 
@@ -191,6 +253,34 @@ const ALL_MAIL_FILTER: &str = "(NOT EXISTS (SELECT 1 FROM thread_labels AS x \
        AND NOT EXISTS (SELECT 1 FROM message_labels AS ml \
          WHERE ml.message_id = m.id AND ml.label_id IN ('SPAM', 'TRASH'))))";
 
+/// Total threads per label, and unread ones: a thread is unread when it has the
+/// `UNREAD` label, so the unread counts walk only the unread threads' labels.
+const LABEL_COUNTS_SQL: &str = "\
+    WITH totals AS (
+        SELECT label_id, count(*) AS total FROM thread_labels GROUP BY label_id
+    ), unread AS (
+        SELECT l.label_id, count(*) AS unread
+        FROM thread_labels AS u CROSS JOIN thread_labels AS l ON l.thread_id = u.thread_id
+        WHERE u.label_id = 'UNREAD'
+        GROUP BY l.label_id
+    )
+    SELECT totals.label_id, totals.total, coalesce(unread.unread, 0)
+    FROM totals LEFT JOIN unread ON unread.label_id = totals.label_id
+    ORDER BY totals.label_id";
+
+/// A thread's messages oldest first (ties in insertion order), with their labels
+/// and bodies. The first 16 columns are [`MessageRow`]'s.
+const THREAD_MESSAGES_SQL: &str = "\
+    SELECT m.id, m.thread_id, m.history_id, m.snippet, m.internal_date, m.size_estimate,
+           m.subject, m.from_addrs, m.to_addrs, m.cc_addrs, m.bcc_addrs, m.reply_to_addrs,
+           m.message_id_header, m.in_reply_to, m.\"references\", m.has_attachments,
+           (SELECT json_group_array(ml.label_id)
+            FROM message_labels AS ml WHERE ml.message_id = m.id),
+           b.fetched_at, b.text, b.html
+    FROM messages AS m LEFT JOIN bodies AS b ON b.message_id = m.id
+    WHERE m.thread_id = ?1
+    ORDER BY m.internal_date, m.pk";
+
 /// Label IDs from a JSON array, sorted. (Sorting here rather than in SQL saves a
 /// temporary B-tree per row.)
 fn label_ids_from_sql(json: &str) -> Result<Vec<LabelId>> {
@@ -247,5 +337,45 @@ impl SummaryRow {
         })
     }
 }
+
+/// A row of [`THREAD_MESSAGES_SQL`].
+struct DetailRow {
+    message: MessageRow,
+    label_ids: String,
+    /// Set when the body has been fetched.
+    fetched_at: Option<i64>,
+    text: Option<String>,
+    html: Option<String>,
+}
+
+impl DetailRow {
+    fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            message: MessageRow::read(row)?,
+            label_ids: row.get(16)?,
+            fetched_at: row.get(17)?,
+            text: row.get(18)?,
+            html: row.get(19)?,
+        })
+    }
+
+    fn into_detail(self) -> Result<MessageDetail> {
+        let body = self
+            .fetched_at
+            .map(|fetched_at| -> Result<MessageBody> {
+                Ok(MessageBody {
+                    text: self.text,
+                    html: self.html,
+                    fetched_at: date_from_sql(fetched_at)?,
+                })
+            })
+            .transpose()?;
+        let message = self
+            .message
+            .into_message(label_ids_from_sql(&self.label_ids)?)?;
+        Ok(MessageDetail { message, body })
+    }
+}
+
 #[cfg(test)]
 mod tests;
