@@ -36,7 +36,7 @@ pub struct OutgoingMessage {
     pub inline_images: Vec<InlineImage>,
     pub attachments: Vec<OutgoingAttachment>,
     /// The parent's message ID, without angle brackets, when replying or
-    /// forwarding.
+    /// forwarding. See [`crate::ThreadingHeaders`].
     pub in_reply_to: Option<String>,
     /// The thread's message IDs, oldest first, without angle brackets.
     pub references: Vec<String>,
