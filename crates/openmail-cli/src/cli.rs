@@ -1,6 +1,8 @@
 //! Command-line arguments.
 
+use clap::builder::TypedValueParser as _;
 use clap::{Parser, Subcommand};
+use openmail_gmail::api::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE};
 
 /// Openmail developer CLI: exercise the Gmail client against a real account
 /// without the desktop UI.
@@ -46,6 +48,41 @@ pub enum Command {
     Show {
         /// The thread ID, as printed by `threads`.
         thread_id: String,
+    },
+    /// Download labels and thread metadata into the local store: Inbox
+    /// threads, then the rest of the mailbox, back to a cutoff. Interrupted
+    /// syncs resume.
+    Sync {
+        /// How many days of mail to sync.
+        #[arg(
+            long,
+            default_value_t = 90,
+            value_parser = clap::value_parser!(u32).range(1..),
+            conflicts_with = "all"
+        )]
+        days: u32,
+        /// Sync the whole mailbox instead of the last `--days`.
+        #[arg(long)]
+        all: bool,
+        /// Also fetch the bodies of the N newest Inbox messages.
+        #[arg(long, value_name = "N")]
+        prefetch: Option<usize>,
+        /// Calls per Gmail batch request (1 to 50), for tuning throughput.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = DEFAULT_BATCH_SIZE,
+            value_parser = clap::value_parser!(u16).range(1..=50).map(usize::from)
+        )]
+        batch_size: usize,
+        /// Batch requests in flight at once (1 to 16), for tuning throughput.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = DEFAULT_BATCH_CONCURRENCY,
+            value_parser = clap::value_parser!(u16).range(1..=16).map(usize::from)
+        )]
+        batch_concurrency: usize,
     },
 }
 
@@ -174,8 +211,61 @@ mod tests {
     }
 
     #[test]
+    fn parses_sync() {
+        let cli = parse(&["sync"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Sync {
+                days: 90,
+                all: false,
+                prefetch: None,
+                batch_size: DEFAULT_BATCH_SIZE,
+                batch_concurrency: DEFAULT_BATCH_CONCURRENCY,
+            }
+        );
+
+        let cli = parse(&[
+            "sync",
+            "--days",
+            "7",
+            "--prefetch",
+            "50",
+            "--batch-size",
+            "20",
+            "--batch-concurrency",
+            "2",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Sync {
+                days: 7,
+                all: false,
+                prefetch: Some(50),
+                batch_size: 20,
+                batch_concurrency: 2,
+            }
+        );
+
+        let cli = parse(&["sync", "--all"]).unwrap();
+        assert!(matches!(cli.command, Command::Sync { all: true, .. }));
+    }
+
+    #[test]
+    fn sync_rejects_zero_days_and_days_with_all() {
+        let err = parse(&["sync", "--days", "0"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        let err = parse(&["sync", "--days", "7", "--all"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        for size in ["0", "51"] {
+            let err = parse(&["sync", "--batch-size", size]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "{size}");
+        }
+    }
+
+    #[test]
     fn rejects_unknown_commands() {
-        let err = parse(&["sync"]).unwrap_err();
+        let err = parse(&["frobnicate"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 }

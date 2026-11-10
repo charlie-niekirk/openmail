@@ -117,6 +117,58 @@ async fn rate_limits_are_retried() {
         .await;
 
     client.get_profile().await.unwrap();
+    assert_eq!(client.stats().retries, 1);
+    assert_eq!(client.stats().rate_limited, 1);
+}
+
+#[tokio::test]
+async fn rate_limits_outlast_max_retries_within_their_wait_budget() {
+    let (server, client, _) = setup_with(RetryPolicy {
+        max_retries: 1,
+        rate_limit_max_wait: Duration::from_secs(1),
+        ..common::fast_retries(1)
+    })
+    .await;
+    Mock::given(path(profile_path()))
+        .respond_with(json(429, "error_429_rate_limit.json"))
+        .up_to_n_times(4)
+        .expect(4)
+        .mount(&server)
+        .await;
+    Mock::given(path(profile_path()))
+        .respond_with(json(200, "profile.json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client.get_profile().await.unwrap();
+}
+
+#[tokio::test]
+async fn rate_limit_retries_stop_when_their_wait_budget_is_spent() {
+    let (server, client, _) = setup_with(RetryPolicy {
+        max_retries: 10,
+        rate_limit_max_wait: Duration::ZERO,
+        ..common::fast_retries(10)
+    })
+    .await;
+    Mock::given(path(profile_path()))
+        .respond_with(json(429, "error_429_rate_limit.json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = client.get_profile().await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Quota {
+                kind: QuotaKind::RateLimit,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

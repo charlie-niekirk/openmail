@@ -43,8 +43,8 @@ openmail/
   `Draft`, and error types. Pure data, no I/O.
 - **`openmail-gmail`** — Everything that talks to Google. OAuth2 installed-app flow
   (PKCE, loopback redirect, refresh), a typed REST client over `reqwest` (rustls),
-  `multipart/mixed` batch requests, pagination, and backoff on 429/5xx. Tested
-  against `wiremock`, never the real API.
+  `multipart/mixed` batch requests, pagination, a client-side quota limiter, and
+  backoff on 429/5xx. Tested against `wiremock`, never the real API.
 - **`openmail-mime`** — RFC 5322 / MIME. Parses raw messages (`mail-parser`) into
   text, HTML, inline `cid:` parts and attachments; builds outgoing mail
   (`mail-builder`) and encodes it as base64url. Tested against a `.eml` corpus.
@@ -333,6 +333,31 @@ serves views over every thread.
    else back to a configurable date, using batched metadata requests. Progress and
    the starting `historyId` are checkpointed so the sync can resume. Bodies load
    lazily, with background prefetch of recent mail.
+
+   `InitialSync` in `openmail-sync` records the profile's `historyId` before
+   anything else, then syncs labels, Inbox threads, and a backfill of the rest,
+   each newest-first down to a cutoff (90 days by default; Gmail's `after:`
+   operator; older threads are left for on-demand fetching), in
+   `threads.list` pages of 100. Each page's thread metadata (`format=metadata`
+   with From, To, Cc, Subject, Date and Message-ID) is fetched in batches of 10,
+   four in flight (Gmail works through a large batch slowly and throttles it),
+   and written in one transaction together with a JSON checkpoint (phase, page
+   token, cutoff) in `sync_state.backfill_cursor`, so a failed or cancelled sync
+   resumes at the next page. Threads already stored with the same history ID are
+   not fetched again. Optionally, the newest Inbox bodies are fetched
+   (`format=raw`, parsed by `openmail-mime`) between the Inbox and the backfill.
+
+   **Gmail quota.** Gmail limits each user to 15,000 quota units a minute, and
+   calls cost from 1 unit (`labels.list`) to 10 (`threads.get`) or more, so one
+   batch of 50 `threads.get` costs 500. `GmailClient` charges every request,
+   and every item of a batch, its documented cost to a token bucket shared by
+   its clones (200 units/s with bursts of 1,000 by default, at most 13,000 in
+   any minute) before sending it. Rate-limit responses are retried on their own
+   budget: delays of up to 60 s, three minutes in all, honouring `Retry-After`.
+   If a rate limit still gets through, `InitialSync` reports the wait, pauses
+   and resumes from its checkpoint within the same run. Batches log their size,
+   latency and failures at debug level, and the client counts retried and
+   rate-limited requests (`GmailClient::stats`) for progress reports.
 2. **Incremental sync.** Poll `history.list` from the stored `historyId` — about every
    30 s while the window is focused, less often when idle — and apply added/deleted
    messages and added/removed labels. If the `historyId` has expired (404), do a full

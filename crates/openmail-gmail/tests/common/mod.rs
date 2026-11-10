@@ -47,6 +47,8 @@ pub fn fast_retries(max_retries: u32) -> RetryPolicy {
         max_retries,
         initial_backoff: Duration::from_millis(1),
         max_backoff: Duration::from_millis(5),
+        rate_limit_max_backoff: Duration::from_millis(5),
+        rate_limit_max_wait: Duration::from_millis(5) * max_retries,
     }
 }
 

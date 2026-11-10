@@ -6,9 +6,10 @@
 //! requests by `Content-ID`, and resends only the calls that failed with a
 //! retryable status.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
 
+use futures_util::{StreamExt as _, stream};
 use openmail_core::{MessageId, ThreadId};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::{Method, StatusCode};
@@ -17,11 +18,21 @@ use serde::de::DeserializeOwned;
 use super::client::parse_retry_after;
 use super::error::classify;
 use super::models::format_query;
+use super::quota;
+use super::retry::Retrier;
 use super::{ApiMessage, ApiThread, Error, GmailClient, MessageFormat, Result, ThreadFormat};
 
 /// The most calls Gmail accepts in one batch. (The API allows 100, but Gmail
 /// rate-limits batches larger than 50.)
 pub const MAX_BATCH_SIZE: usize = 50;
+
+/// Calls per batch by default. Gmail works through a batch's calls slowly
+/// and throttles large batches ("too many concurrent requests for user"), so
+/// several small batches in flight beat one large one.
+pub const DEFAULT_BATCH_SIZE: usize = 10;
+
+/// Batches in flight at once by default.
+pub const DEFAULT_BATCH_CONCURRENCY: usize = 4;
 
 /// One call inside a batch: a method on a `users/me` resource.
 #[derive(Debug, Clone)]
@@ -31,6 +42,8 @@ pub(crate) struct BatchRequest {
     query: Vec<(&'static str, String)>,
     /// A JSON body.
     body: Option<Vec<u8>>,
+    /// The call's Gmail quota units.
+    cost: u32,
 }
 
 impl BatchRequest {
@@ -41,6 +54,7 @@ impl BatchRequest {
             segments: segments.iter().map(|s| (*s).to_owned()).collect(),
             query,
             body: None,
+            cost: quota::cost(&Method::GET, segments),
         }
     }
 }
@@ -99,22 +113,33 @@ impl GmailClient {
         self.batch(requests).await
     }
 
-    /// Sends `requests` in batches of at most [`MAX_BATCH_SIZE`], one batch at
-    /// a time, and decodes each successful response as `T`.
+    /// Sends `requests` in batches of the client's batch size, with up to its
+    /// batch concurrency in flight, and decodes each successful response as
+    /// `T`. Results come back in the order of `requests`.
     ///
-    /// Calls that fail with a retryable status (429, rate-limit 403, 5xx) are
-    /// resent in a smaller batch after a backoff, per the client's
+    /// Each batch is charged the quota units of all its calls before it is
+    /// sent. Calls that fail with a retryable status (429, rate-limit 403, 5xx)
+    /// are resent in a smaller batch after a backoff, per the client's
     /// [`RetryPolicy`](super::RetryPolicy). A `401` refreshes the token once per batch and
     /// resends the calls it rejected. Other failures become that item's `Err`.
-    pub(crate) async fn batch<T: DeserializeOwned>(
+    pub(crate) async fn batch<T: DeserializeOwned + Send>(
         &self,
         requests: Vec<BatchRequest>,
     ) -> Result<Vec<Result<T>>> {
         let mut results: Vec<Option<Result<T>>> = requests.iter().map(|_| None).collect();
         let indices: Vec<usize> = (0..requests.len()).collect();
-        for chunk in indices.chunks(MAX_BATCH_SIZE) {
-            self.run_batch(&requests, chunk.to_vec(), &mut results)
-                .await?;
+        let (size, concurrency) = self.batch_settings();
+        // Owned chunks: a stream over borrowed slices would make callers'
+        // futures not `Send` (a higher-ranked lifetime limitation).
+        let chunks: Vec<Vec<usize>> = indices.chunks(size).map(<[usize]>::to_vec).collect();
+        let requests = &requests;
+        let mut batches = stream::iter(chunks)
+            .map(|chunk| self.run_batch(requests, chunk))
+            .buffer_unordered(concurrency);
+        while let Some(batch) = batches.next().await {
+            for (index, result) in batch? {
+                results[index] = Some(result);
+            }
         }
         Ok(results
             .into_iter()
@@ -130,54 +155,101 @@ impl GmailClient {
     }
 
     /// Sends the `pending` requests as one batch, retrying failed items until
-    /// each has a result in `results`.
+    /// each has a result, and returns them by request index.
     async fn run_batch<T: DeserializeOwned>(
         &self,
         requests: &[BatchRequest],
         mut pending: Vec<usize>,
-        results: &mut [Option<Result<T>>],
-    ) -> Result<()> {
-        let policy = *self.retry_policy();
+    ) -> Result<Vec<(usize, Result<T>)>> {
+        let mut results = Vec::with_capacity(pending.len());
+        let mut retrier = Retrier::new(*self.retry_policy());
         let mut refreshed = false;
-        let mut attempt = 0;
 
         loop {
+            let started = Instant::now();
             let (responses, token) = self.send_batch(requests, &pending).await?;
+            let elapsed = started.elapsed();
+            // Failed items by status and reason, for the debug log.
+            let mut failures: BTreeMap<String, usize> = BTreeMap::new();
+            let mut rate_limited_items = 0;
 
             let mut retry = Vec::new();
             let mut unauthorized = false;
-            let mut back_off = false;
+            // Items that failed retryably, with their errors in case retries
+            // are used up.
+            let mut retryable = Vec::new();
+            let mut rate_limited = false;
             let mut retry_after: Option<Duration> = None;
             for (index, response) in pending.iter().copied().zip(responses) {
                 let Some(response) = response else {
-                    results[index] = Some(Err(Error::InvalidResponse(format!(
-                        "batch response had no part for item {index}"
-                    ))));
+                    results.push((
+                        index,
+                        Err(Error::InvalidResponse(format!(
+                            "batch response had no part for item {index}"
+                        ))),
+                    ));
                     continue;
                 };
                 if response.status.is_success() {
-                    results[index] =
-                        Some(serde_json::from_slice(&response.body).map_err(Into::into));
+                    results.push((
+                        index,
+                        serde_json::from_slice(&response.body).map_err(Into::into),
+                    ));
                     continue;
                 }
                 if response.status == StatusCode::UNAUTHORIZED && !refreshed {
+                    *failures.entry("401".to_owned()).or_default() += 1;
                     unauthorized = true;
                     retry.push(index);
                     continue;
                 }
                 let failure = classify(response.status, &response.body, response.retry_after);
-                if failure.retryable && attempt < policy.max_retries {
-                    back_off = true;
+                *failures
+                    .entry(failure_label(response.status, &failure.error))
+                    .or_default() += 1;
+                rate_limited_items += usize::from(failure.is_rate_limit());
+                if failure.retryable {
+                    rate_limited |= failure.is_rate_limit();
                     retry_after = retry_after.max(response.retry_after);
-                    retry.push(index);
+                    retryable.push((index, failure.error));
                 } else {
-                    results[index] = Some(Err(failure.error));
+                    results.push((index, Err(failure.error)));
                 }
             }
 
-            if retry.is_empty() {
-                return Ok(());
+            tracing::debug!(
+                items = pending.len(),
+                elapsed_ms = elapsed.as_millis(),
+                failed = failures.values().sum::<usize>(),
+                ?failures,
+                "Gmail batch"
+            );
+
+            let mut delay = None;
+            if !retryable.is_empty() {
+                delay = retrier.next_delay(rate_limited, retry_after);
+                if delay.is_some() {
+                    retry.extend(retryable.iter().map(|(index, _)| *index));
+                    retry.sort_unstable();
+                } else {
+                    results.extend(
+                        retryable
+                            .into_iter()
+                            .map(|(index, error)| (index, Err(error))),
+                    );
+                }
             }
+
+            self.count(retry.len(), rate_limited_items);
+            if retry.is_empty() {
+                return Ok(results);
+            }
+            tracing::debug!(
+                items = retry.len(),
+                ?delay,
+                rate_limited,
+                "retrying Gmail batch items"
+            );
             if unauthorized {
                 refreshed = true;
                 self.tokens()
@@ -185,9 +257,8 @@ impl GmailClient {
                     .await
                     .map_err(Error::Token)?;
             }
-            if back_off {
-                tokio::time::sleep(policy.backoff(attempt, retry_after)).await;
-                attempt += 1;
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
             }
             pending = retry;
         }
@@ -206,9 +277,10 @@ impl GmailClient {
         let body = encode_batch(self, &boundary, &items);
         let content_type = format!("multipart/mixed; boundary={boundary}");
         let url = self.batch_url();
+        let cost = items.iter().map(|(_, r)| r.cost).sum();
 
         let (response, token) = self
-            .send_with_token(|http| {
+            .send_with_token(cost, |http| {
                 http.post(url.clone())
                     .header(CONTENT_TYPE, &content_type)
                     .body(body.clone())
@@ -237,6 +309,19 @@ impl GmailClient {
         }
         let responses = pending.iter().map(|i| by_index.remove(i)).collect();
         Ok((responses, token))
+    }
+}
+
+/// A short label for a failed item, such as `429 rate limit` or
+/// `400 invalidArgument`.
+fn failure_label(status: StatusCode, error: &Error) -> String {
+    match error {
+        Error::Quota { kind, .. } => format!("{} {kind}", status.as_u16()),
+        Error::Api {
+            reason: Some(reason),
+            ..
+        } => format!("{} {reason}", status.as_u16()),
+        _ => status.as_u16().to_string(),
     }
 }
 

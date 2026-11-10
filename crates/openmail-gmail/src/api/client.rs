@@ -1,6 +1,7 @@
 //! The HTTP client: base URL, authentication, and the retry loop.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
@@ -8,16 +9,22 @@ use reqwest::{Method, RequestBuilder, Response, StatusCode, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use super::batch::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE};
 use super::error::{Error, Result, classify};
-use super::{RetryPolicy, TokenProvider};
+use super::quota::{self, QuotaLimiter};
+use super::retry::Retrier;
+use super::{QuotaLimit, RetryPolicy, TokenProvider};
 
 /// A typed client for the Gmail REST API (`gmail/v1`), acting as the signed-in
 /// user (`users/me`).
 ///
-/// Cloning is cheap and shares the connection pool. Every request gets its
-/// access token from the [`TokenProvider`]. A `401` triggers one token refresh
-/// and a retry; `429`, rate-limit `403`s, `5xx` and timeouts are retried with
-/// exponential backoff and jitter, per the [`RetryPolicy`].
+/// Cloning is cheap and shares the connection pool and quota limiter. Every
+/// request gets its access token from the [`TokenProvider`]. A `401` triggers
+/// one token refresh and a retry; `429`, rate-limit `403`s, `5xx` and timeouts
+/// are retried with exponential backoff and jitter, per the [`RetryPolicy`].
+/// Before each attempt the request's Gmail quota cost is charged to the
+/// [`QuotaLimit`], waiting if needed, so a busy client stays under Gmail's
+/// per-user rate limit.
 #[derive(Clone)]
 pub struct GmailClient {
     inner: Arc<Inner>,
@@ -28,6 +35,21 @@ struct Inner {
     base_url: Url,
     tokens: Arc<dyn TokenProvider>,
     retry: RetryPolicy,
+    quota: Option<QuotaLimiter>,
+    batch_size: usize,
+    batch_concurrency: usize,
+    retries: AtomicU64,
+    rate_limited: AtomicU64,
+}
+
+/// Counts of a client's (and its clones') retries since it was built, for
+/// progress reports and diagnosis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClientStats {
+    /// Requests and batch items sent again after a retryable failure.
+    pub retries: u64,
+    /// Responses and batch items Gmail rejected with a rate limit.
+    pub rate_limited: u64,
 }
 
 impl std::fmt::Debug for GmailClient {
@@ -35,6 +57,7 @@ impl std::fmt::Debug for GmailClient {
         f.debug_struct("GmailClient")
             .field("base_url", &self.inner.base_url.as_str())
             .field("retry", &self.inner.retry)
+            .field("quota", &self.inner.quota.as_ref().map(QuotaLimiter::limit))
             .finish_non_exhaustive()
     }
 }
@@ -55,6 +78,9 @@ impl GmailClient {
             base_url: None,
             http: None,
             retry: RetryPolicy::default(),
+            quota: Some(QuotaLimit::default()),
+            batch_size: DEFAULT_BATCH_SIZE,
+            batch_concurrency: DEFAULT_BATCH_CONCURRENCY,
         }
     }
 
@@ -88,6 +114,29 @@ impl GmailClient {
         &self.inner.retry
     }
 
+    /// Calls per batch, and batches in flight at once.
+    pub(crate) fn batch_settings(&self) -> (usize, usize) {
+        (self.inner.batch_size, self.inner.batch_concurrency)
+    }
+
+    /// How many requests have been retried, and rate-limited, so far.
+    pub fn stats(&self) -> ClientStats {
+        ClientStats {
+            retries: self.inner.retries.load(Ordering::Relaxed),
+            rate_limited: self.inner.rate_limited.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Records `retries` resent requests or items, `rate_limited` of them for
+    /// a rate limit.
+    pub(crate) fn count(&self, retries: usize, rate_limited: usize) {
+        let inner = &*self.inner;
+        inner.retries.fetch_add(retries as u64, Ordering::Relaxed);
+        inner
+            .rate_limited
+            .fetch_add(rate_limited as u64, Ordering::Relaxed);
+    }
+
     /// Sends a GET for a `users/me` resource and decodes the JSON response.
     pub(crate) async fn get_json<T: DeserializeOwned>(
         &self,
@@ -95,7 +144,10 @@ impl GmailClient {
         query: &[(&str, String)],
     ) -> Result<T> {
         let url = self.user_url(segments);
-        let response = self.send(|http| http.get(url.clone()).query(query)).await?;
+        let cost = quota::cost(&Method::GET, segments);
+        let response = self
+            .send(cost, |http| http.get(url.clone()).query(query))
+            .await?;
         let bytes = response.bytes().await?;
         Ok(serde_json::from_slice(&bytes)?)
     }
@@ -131,8 +183,9 @@ impl GmailClient {
         body: Option<&(impl Serialize + ?Sized)>,
     ) -> Result<Response> {
         let url = self.user_url(segments);
+        let cost = quota::cost(&method, segments);
         let body = body.map(serde_json::to_vec).transpose()?;
-        self.send(|http| {
+        self.send(cost, |http| {
             let request = http.request(method.clone(), url.clone());
             match &body {
                 Some(body) => request
@@ -149,14 +202,23 @@ impl GmailClient {
     /// once on `401` and retrying retryable failures. Returns the successful
     /// response; any other status becomes an [`Error`].
     ///
-    /// `build` runs once per attempt, so it must build the same request each time.
+    /// Each attempt is charged `cost` quota units first. `build` runs once per
+    /// attempt, so it must build the same request each time.
     pub(crate) async fn send(
         &self,
+        cost: u32,
         build: impl Fn(&reqwest::Client) -> RequestBuilder,
     ) -> Result<Response> {
-        self.send_with_token(build)
+        self.send_with_token(cost, build)
             .await
             .map(|(response, _)| response)
+    }
+
+    /// Waits until `cost` quota units may be spent.
+    pub(crate) async fn charge(&self, cost: u32) {
+        if let Some(quota) = &self.inner.quota {
+            quota.acquire(cost).await;
+        }
     }
 
     /// Like [`send`](Self::send), but also returns the access token the
@@ -164,21 +226,27 @@ impl GmailClient {
     /// response (as in a batch) can refresh exactly that token.
     pub(crate) async fn send_with_token(
         &self,
+        cost: u32,
         build: impl Fn(&reqwest::Client) -> RequestBuilder,
     ) -> Result<(Response, String)> {
         let inner = &*self.inner;
         let mut token = inner.tokens.access_token().await.map_err(Error::Token)?;
         let mut refreshed = false;
-        let mut attempt = 0;
+        let mut retrier = Retrier::new(inner.retry);
 
         loop {
+            self.charge(cost).await;
             let response = match build(&inner.http).bearer_auth(&token).send().await {
                 Ok(response) => response,
-                Err(err) if err.is_timeout() && attempt < inner.retry.max_retries => {
-                    tokio::time::sleep(inner.retry.backoff(attempt, None)).await;
-                    attempt += 1;
-                    continue;
-                }
+                Err(err) if err.is_timeout() => match retrier.next_delay(false, None) {
+                    Some(delay) => {
+                        tracing::debug!(?delay, "Gmail request timed out; retrying");
+                        self.count(1, 0);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    None => return Err(err.into()),
+                },
                 Err(err) => return Err(err.into()),
             };
 
@@ -199,11 +267,22 @@ impl GmailClient {
             let retry_after = retry_after(&response);
             let body = response.bytes().await.unwrap_or_default();
             let failure = classify(status, &body, retry_after);
-            if failure.retryable && attempt < inner.retry.max_retries {
-                tokio::time::sleep(inner.retry.backoff(attempt, retry_after)).await;
-                attempt += 1;
+            let rate_limited = failure.is_rate_limit();
+            if failure.retryable
+                && let Some(delay) = retrier.next_delay(rate_limited, retry_after)
+            {
+                tracing::debug!(
+                    status = status.as_u16(),
+                    error = %failure.error,
+                    ?delay,
+                    "Gmail request failed; retrying"
+                );
+                self.count(1, usize::from(rate_limited));
+                tokio::time::sleep(delay).await;
                 continue;
             }
+            self.count(0, usize::from(rate_limited));
+            tracing::debug!(status = status.as_u16(), error = %failure.error, "Gmail request failed");
             return Err(failure.error);
         }
     }
@@ -226,6 +305,9 @@ pub struct GmailClientBuilder {
     base_url: Option<Url>,
     http: Option<reqwest::Client>,
     retry: RetryPolicy,
+    quota: Option<QuotaLimit>,
+    batch_size: usize,
+    batch_concurrency: usize,
 }
 
 impl GmailClientBuilder {
@@ -245,6 +327,28 @@ impl GmailClientBuilder {
     /// Sets how failed requests are retried.
     pub fn retry_policy(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
+        self
+    }
+
+    /// Sets how fast the client may spend Gmail quota units, or `None` for no
+    /// client-side limit. Defaults to [`QuotaLimit::default`].
+    pub fn quota_limit(mut self, limit: Option<QuotaLimit>) -> Self {
+        self.quota = limit;
+        self
+    }
+
+    /// Sets how many calls go in one batch request (1 to [`MAX_BATCH_SIZE`];
+    /// [`DEFAULT_BATCH_SIZE`] by default).
+    pub fn batch_size(mut self, size: usize) -> Self {
+        self.batch_size = size.clamp(1, MAX_BATCH_SIZE);
+        self
+    }
+
+    /// Sets how many batch requests one batched call keeps in flight at once
+    /// (at least 1; [`DEFAULT_BATCH_CONCURRENCY`] by default). The quota
+    /// limiter still caps the overall rate.
+    pub fn batch_concurrency(mut self, concurrency: usize) -> Self {
+        self.batch_concurrency = concurrency.max(1);
         self
     }
 
@@ -269,6 +373,11 @@ impl GmailClientBuilder {
                 base_url,
                 tokens: self.tokens,
                 retry: self.retry,
+                quota: self.quota.map(QuotaLimiter::new),
+                batch_size: self.batch_size,
+                batch_concurrency: self.batch_concurrency,
+                retries: AtomicU64::new(0),
+                rate_limited: AtomicU64::new(0),
             }),
         })
     }

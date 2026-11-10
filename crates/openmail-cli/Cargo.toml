@@ -22,8 +22,10 @@ open.workspace = true
 openmail-core = { path = "../openmail-core" }
 openmail-gmail = { path = "../openmail-gmail" }
 openmail-mime = { path = "../openmail-mime" }
+openmail-store = { path = "../openmail-store" }
+openmail-sync = { path = "../openmail-sync" }
 time = { workspace = true, features = ["local-offset"] }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

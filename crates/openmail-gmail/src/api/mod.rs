@@ -11,11 +11,12 @@ mod error;
 mod models;
 mod mutations;
 mod pagination;
+mod quota;
 mod retry;
 
 pub use crate::auth::{TokenError, TokenFuture, TokenProvider};
-pub use batch::MAX_BATCH_SIZE;
-pub use client::{GmailClient, GmailClientBuilder, default_http_client};
+pub use batch::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE};
+pub use client::{ClientStats, GmailClient, GmailClientBuilder, default_http_client};
 pub use error::{Error, QuotaKind, Result};
 pub use models::{
     ApiLabel, ApiLabelColor, ApiMessage, ApiThread, Header, History, HistoryLabelChange,
@@ -25,4 +26,5 @@ pub use models::{
 };
 pub use mutations::MAX_BATCH_MODIFY_IDS;
 pub use pagination::{Paginated, paginate};
+pub use quota::QuotaLimit;
 pub use retry::RetryPolicy;

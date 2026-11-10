@@ -7,12 +7,14 @@ mod cli;
 mod labels;
 mod session;
 mod show;
+mod sync;
 mod text;
 mod threads;
 
 use std::process::ExitCode;
 
 use clap::Parser;
+use openmail_sync::Cutoff;
 use time::UtcOffset;
 use tracing_subscriber::EnvFilter;
 
@@ -82,6 +84,21 @@ async fn run(cli: Cli, offset: UtcOffset) -> anyhow::Result<()> {
         }
         Command::Show { thread_id } => {
             show::run(&session::gmail_client(account)?, &thread_id, offset).await
+        }
+        Command::Sync {
+            days,
+            all,
+            prefetch,
+            batch_size,
+            batch_concurrency,
+        } => {
+            let (account, client) = session::account_client_with(account, |builder| {
+                builder
+                    .batch_size(batch_size)
+                    .batch_concurrency(batch_concurrency)
+            })?;
+            let cutoff = if all { Cutoff::All } else { Cutoff::Days(days) };
+            sync::run(client, &account, cutoff, prefetch).await
         }
     }
 }
