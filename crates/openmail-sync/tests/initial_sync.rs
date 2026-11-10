@@ -136,6 +136,8 @@ async fn full_run_syncs_labels_inbox_and_backfill() {
             skipped_threads: 1,
             bodies: 0,
             rate_limit_wait: None,
+            retried_requests: 0,
+            rate_limited_requests: 0,
         }
     );
     // Counts grow page by page.
@@ -574,6 +576,9 @@ async fn rate_limits_mid_backfill_pause_and_resume_in_the_same_run() {
     let done = result.unwrap();
 
     assert_eq!(pauses(&seen), 3);
+    // The client does not retry in these tests, so each 429 surfaced.
+    assert_eq!(done.rate_limited_requests, 3);
+    assert_eq!(done.retried_requests, 0);
     assert!(seen.iter().all(
         |p| p.rate_limit_wait.is_none() || p.rate_limit_wait == Some(Duration::from_millis(10))
     ));

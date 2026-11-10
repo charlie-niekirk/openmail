@@ -99,6 +99,12 @@ pub fn progress_line(progress: &Progress) -> String {
     if progress.bodies > 0 {
         line.push_str(&format!(", {} bodies", progress.bodies));
     }
+    if progress.retried_requests > 0 {
+        line.push_str(&format!(
+            ", {} retried ({} rate-limited)",
+            progress.retried_requests, progress.rate_limited_requests
+        ));
+    }
     if let Some(wait) = progress.rate_limit_wait {
         line.push_str(&format!(
             " — waiting {}s for Gmail rate limit",
@@ -135,9 +141,17 @@ mod tests {
             "Backfill (resumed): 12 labels, 120 threads, 130 messages (4 unchanged), 25 bodies"
         );
 
+        progress.retried_requests = 7;
+        progress.rate_limited_requests = 5;
+        assert!(
+            progress_line(&progress).ends_with(", 25 bodies, 7 retried (5 rate-limited)"),
+            "{}",
+            progress_line(&progress)
+        );
+
         progress.rate_limit_wait = Some(std::time::Duration::from_secs(60));
         assert!(
-            progress_line(&progress).ends_with(", 25 bodies — waiting 60s for Gmail rate limit"),
+            progress_line(&progress).ends_with("rate-limited) — waiting 60s for Gmail rate limit"),
             "{}",
             progress_line(&progress)
         );

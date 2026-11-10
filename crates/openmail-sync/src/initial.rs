@@ -119,6 +119,11 @@ pub struct Progress {
     /// Set while the sync is paused for Gmail's rate limit: how long it waits
     /// before resuming.
     pub rate_limit_wait: Option<std::time::Duration>,
+    /// Requests and batch items the client sent again after a retryable
+    /// failure (see [`ClientStats`](openmail_gmail::api::ClientStats)).
+    pub retried_requests: u64,
+    /// Requests and batch items Gmail rejected with a rate limit.
+    pub rate_limited_requests: u64,
 }
 
 impl Progress {
@@ -182,6 +187,18 @@ impl InitialSync {
         cancel: &CancellationToken,
         mut progress: impl FnMut(&Progress),
     ) -> Result<Progress> {
+        // Retry counts come from the client, relative to the start of the run.
+        let client = self.client.clone();
+        let start = client.stats();
+        let with_stats = move |report: &Progress| {
+            let now = client.stats();
+            Progress {
+                retried_requests: now.retries - start.retries,
+                rate_limited_requests: now.rate_limited - start.rate_limited,
+                ..report.clone()
+            }
+        };
+        let mut progress = |report: &Progress| progress(&with_stats(report));
         let mut report = Progress::default();
         let mut pauses = 0;
         let mut at_last_pause = report.advanced();
@@ -191,7 +208,7 @@ impl InitialSync {
                 .run_once(cancel, first, &mut report, &mut progress)
                 .await
             {
-                Ok(()) => return Ok(report),
+                Ok(()) => return Ok(with_stats(&report)),
                 Err(err) => err,
             };
             first = false;
