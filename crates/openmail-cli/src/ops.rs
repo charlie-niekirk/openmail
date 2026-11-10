@@ -104,7 +104,7 @@ fn resolve_labels(store: &Store, labels: &[String]) -> anyhow::Result<Vec<LabelI
 }
 
 /// One line describing what happened to an op.
-fn event_line(event: &OpEvent) -> String {
+pub fn event_line(event: &OpEvent) -> String {
     match event {
         OpEvent::Sent { id, op } => format!("op {id} ({}): sent", op.kind()),
         OpEvent::CancelledOut { id, op } => {
