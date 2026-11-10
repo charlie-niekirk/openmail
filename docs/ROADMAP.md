@@ -90,6 +90,11 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
   - Adaptive quota pacing in `openmail-gmail` for Gmail's per-minute quota
     (6,000 units by default): lockouts and a remembered ceiling instead of
     retrying into rate limits.
+- [x] **2.4b Sync throughput** — `perf/2.4b-sync-throughput`
+  - Pace Gmail quota to a trailing-minute budget learned from rate limits
+    (no lockouts or ratcheting), persisted per account.
+  - Fetch single-message threads with `messages.get` (half the quota of
+    `threads.get`), never storing threads that span the cutoff partially.
 - [x] **2.5 Offline ops queue** — `feat/2.5-ops-queue`
   - Optimistic local apply, persisted queue, replay with retries, conflict handling.
 - [ ] **2.6 MailService** — `feat/2.6-mail-service`

@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::Context as _;
 use openmail_gmail::GmailClient;
-use openmail_gmail::api::{AdaptiveRate, GmailClientBuilder, QuotaPacing};
+use openmail_gmail::api::{GmailClientBuilder, MinuteBudget, QuotaPacing};
 use openmail_gmail::auth::{
     AuthError, CLIENT_ID_ENV, CLIENT_SECRET_ENV, KeyringTokenStore, OAuthClient, OAuthConfig,
     RefreshingTokenProvider, TokenStore,
@@ -96,18 +96,18 @@ pub fn account_client_with(
     tracing::debug!(%account, "using account");
     let provider =
         RefreshingTokenProvider::new(OAuthClient::new(&config)?, keychain(), account.clone());
-    let rate = QUOTA_PER_MINUTE
+    let budget = QUOTA_PER_MINUTE
         .get()
-        .map_or_else(AdaptiveRate::from_env, |&units| {
-            AdaptiveRate::per_minute(units)
+        .map_or_else(MinuteBudget::from_env, |&units| {
+            MinuteBudget::per_minute(units)
         });
     tracing::debug!(
-        units_per_minute = rate.units_per_minute,
-        budget = rate.budget(),
+        units_per_minute = budget.units_per_minute,
+        max_budget = budget.max_budget(),
         "pacing Gmail quota"
     );
     let builder =
-        GmailClient::builder(Arc::new(provider)).quota_pacing(QuotaPacing::Adaptive(rate));
+        GmailClient::builder(Arc::new(provider)).quota_pacing(QuotaPacing::Budget(budget));
     let client = configure(builder).build()?;
     Ok((account, client))
 }

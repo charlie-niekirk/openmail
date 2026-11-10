@@ -287,7 +287,7 @@ Dates are Unix milliseconds, history IDs integers, address lists JSON arrays.
 | `bodies` | Lazily fetched bodies: text, HTML, fetched-at. |
 | `attachments` | Attachment metadata keyed by message and MIME part ID, with an optional local path. |
 | `drafts` | Draft IDs, pointing at their message. |
-| `sync_state` | One row: `history_id`, an opaque backfill cursor, backfill-complete, last full sync. |
+| `sync_state` | One row: `history_id`, an opaque backfill cursor, backfill-complete, last full sync, and the learned Gmail quota budget with the quota it was learned under. |
 | `sync_seen_threads` | Threads listed by the running initial sync or full resync, so it can delete stored threads that no longer exist when it finishes. |
 | `pending_ops` | The offline ops queue: a never-reused ID (`AUTOINCREMENT`), op type, JSON payload (the op and what it changed locally), state (`queued`, `sending`, `sent`), attempts, next retry, created at, sent at, last error. |
 | `messages_fts` | FTS5 index over subject, sender, recipients (to, cc, bcc) and body text. |
@@ -354,14 +354,45 @@ thread detail never sort), and
    anything else, then syncs labels, Inbox threads, and a backfill of the rest,
    each newest-first down to a cutoff (90 days by default; Gmail's `after:`
    operator; older threads are left for on-demand fetching), in
-   `threads.list` pages of 100. Each page's thread metadata (`format=metadata`
-   with From, To, Cc, Subject, Date and Message-ID) is fetched in batches of 5,
-   two in flight (Gmail works through a large batch slowly and throttles it;
-   see the quota note below), and written in one transaction together with a
-   JSON checkpoint (phase, page token, cutoff) in `sync_state.backfill_cursor`,
-   so a failed or cancelled sync resumes at the next page. Threads already
-   stored with the same history ID are not fetched again. Optionally, the newest Inbox bodies are fetched
-   (`format=raw`, parsed by `openmail-mime`) between the Inbox and the backfill.
+   `threads.list` pages of 100. Each page's changed threads are fetched
+   (`format=metadata` with From, To, Cc, Subject, Date and Message-ID) in
+   batches of 5, three in flight, and written in one transaction together
+   with a JSON checkpoint (phase, page token, cutoff) in
+   `sync_state.backfill_cursor`, so a failed or cancelled sync resumes at the
+   next page. Threads already stored with the same history ID are not fetched
+   again. Optionally, the newest Inbox bodies are fetched (`format=raw`,
+   parsed by `openmail-mime`) between the Inbox and the backfill.
+
+   **Single-message threads.** Most threads have one message, and
+   `messages.get` costs 5 quota units against `threads.get`'s 10, so those
+   are fetched as messages. Listing stays with `threads.list`, because it
+   gives each thread's history ID: the unchanged-thread skip, the resync
+   bookkeeping and the per-page checkpoint work as before. To tell
+   single-message threads apart without fetching them, the sync pages
+   through `messages.list` with the same cutoff (500 IDs, 5 units, a page),
+   only as far as the threads it is fetching, and keeps the first message
+   it sees for each thread, which is the newest. Gmail gives a thread its
+   first message's ID, so a thread whose newest listed message has the
+   thread's ID has no other message. Every other thread is fetched whole
+   with `threads.get`.
+
+   That settles the cutoff edge without storing anything partially: a
+   thread whose earlier messages predate `after:` has its first message
+   outside the listing, so it is never taken for a single-message thread
+   and is always fetched whole. Fetching those threads whole beats marking
+   them partial and filling them in later: they are a small share, a
+   `threads.get` costs no more than two `messages.get`, and the UI never sees
+   a thread with the wrong count, senders or first subject. If a thread's
+   first message has been deleted, or is in Spam or Trash, it is not
+   listed either, and the thread is fetched whole. A single-message thread
+   is stored with the history ID `threads.list` gave it, so later
+   comparisons are like for like. Two assumptions carry this: thread IDs
+   are first-message IDs, and `messages.list` is newest first. If either
+   failed, a thread could be stored without some of its newer messages
+   until the next change to it, which incremental sync refetches whole.
+   `InitialSyncConfig::single_message_fetch` turns it off. For the 30-day
+   test mailbox (about 920 threads, 955 messages, nearly all single) this
+   cuts the cost from about 9,300 units to about 5,000.
 
    **Gmail quota.** Gmail limits each user to a number of quota units a
    minute, set per Cloud project as "Units per minute per user". Projects may
@@ -369,49 +400,64 @@ thread detail never sort), and
    their own client, Openmail assumes 6,000 unless told otherwise
    (`GmailClientBuilder::quota_per_minute`, `OPENMAIL_GMAIL_QUOTA_PER_MINUTE`,
    or the CLI's `--quota-per-minute`). Calls cost from 1 unit (`labels.list`)
-   to 10 (`threads.get`) or more. Gmail enforces the limit over short windows
-   too, and failed calls appear to count, so a client has to spend evenly and
-   stop when it is turned away rather than retry into the limit.
+   to 10 (`threads.get`) or more. Failed calls appear to count too.
 
-   `GmailClient` charges every request, and every item of a batch, its
-   documented cost to a token bucket shared by its clones before sending it.
-   By default the rate adapts (`QuotaPacing::Adaptive`, `AdaptiveRate`):
-   - It starts at the budget, 80% of the per-minute quota: 80 units/s at
-     6,000. Bursts are half a second's worth, and batches hold 5 calls
-     (50 units for `threads.get`), two in flight, so no more than about a
-     second of budget is ever released at once.
-   - When Gmail rate-limits a request sent at rate R, the client sends
-     nothing for a lockout of 15 s (Gmail kept rejecting for about a minute
-     after a trip). If the first requests after a lockout are limited again,
-     the lockout doubles, up to 2 minutes, and the rate stays. Otherwise R is
-     remembered as the ceiling and sending resumes at 70% of it, with no
-     burst. Rate limits on requests sent before the last one are ignored,
-     since the old rate caused them.
-   - After every 30 s without a rate limit, the rate rises by 5 units/s, up
-     to the budget.
+   Measured on a real account with a 6,000 quota, Gmail turned the client
+   away once its trailing 60 s spend reached about 2,700–2,800 units by the
+   documented costs: either `threads.get` is effectively charged about 20,
+   or the effective limit is about half the quota. Per-second pacing did not
+   help. An adaptive rate tripped Gmail at 55–65 units/s, and lockouts with
+   a remembered ceiling spent about 4 of 8.5 minutes locked out while the
+   ceiling ratcheted from 80 to 25 units/s. Gmail went on rejecting for about
+   a minute after each trip, even at 25 units/s. So the binding constraint is
+   the trailing minute, and the client paces to that
+   (`QuotaPacing::Budget`, `MinuteBudget`, the default):
+   - Every request, and every item of a batch, is charged its documented
+     cost to a ledger shared by the client's clones before it is sent,
+     failed attempts and retries included. The units charged in any
+     trailing minute never exceed a budget B, and within the minute they go
+     out evenly at B/60 per second, so nothing bursts after an idle spell.
+   - B starts at 80% of the per-minute quota (4,800 at 6,000). When Gmail
+     rate-limits a request, B becomes 85% of the ledger's trailing-minute
+     spend at that moment, the learned ceiling (never below 600), and
+     charges not yet sent are cancelled. Sending resumes as soon as enough
+     units have left the window, with no fixed lockout. Rate limits on
+     requests sent before that one are ignored. A rate limit on a request
+     sent within a minute of it does not lower B again: Gmail is still
+     counting what tripped it, so sending waits until all of that has left
+     the window. That keeps a lingering rejection from ratcheting B down.
+   - After each minute with no rate limit in which the client spent at
+     least 90% of B, B rises by 5%, up to where it started. Idle minutes
+     don't count.
+   - `GmailClient::learned_budget` and `seed_budget` carry B between
+     clients. `InitialSync` saves it per account in `sync_state`
+     (`quota_budget`, with the quota it was learned under) after each page
+     and at the end of a run, and a client that has not adapted yet starts
+     at the saved value if the quota is unchanged. The first sync learns the
+     ceiling with a single trip. Later ones start below it and probe up.
+   - `ClientStats` (and sync `Progress`) report B and the trailing spend,
+     shown in the CLI's progress line. Budget changes are logged at debug
+     level.
 
    `GmailClientBuilder::quota_limit` (the CLI's `--rate`) fixes the rate
-   instead. `ClientStats::units_per_second` reports the current rate, and
-   lockouts and probes are logged at debug level.
-
-   What this means: a 30-day sync of about 1,000 threads costs about 9,200
-   units, so at 6,000 a minute it takes at least 1.5–2 minutes however it is
-   paced. Earlier attempts spent faster and were worse. A 1,000-unit burst
-   plus an AIMD controller over batch concurrency, then a halving controller
-   at 150–240 units/s, both tripped Gmail about once a minute and spent 5–6
-   minutes, mostly locked out. Fetching messages (`messages.get`, 5 units)
-   instead of threads (10) would roughly halve the cost, and is a
-   high-priority follow-up (see 2.4's PR).
+   instead, as a token bucket. On a simulated Gmail that trips at 2,750 a
+   minute, the budget settles at about 2,350–2,850, averages about 2,450
+   units a minute over 15 minutes and loses one call per trip, about one
+   every five minutes. Against a Gmail that rejects everything for a minute
+   after a trip, B is lowered once. Estimate for the 30-day test mailbox:
+   about 5,000 units at roughly 2,400 a minute, a little over 2 minutes,
+   including the first run's one trip.
 
    Rate-limit responses are retried on their own budget, starting at 5 s and
    growing to at most 60 s apart, three minutes in all, honouring
    `Retry-After`; server errors and timeouts back off from 0.5 s. If a rate
    limit still outlasts that, `InitialSync` reports the wait, pauses for 60 s
    and resumes from its checkpoint within the same run, a last resort now that
-   the client locks itself out and slows down on every rate limit. Rate-limited
-   retries also wait for the limiter, so none goes out during a lockout. Batches log their size, latency and
-   failures at debug level, and the client counts retried and rate-limited
-   requests (`GmailClient::stats`) for progress reports.
+   the client lowers its budget on every rate limit. Rate-limited retries
+   also wait for the ledger, so none goes out before the window has room.
+   Batches log their size, latency and failures at debug level, and the
+   client counts retried and rate-limited requests (`GmailClient::stats`)
+   for progress reports.
 2. **Incremental sync.** `HistorySync` polls `history.list` from the stored
    `historyId`, in pages of 500 records, once the initial sync is complete.
    Each page is applied in one transaction that also advances the stored
