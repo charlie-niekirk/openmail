@@ -46,7 +46,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## Phase 1 — Gmail API foundation (no UI)
 
-- [ ] **1.1 Core domain types** — `feat/1.1-core-types`
+- [x] **1.1 Core domain types** — `feat/1.1-core-types`
   - IDs, `Label` (system or user, colors, visibility), `Thread`, `Message`, `Address`,
     `Attachment`, `Draft`, and error types.
 - [ ] **1.2 OAuth2** ∥ — `feat/1.2-oauth`
