@@ -43,6 +43,9 @@ keyring = "4.2.0"
 oauth2 = { version = "5.0.0", default-features = false }
 open = "5.4.5"
 # rustls with the ring provider (already in the tree via gpui), not aws-lc-rs.
+# SQLite, compiled in (`bundled`) so FTS5 and JSON are always available. 0.41
+# bundles SQLite 3.54, which fixes RUSTSEC-2026-0459.
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 reqwest = { version = "0.13.5", default-features = false, features = [
   "charset",
   "http2",
@@ -55,6 +58,7 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "s
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10.9"
+tempfile = "3.27.0"
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["serde"] }
 tokio = { version = "1.54.1", default-features = false }
