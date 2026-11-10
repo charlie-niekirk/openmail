@@ -1,0 +1,29 @@
+Message-ID: <alt-1@mail.example.com>
+Date: Wed, 08 Jan 2025 17:05:42 -0500
+From: Lin Okafor <lin@example.com>
+To: Grace Hopper <grace@example.org>
+Subject: Build status
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt-boundary"
+
+This is a multi-part message in MIME format.
+
+--alt-boundary
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Hello Grace,
+
+The build is green =E2=9C=85 and the caf=C3=A9 is open.
+
+--=20
+Lin
+
+--alt-boundary
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<html><body><p>Hello Grace,</p><p>The build is <b>green</b> =E2=9C=85 and t=
+he caf=C3=A9 is open.</p></body></html>
+
+--alt-boundary--

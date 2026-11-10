@@ -1,0 +1,48 @@
+Message-ID: <digest-42@news.example.com>
+Date: Fri, 10 Jan 2025 06:00:00 +0000
+From: Example News <digest@news.example.com>
+To: reader@example.org
+Subject: Weekly digest
+List-Unsubscribe: <https://news.example.com/unsubscribe>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="outer"
+
+--outer
+Content-Type: text/plain; charset=utf-8
+
+Weekly digest
+
+Three new posts this week.
+
+Unsubscribe: https://news.example.com/unsubscribe
+
+--outer
+Content-Type: multipart/related; boundary="related"; type="text/html"
+
+--related
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: base64
+
+PCFET0NUWVBFIGh0bWw+DQo8aHRtbD48aGVhZD48bWV0YSBjaGFyc2V0PSJ1dGYtOCI+PHRpdGxl
+PldlZWtseSBkaWdlc3Q8L3RpdGxlPjwvaGVhZD4NCjxib2R5Pg0KPGltZyBzcmM9ImNpZDpsb2dv
+QG5ld3MuZXhhbXBsZS5jb20iIGFsdD0iRXhhbXBsZSBOZXdzIiB3aWR0aD0iMSIgaGVpZ2h0PSIx
+Ij4NCjxoMT5XZWVrbHkgZGlnZXN0PC9oMT4NCjxwPlRocmVlIG5ldyBwb3N0cyB0aGlzIHdlZWsu
+PC9wPg0KPGltZyBzcmM9ImNpZDpjaGFydC5naWYiIGFsdD0iQ2hhcnQiPg0KPHA+PGEgaHJlZj0i
+aHR0cHM6Ly9uZXdzLmV4YW1wbGUuY29tL3Vuc3Vic2NyaWJlIj5VbnN1YnNjcmliZTwvYT48L3A+
+DQo8L2JvZHk+PC9odG1sPg0K
+--related
+Content-Type: image/gif; name="logo.gif"
+Content-Transfer-Encoding: base64
+Content-ID: <logo@news.example.com>
+Content-Disposition: inline; filename="logo.gif"
+
+R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7
+--related
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-ID: <chart.gif>
+
+R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7
+--related--
+
+--outer--

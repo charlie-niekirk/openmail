@@ -38,7 +38,11 @@ serde_json = "1.0.154"
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["serde"] }
 
+# MIME parsing and building. `full_encoding` adds encoding_rs for the legacy
+# multi-byte charsets (ISO-2022-JP, Shift_JIS, GB18030, Big5, …).
+mail-parser = { version = "1.0.1", features = ["full_encoding"] }
 base64 = "0.23.1"
+insta = "1.49.0"
 
 [workspace.lints.rust]
 # Deny rather than forbid, so a crate that genuinely needs FFI (for example the

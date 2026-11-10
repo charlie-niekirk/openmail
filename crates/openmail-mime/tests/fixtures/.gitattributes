@@ -1,0 +1,3 @@
+# Keep the .eml corpus byte for byte: real mail uses CRLF line endings, and
+# some fixtures hold raw 8-bit and ISO-2022-JP bytes.
+*.eml -text
