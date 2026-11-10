@@ -1,11 +1,14 @@
 //! The main window: title bar plus a placeholder three-pane layout
-//! (sidebar, thread list, reading pane).
+//! (sidebar, thread list, reading pane). The reading pane shows a sample message
+//! body in a [`MessageBodyView`] (the 0.5 webview spike).
 
 use gpui::{
-    Bounds, Context, IntoElement, ParentElement as _, Pixels, Render, Styled as _, Subscription,
-    Window, WindowBounds, WindowOptions, div, px, size,
+    AppContext as _, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement as _, Pixels,
+    Render, Styled as _, Subscription, Window, WindowBounds, WindowOptions, div, px, size,
 };
 use gpui_component::{ActiveTheme as _, Theme, TitleBar, h_flex, v_flex};
+
+use crate::message_body::{MessageBodyView, SAMPLE_NEWSLETTER};
 
 /// The window title shown by the OS (Window menu, Mission Control, task bar).
 pub const WINDOW_TITLE: &str = "Openmail";
@@ -39,6 +42,7 @@ pub fn main_window_options(bounds: Bounds<Pixels>) -> WindowOptions {
 
 /// The root view of the main window.
 pub struct MainWindow {
+    message_body: Entity<MessageBodyView>,
     _appearance: Subscription,
 }
 
@@ -49,7 +53,9 @@ impl MainWindow {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
         });
+        let message_body = cx.new(|cx| MessageBodyView::new(SAMPLE_NEWSLETTER, window, cx));
         Self {
+            message_body,
             _appearance: appearance,
         }
     }
@@ -86,7 +92,35 @@ impl Render for MainWindow {
                             .border_r_1()
                             .border_color(theme.border),
                     )
-                    .child(div().h_full().flex_1().min_w_0().bg(theme.background)),
+                    .child(
+                        v_flex()
+                            .h_full()
+                            .flex_1()
+                            .min_w_0()
+                            .bg(theme.background)
+                            .child(
+                                v_flex()
+                                    .flex_none()
+                                    .gap_1()
+                                    .px_6()
+                                    .py_4()
+                                    .border_b_1()
+                                    .border_color(theme.border)
+                                    .child(
+                                        div()
+                                            .text_lg()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("The Weekly Digest: Issue 42"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child("digest@example.com"),
+                                    ),
+                            )
+                            .child(div().flex_1().min_h_0().child(self.message_body.clone())),
+                    ),
             )
     }
 }
