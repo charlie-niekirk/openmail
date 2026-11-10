@@ -27,6 +27,7 @@ pub use models::{
 pub use mutations::MAX_BATCH_MODIFY_IDS;
 pub use pagination::{Paginated, paginate};
 pub use quota::{
-    AdaptiveRate, DEFAULT_QUOTA_PER_MINUTE, QUOTA_PER_MINUTE_ENV, QuotaLimit, QuotaPacing,
+    DEFAULT_QUOTA_PER_MINUTE, LearnedBudget, MinuteBudget, QUOTA_PER_MINUTE_ENV, QuotaLimit,
+    QuotaPacing,
 };
 pub use retry::RetryPolicy;

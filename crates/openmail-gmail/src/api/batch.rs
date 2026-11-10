@@ -234,7 +234,7 @@ impl GmailClient {
                 elapsed_ms = elapsed.as_millis(),
                 failed = failures.values().sum::<usize>(),
                 ?failures,
-                units_per_second = self.stats().units_per_second,
+                quota_budget = self.stats().budget_per_minute,
                 "Gmail batch"
             );
 

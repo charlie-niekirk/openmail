@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 
 use super::batch::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE};
 use super::error::{Error, Result, classify};
-use super::quota::{self, QuotaLimiter};
+use super::quota::{self, LearnedBudget, QuotaLimiter};
 use super::retry::Retrier;
 use super::{QuotaLimit, QuotaPacing, RetryPolicy, TokenProvider};
 
@@ -28,7 +28,7 @@ use super::{QuotaLimit, QuotaPacing, RetryPolicy, TokenProvider};
 /// Before each attempt the request's Gmail quota cost is charged to the
 /// client's [`QuotaPacing`], waiting if needed, so a busy client stays under
 /// Gmail's per-user rate limit; by default, if Gmail rate-limits a request
-/// anyway, the client stops sending for a while and resumes more slowly.
+/// anyway, the client learns a lower per-minute budget from it.
 #[derive(Clone)]
 pub struct GmailClient {
     inner: Arc<Inner>,
@@ -48,16 +48,23 @@ struct Inner {
 }
 
 /// Counts of a client's (and its clones') retries since it was built, and its
-/// current quota rate, for progress reports and diagnosis.
+/// current quota pacing, for progress reports and diagnosis.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClientStats {
     /// Requests and batch items sent again after a retryable failure.
     pub retries: u64,
     /// Responses and batch items Gmail rejected with a rate limit.
     pub rate_limited: u64,
-    /// The quota units per second the client currently allows itself, or
+    /// The quota units per second the client currently paces itself to, or
     /// `None` with no client-side limit (see [`QuotaPacing`]).
     pub units_per_second: Option<u32>,
+    /// The most quota units the client allows itself in a trailing minute
+    /// (with [`QuotaPacing::Budget`], the learned budget), or `None` with no
+    /// client-side limit.
+    pub budget_per_minute: Option<u32>,
+    /// The quota units charged in the trailing minute, failed attempts
+    /// included, or `None` with no client-side limit.
+    pub spent_last_minute: Option<u32>,
 }
 
 impl std::fmt::Debug for GmailClient {
@@ -66,8 +73,8 @@ impl std::fmt::Debug for GmailClient {
             .field("base_url", &self.inner.base_url.as_str())
             .field("retry", &self.inner.retry)
             .field(
-                "quota_rate",
-                &self.inner.quota.as_ref().map(QuotaLimiter::rate),
+                "quota",
+                &self.inner.quota.as_ref().map(QuotaLimiter::snapshot),
             )
             .finish_non_exhaustive()
     }
@@ -140,21 +147,44 @@ impl GmailClient {
             .expect("the batch semaphore is never closed")
     }
 
-    /// Records that Gmail rate-limited a request sent at `sent`, which slows
-    /// an adaptive quota rate.
+    /// Records that Gmail rate-limited a request sent at `sent`, which lowers
+    /// a learned quota budget.
     pub(crate) fn rate_limited(&self, sent: tokio::time::Instant) {
         if let Some(quota) = &self.inner.quota {
             quota.rate_limited(sent);
         }
     }
 
-    /// How many requests have been retried, and rate-limited, so far.
+    /// How many requests have been retried, and rate-limited, so far, and
+    /// the current quota pacing.
     pub fn stats(&self) -> ClientStats {
+        let quota = self.inner.quota.as_ref().map(QuotaLimiter::snapshot);
         ClientStats {
             retries: self.inner.retries.load(Ordering::Relaxed),
             rate_limited: self.inner.rate_limited.load(Ordering::Relaxed),
-            units_per_second: self.inner.quota.as_ref().map(QuotaLimiter::rate),
+            units_per_second: quota.map(|q| q.units_per_second),
+            budget_per_minute: quota.map(|q| q.budget),
+            spent_last_minute: quota.map(|q| q.spent),
         }
+    }
+
+    /// The per-minute quota budget the client has learned (or started at),
+    /// to save and [seed](Self::seed_budget) the next client for this account
+    /// with. `None` unless it paces with [`QuotaPacing::Budget`].
+    pub fn learned_budget(&self) -> Option<LearnedBudget> {
+        self.inner.quota.as_ref().and_then(QuotaLimiter::learned)
+    }
+
+    /// Starts the quota budget at one a previous client learned, so it does
+    /// not have to be rate-limited to find it again. Ignored (returning
+    /// `false`) if it was learned under another per-minute quota, if this
+    /// client has already adapted its budget, or without
+    /// [`QuotaPacing::Budget`]. The budget is clamped to the configured range.
+    pub fn seed_budget(&self, learned: LearnedBudget) -> bool {
+        self.inner
+            .quota
+            .as_ref()
+            .is_some_and(|quota| quota.seed(learned))
     }
 
     /// Records `retries` resent requests or items, `rate_limited` of them for
@@ -372,18 +402,19 @@ impl GmailClientBuilder {
         self
     }
 
-    /// Paces quota adaptively for a project whose "Units per minute per user"
-    /// quota is `units_per_minute` (Gmail's default for new projects is
+    /// Paces quota to a learned per-minute budget for a project whose "Units
+    /// per minute per user" quota is `units_per_minute` (Gmail's default for
+    /// new projects is
     /// [`DEFAULT_QUOTA_PER_MINUTE`](super::DEFAULT_QUOTA_PER_MINUTE)).
     pub fn quota_per_minute(self, units_per_minute: u32) -> Self {
-        self.quota_pacing(QuotaPacing::Adaptive(super::AdaptiveRate::per_minute(
+        self.quota_pacing(QuotaPacing::Budget(super::MinuteBudget::per_minute(
             units_per_minute.max(1),
         )))
     }
 
     /// Sets how the client paces the quota units it spends. Defaults to
-    /// [`QuotaPacing::Adaptive`] with
-    /// [`AdaptiveRate::default`](super::AdaptiveRate::default).
+    /// [`QuotaPacing::Budget`] with
+    /// [`MinuteBudget::default`](super::MinuteBudget::default).
     pub fn quota_pacing(mut self, pacing: QuotaPacing) -> Self {
         self.quota = pacing;
         self

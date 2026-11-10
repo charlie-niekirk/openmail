@@ -9,7 +9,7 @@ use common::{
     mount_profile, page, setup, setup_paced, setup_retrying,
 };
 use openmail_core::{HistoryId, LabelId, MessageId, ThreadId};
-use openmail_gmail::api::{self, AdaptiveRate, QuotaPacing};
+use openmail_gmail::api::{self, MinuteBudget, QuotaPacing};
 use openmail_store::Store;
 use openmail_sync::{
     CancellationToken, Cutoff, Error, InitialSync, InitialSyncConfig, Phase, Progress,
@@ -840,20 +840,21 @@ async fn a_stored_thread_gone_when_fetched_is_deleted() {
     assert_eq!(done.deleted_threads, 5);
 }
 
-/// Adaptive pacing at 800 units/s, with lockouts and probes in milliseconds.
-fn fast_adaptive() -> QuotaPacing {
-    QuotaPacing::Adaptive(AdaptiveRate {
+/// A learned budget counted over half-second windows: 48,000 units a window
+/// at first, never below 50.
+fn fast_budget() -> QuotaPacing {
+    QuotaPacing::Budget(MinuteBudget {
         units_per_minute: 60_000,
-        lockout: Duration::from_millis(50),
-        max_lockout: Duration::from_millis(100),
-        probe_every: Duration::from_millis(50),
-        ..AdaptiveRate::default()
+        min: 50,
+        window: Duration::from_millis(500),
+        probe_every: Duration::from_millis(500),
+        ..MinuteBudget::default()
     })
 }
 
 #[tokio::test]
 async fn a_rate_limit_burst_slows_the_client_without_pausing_the_sync() {
-    let (server, client) = setup_paced(fast_adaptive(), fast_retries()).await;
+    let (server, client) = setup_paced(fast_budget(), fast_retries()).await;
     let mailbox = mailbox();
     mount_profile(&server, 1).await;
     mount_labels(&server).await;
@@ -877,8 +878,8 @@ async fn a_rate_limit_burst_slows_the_client_without_pausing_the_sync() {
 
     assert_eq!(done.threads, 5);
     assert_eq!(done.rate_limited_requests, 5);
-    // The client locked itself out briefly, slowed down and retried; the 60 s
-    // sync-level pause was never needed.
+    // The client lowered its budget, waited for room in the window and
+    // retried; the 60 s sync-level pause was never needed.
     assert_eq!(pauses(&seen), 0);
     assert!(
         started.elapsed() < Duration::from_secs(30),
