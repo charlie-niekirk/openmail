@@ -307,6 +307,21 @@ Label views page with keysets over the index
 an index range scan with no sort; `threads (last_message_date DESC, id DESC)`
 serves views over every thread.
 
+The UI's read queries (`queries.rs`):
+
+- `Store::thread_page(view, after, limit)` returns a page of `ThreadSummary` rows
+  and an opaque `ThreadCursor` for the next one. A `ThreadView` is one label, every
+  one of several labels (inbox tabs such as `INBOX` + `CATEGORY_SOCIAL`), or
+  All Mail (threads with a message outside Spam and Trash).
+- `Store::label_counts()` returns total and unread thread counts for every label
+  in one query.
+- `Store::thread_detail(id)` returns a thread with its messages oldest first, their
+  labels, and any bodies already fetched.
+
+Tests check with `EXPLAIN QUERY PLAN` that these use indexes (and that pages and
+thread detail never sort), and
+`cargo bench -p openmail-store` measures them over a synthetic 100k-thread mailbox.
+
 ## Threading model
 
 ```
