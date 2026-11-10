@@ -27,8 +27,8 @@ use super::{QuotaLimit, QuotaPacing, RetryPolicy, TokenProvider};
 /// are retried with exponential backoff and jitter, per the [`RetryPolicy`].
 /// Before each attempt the request's Gmail quota cost is charged to the
 /// client's [`QuotaPacing`], waiting if needed, so a busy client stays under
-/// Gmail's per-user rate limit; by default the rate halves whenever Gmail
-/// rate-limits a request anyway.
+/// Gmail's per-user rate limit; by default, if Gmail rate-limits a request
+/// anyway, the client stops sending for a while and resumes more slowly.
 #[derive(Clone)]
 pub struct GmailClient {
     inner: Arc<Inner>,

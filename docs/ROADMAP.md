@@ -87,8 +87,9 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
   - Apply `history.list` entries (messages added or deleted, labels added or removed).
   - Full resync when the `historyId` has expired (404).
   - Polling scheduler with online and offline detection.
-  - Adaptive (AIMD) quota rate in `openmail-gmail`, with one-second bursts and
-    longer rate-limit backoff, to cut Gmail's per-user rate limiting.
+  - Adaptive quota pacing in `openmail-gmail` for Gmail's per-minute quota
+    (6,000 units by default): lockouts and a remembered ceiling instead of
+    retrying into rate limits.
 - [ ] **2.5 Offline ops queue** — `feat/2.5-ops-queue`
   - Optimistic local apply, persisted queue, replay with retries, conflict handling.
 - [ ] **2.6 MailService** — `feat/2.6-mail-service`
