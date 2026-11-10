@@ -10,6 +10,8 @@
 
 mod config;
 mod error;
+#[cfg_attr(not(test), expect(dead_code, reason = "used by the sign-in flow"))]
+mod loopback;
 
 pub use config::{CLIENT_ID_ENV, CLIENT_SECRET_ENV, OAuthConfig};
 pub use error::AuthError;
