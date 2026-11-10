@@ -1,11 +1,14 @@
-//! Query tests: paging, counts and thread detail.
+//! Query tests: paging, counts, thread detail and query plans.
 
 use openmail_core::{
     Address, HistoryId, LabelId, Message, MessageHeaders, MessageId, Thread, ThreadId,
 };
+use rusqlite::types::Value;
 use time::OffsetDateTime;
 
-use super::{ThreadCursor, ThreadPage, ThreadView};
+use super::{
+    LABEL_COUNTS_SQL, THREAD_MESSAGES_SQL, ThreadCursor, ThreadPage, ThreadView, thread_page_sql,
+};
 use crate::{MessageBody, Store};
 
 fn date(secs: i64) -> OffsetDateTime {
@@ -346,4 +349,107 @@ fn thread_detail_orders_same_date_messages_by_insertion() {
         .map(|m| m.message.id.as_str())
         .collect();
     assert_eq!(messages, ["z", "a", "m"]);
+}
+
+/// The `EXPLAIN QUERY PLAN` details for `sql` with `params`.
+fn plan(store: &Store, sql: &str, params: Vec<Value>) -> Vec<String> {
+    let mut stmt = store
+        .conn()
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap();
+    stmt.query_map(rusqlite::params_from_iter(params), |row| row.get(3))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+fn page_plan(store: &Store, view: &ThreadView, after: Option<&ThreadCursor>) -> Vec<String> {
+    let (sql, mut params) = thread_page_sql(view, after);
+    params.push(Value::Integer(51));
+    plan(store, &sql, params)
+}
+
+/// Asserts the plan never sorts or scans a whole table, and uses each of `uses`.
+#[track_caller]
+fn assert_indexed(plan: &[String], uses: &[&str]) {
+    let text = plan.join("\n");
+    assert!(!text.contains("TEMP B-TREE"), "plan sorts:\n{text}");
+    for line in plan {
+        assert!(
+            !line.starts_with("SCAN") || line.contains("INDEX") || line.contains("CONSTANT"),
+            "plan scans a table:\n{text}"
+        );
+    }
+    for wanted in uses {
+        assert!(text.contains(wanted), "plan does not use {wanted}:\n{text}");
+    }
+}
+
+fn cursor() -> ThreadCursor {
+    ThreadCursor {
+        date: 1_000,
+        thread_id: "t".to_owned(),
+    }
+}
+
+#[test]
+fn label_pages_are_index_range_scans() {
+    let store = Store::open_in_memory().unwrap();
+    let first = page_plan(&store, &label("INBOX"), None);
+    assert_indexed(
+        &first,
+        &[
+            "SEARCH tl USING COVERING INDEX thread_labels_by_date (label_id=?)",
+            "SEARCH t USING INDEX sqlite_autoindex_threads_1 (id=?)",
+        ],
+    );
+    let deep = page_plan(&store, &label("INBOX"), Some(&cursor()));
+    assert_indexed(
+        &deep,
+        &["SEARCH tl USING COVERING INDEX thread_labels_by_date \
+           (label_id=? AND (last_message_date,thread_id)<(?,?))"],
+    );
+    let all_of = ThreadView::AllOf(vec![LabelId::new("INBOX"), LabelId::new("UNREAD")]);
+    assert_indexed(
+        &page_plan(&store, &all_of, Some(&cursor())),
+        &["(label_id=? AND (last_message_date,thread_id)<(?,?))"],
+    );
+}
+
+#[test]
+fn all_mail_pages_walk_the_date_index() {
+    let store = Store::open_in_memory().unwrap();
+    assert_indexed(
+        &page_plan(&store, &ThreadView::AllMail, None),
+        &["SCAN t USING INDEX threads_by_date"],
+    );
+    assert_indexed(
+        &page_plan(&store, &ThreadView::AllMail, Some(&cursor())),
+        &["SEARCH t USING INDEX threads_by_date ((last_message_date,id)<(?,?))"],
+    );
+}
+
+#[test]
+fn label_counts_and_thread_detail_use_indexes() {
+    let store = Store::open_in_memory().unwrap();
+    let counts = plan(&store, LABEL_COUNTS_SQL, Vec::new());
+    let text = counts.join("\n");
+    assert!(
+        text.contains("SEARCH u USING COVERING INDEX thread_labels_by_date (label_id=?)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("SEARCH l USING PRIMARY KEY (thread_id=?)"),
+        "{text}"
+    );
+
+    let detail = plan(
+        &store,
+        THREAD_MESSAGES_SQL,
+        vec![Value::Text("t".to_owned())],
+    );
+    assert_indexed(
+        &detail,
+        &["SEARCH m USING INDEX messages_by_thread (thread_id=?)"],
+    );
 }
