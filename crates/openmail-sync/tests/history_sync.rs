@@ -15,6 +15,7 @@ use openmail_gmail::GmailClient;
 use openmail_store::{Store, ThreadView};
 use openmail_sync::{
     CancellationToken, Changes, Cutoff, Error, HistorySync, InitialSync, InitialSyncConfig,
+    Scheduler, SchedulerConfig, SyncEvent,
 };
 use serde_json::json;
 use wiremock::{MockServer, ResponseTemplate};
@@ -508,4 +509,67 @@ async fn the_history_future_is_send() {
     let mut store = Store::open_in_memory().unwrap();
     let sync = HistorySync::new(client);
     assert_send(sync.run(&mut store, &CancellationToken::new()));
+}
+
+#[tokio::test]
+async fn the_scheduler_syncs_then_polls_history() {
+    let (server, client) = setup().await;
+    let mailbox = mailbox();
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &["t1", "t2", "t3"], None))
+        .mount(&server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &["t1", "t2", "t3", "t4", "t5"], None))
+        .mount(&server)
+        .await;
+    BatchResponder::new(mailbox).mount(&server).await;
+    // The first poll stars t2; later ones find nothing new.
+    history_list(START, None)
+        .respond_with(history_page(
+            vec![labels_added(START + 1, "m2", "t2", &["STARRED"])],
+            START + 1,
+            None,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    history_list(START + 1, None)
+        .respond_with(history_page(vec![], START + 1, None))
+        .mount(&server)
+        .await;
+
+    let schedule = SchedulerConfig {
+        active_interval: Duration::from_millis(20),
+        ..SchedulerConfig::default()
+    };
+    let mut scheduler =
+        Scheduler::new(client, Store::open_in_memory().unwrap(), config(), schedule);
+    let cancel = CancellationToken::new();
+    let mut polls = Vec::new();
+    let mut initial = 0;
+    scheduler
+        .run(&cancel, |event| match event {
+            SyncEvent::Initial(_) => initial += 1,
+            SyncEvent::Polled(changes) => {
+                polls.push(changes);
+                if polls.len() == 3 {
+                    cancel.cancel();
+                }
+            }
+            other => assert!(matches!(other, SyncEvent::Connectivity(_)), "{other:?}"),
+        })
+        .await
+        .unwrap();
+
+    assert!(initial > 0);
+    assert_eq!(polls[0].label_changes, 1);
+    assert!(polls[1].is_empty() && polls[2].is_empty());
+    assert_eq!(thread_ids(scheduler.store(), "STARRED"), ["t2"]);
+    assert_eq!(
+        history_id(scheduler.store()),
+        Some(HistoryId::new(START + 1))
+    );
 }

@@ -2,15 +2,20 @@
 //!
 //! [`InitialSync`] downloads a mailbox's labels and thread metadata into the
 //! local store, resumably. [`HistorySync`] then keeps it up to date from
-//! Gmail's `history.list`.
+//! Gmail's `history.list`, and [`Scheduler`] runs both: the initial sync
+//! until it is done, then a poll every so often.
 
 mod error;
 mod history;
 mod initial;
+mod scheduler;
 
 pub use error::{Error, Result};
 pub use history::{Changes, HISTORY_PAGE_SIZE, HistorySync};
 pub use initial::{Cutoff, InitialSync, InitialSyncConfig, Phase, Progress, SYNC_HEADERS};
+pub use scheduler::{
+    Activity, Connectivity, Scheduler, SchedulerConfig, SchedulerHandle, SyncEvent,
+};
 pub use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]

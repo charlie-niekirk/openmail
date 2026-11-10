@@ -18,13 +18,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 time = { workspace = true, features = ["macros"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }
 url.workspace = true
 wiremock.workspace = true
 
