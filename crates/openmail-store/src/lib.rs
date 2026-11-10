@@ -11,6 +11,7 @@ mod migrations;
 mod paths;
 mod store;
 mod sync_state;
+mod sync_writes;
 
 pub use error::{Error, Result};
 pub use mail::MessageBody;
