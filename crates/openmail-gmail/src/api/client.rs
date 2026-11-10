@@ -9,16 +9,20 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::error::{Error, Result, classify};
+use super::quota::{self, QuotaLimiter};
 use super::retry::Retrier;
-use super::{RetryPolicy, TokenProvider};
+use super::{QuotaLimit, RetryPolicy, TokenProvider};
 
 /// A typed client for the Gmail REST API (`gmail/v1`), acting as the signed-in
 /// user (`users/me`).
 ///
-/// Cloning is cheap and shares the connection pool. Every request gets its
-/// access token from the [`TokenProvider`]. A `401` triggers one token refresh
-/// and a retry; `429`, rate-limit `403`s, `5xx` and timeouts are retried with
-/// exponential backoff and jitter, per the [`RetryPolicy`].
+/// Cloning is cheap and shares the connection pool and quota limiter. Every
+/// request gets its access token from the [`TokenProvider`]. A `401` triggers
+/// one token refresh and a retry; `429`, rate-limit `403`s, `5xx` and timeouts
+/// are retried with exponential backoff and jitter, per the [`RetryPolicy`].
+/// Before each attempt the request's Gmail quota cost is charged to the
+/// [`QuotaLimit`], waiting if needed, so a busy client stays under Gmail's
+/// per-user rate limit.
 #[derive(Clone)]
 pub struct GmailClient {
     inner: Arc<Inner>,
@@ -29,6 +33,7 @@ struct Inner {
     base_url: Url,
     tokens: Arc<dyn TokenProvider>,
     retry: RetryPolicy,
+    quota: Option<QuotaLimiter>,
 }
 
 impl std::fmt::Debug for GmailClient {
@@ -36,6 +41,7 @@ impl std::fmt::Debug for GmailClient {
         f.debug_struct("GmailClient")
             .field("base_url", &self.inner.base_url.as_str())
             .field("retry", &self.inner.retry)
+            .field("quota", &self.inner.quota.as_ref().map(QuotaLimiter::limit))
             .finish_non_exhaustive()
     }
 }
@@ -56,6 +62,7 @@ impl GmailClient {
             base_url: None,
             http: None,
             retry: RetryPolicy::default(),
+            quota: Some(QuotaLimit::default()),
         }
     }
 
@@ -96,7 +103,10 @@ impl GmailClient {
         query: &[(&str, String)],
     ) -> Result<T> {
         let url = self.user_url(segments);
-        let response = self.send(|http| http.get(url.clone()).query(query)).await?;
+        let cost = quota::cost(&Method::GET, segments);
+        let response = self
+            .send(cost, |http| http.get(url.clone()).query(query))
+            .await?;
         let bytes = response.bytes().await?;
         Ok(serde_json::from_slice(&bytes)?)
     }
@@ -132,8 +142,9 @@ impl GmailClient {
         body: Option<&(impl Serialize + ?Sized)>,
     ) -> Result<Response> {
         let url = self.user_url(segments);
+        let cost = quota::cost(&method, segments);
         let body = body.map(serde_json::to_vec).transpose()?;
-        self.send(|http| {
+        self.send(cost, |http| {
             let request = http.request(method.clone(), url.clone());
             match &body {
                 Some(body) => request
@@ -150,14 +161,23 @@ impl GmailClient {
     /// once on `401` and retrying retryable failures. Returns the successful
     /// response; any other status becomes an [`Error`].
     ///
-    /// `build` runs once per attempt, so it must build the same request each time.
+    /// Each attempt is charged `cost` quota units first. `build` runs once per
+    /// attempt, so it must build the same request each time.
     pub(crate) async fn send(
         &self,
+        cost: u32,
         build: impl Fn(&reqwest::Client) -> RequestBuilder,
     ) -> Result<Response> {
-        self.send_with_token(build)
+        self.send_with_token(cost, build)
             .await
             .map(|(response, _)| response)
+    }
+
+    /// Waits until `cost` quota units may be spent.
+    pub(crate) async fn charge(&self, cost: u32) {
+        if let Some(quota) = &self.inner.quota {
+            quota.acquire(cost).await;
+        }
     }
 
     /// Like [`send`](Self::send), but also returns the access token the
@@ -165,6 +185,7 @@ impl GmailClient {
     /// response (as in a batch) can refresh exactly that token.
     pub(crate) async fn send_with_token(
         &self,
+        cost: u32,
         build: impl Fn(&reqwest::Client) -> RequestBuilder,
     ) -> Result<(Response, String)> {
         let inner = &*self.inner;
@@ -173,6 +194,7 @@ impl GmailClient {
         let mut retrier = Retrier::new(inner.retry);
 
         loop {
+            self.charge(cost).await;
             let response = match build(&inner.http).bearer_auth(&token).send().await {
                 Ok(response) => response,
                 Err(err) if err.is_timeout() => match retrier.next_delay(false, None) {
@@ -230,6 +252,7 @@ pub struct GmailClientBuilder {
     base_url: Option<Url>,
     http: Option<reqwest::Client>,
     retry: RetryPolicy,
+    quota: Option<QuotaLimit>,
 }
 
 impl GmailClientBuilder {
@@ -249,6 +272,13 @@ impl GmailClientBuilder {
     /// Sets how failed requests are retried.
     pub fn retry_policy(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
+        self
+    }
+
+    /// Sets how fast the client may spend Gmail quota units, or `None` for no
+    /// client-side limit. Defaults to [`QuotaLimit::default`].
+    pub fn quota_limit(mut self, limit: Option<QuotaLimit>) -> Self {
+        self.quota = limit;
         self
     }
 
@@ -273,6 +303,7 @@ impl GmailClientBuilder {
                 base_url,
                 tokens: self.tokens,
                 retry: self.retry,
+                quota: self.quota.map(QuotaLimiter::new),
             }),
         })
     }

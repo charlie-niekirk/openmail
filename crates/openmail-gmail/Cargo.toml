@@ -29,7 +29,7 @@ url.workspace = true
 [dev-dependencies]
 sha2.workspace = true
 time = { workspace = true, features = ["macros"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock.workspace = true
 
 [lints]

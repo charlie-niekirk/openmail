@@ -11,6 +11,7 @@ mod error;
 mod models;
 mod mutations;
 mod pagination;
+mod quota;
 mod retry;
 
 pub use crate::auth::{TokenError, TokenFuture, TokenProvider};
@@ -25,4 +26,5 @@ pub use models::{
 };
 pub use mutations::MAX_BATCH_MODIFY_IDS;
 pub use pagination::{Paginated, paginate};
+pub use quota::QuotaLimit;
 pub use retry::RetryPolicy;

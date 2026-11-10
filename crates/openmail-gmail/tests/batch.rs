@@ -2,10 +2,14 @@
 
 mod common;
 
+use std::time::{Duration, Instant};
+
 use common::batch::{BATCH, BatchResponder, Call, Part, error_json};
 use common::{fast_retries, setup, setup_with};
 use openmail_core::{MessageId, ThreadId};
-use openmail_gmail::api::{Error, MAX_BATCH_SIZE, MessageFormat, ThreadFormat};
+use openmail_gmail::api::{
+    Error, GmailClient, MAX_BATCH_SIZE, MessageFormat, QuotaLimit, ThreadFormat,
+};
 use reqwest::StatusCode;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -346,4 +350,63 @@ async fn a_missing_part_is_an_invalid_response_for_that_item() {
         "{results:?}"
     );
     assert_eq!(results[1].as_ref().unwrap().id, MessageId::new("m1"));
+}
+
+/// A client whose quota limiter starts with `burst` units, refilling at 1,000
+/// units a second.
+async fn limited_client(burst: u32) -> (MockServer, GmailClient) {
+    let server = MockServer::start().await;
+    let client = GmailClient::builder(std::sync::Arc::new(common::TestTokens::default()))
+        .base_url(reqwest::Url::parse(&server.uri()).unwrap())
+        .retry_policy(fast_retries(0))
+        .quota_limit(Some(QuotaLimit {
+            units_per_second: 1000,
+            burst,
+        }))
+        .build()
+        .unwrap();
+    (server, client)
+}
+
+#[tokio::test]
+async fn a_batch_is_charged_every_item_before_it_is_sent() {
+    let (server, client) = limited_client(100).await;
+    let responder = BatchResponder::new(|_, part| {
+        let id = resource_id(part);
+        (
+            200,
+            serde_json::json!({"id": id, "messages": []}).to_string(),
+        )
+    });
+    mount(&server, &responder).await;
+    let ids: Vec<ThreadId> = (0..30).map(|i| ThreadId::new(format!("t{i}"))).collect();
+
+    // 30 threads.get cost 300 units; with 100 in the bucket the batch waits
+    // for 200 more, which takes 0.2 s.
+    let started = Instant::now();
+    client
+        .get_threads(&ids, ThreadFormat::Minimal, &[])
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() >= Duration::from_millis(190),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(responder.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn requests_within_the_burst_are_not_delayed_by_the_limiter() {
+    let (server, client) = limited_client(1000).await;
+    let responder = BatchResponder::new(|_, part| (200, message_json(part)));
+    mount(&server, &responder).await;
+
+    // 50 messages.get cost 250 units, well inside the burst.
+    let started = Instant::now();
+    client
+        .get_messages(&message_ids(50), MessageFormat::Minimal, &[])
+        .await
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
 }

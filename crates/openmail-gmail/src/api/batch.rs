@@ -17,6 +17,7 @@ use serde::de::DeserializeOwned;
 use super::client::parse_retry_after;
 use super::error::classify;
 use super::models::format_query;
+use super::quota;
 use super::retry::Retrier;
 use super::{ApiMessage, ApiThread, Error, GmailClient, MessageFormat, Result, ThreadFormat};
 
@@ -32,6 +33,8 @@ pub(crate) struct BatchRequest {
     query: Vec<(&'static str, String)>,
     /// A JSON body.
     body: Option<Vec<u8>>,
+    /// The call's Gmail quota units.
+    cost: u32,
 }
 
 impl BatchRequest {
@@ -42,6 +45,7 @@ impl BatchRequest {
             segments: segments.iter().map(|s| (*s).to_owned()).collect(),
             query,
             body: None,
+            cost: quota::cost(&Method::GET, segments),
         }
     }
 }
@@ -103,8 +107,9 @@ impl GmailClient {
     /// Sends `requests` in batches of at most [`MAX_BATCH_SIZE`], one batch at
     /// a time, and decodes each successful response as `T`.
     ///
-    /// Calls that fail with a retryable status (429, rate-limit 403, 5xx) are
-    /// resent in a smaller batch after a backoff, per the client's
+    /// Each batch is charged the quota units of all its calls before it is
+    /// sent. Calls that fail with a retryable status (429, rate-limit 403, 5xx)
+    /// are resent in a smaller batch after a backoff, per the client's
     /// [`RetryPolicy`](super::RetryPolicy). A `401` refreshes the token once per batch and
     /// resends the calls it rejected. Other failures become that item's `Err`.
     pub(crate) async fn batch<T: DeserializeOwned>(
@@ -221,9 +226,10 @@ impl GmailClient {
         let body = encode_batch(self, &boundary, &items);
         let content_type = format!("multipart/mixed; boundary={boundary}");
         let url = self.batch_url();
+        let cost = items.iter().map(|(_, r)| r.cost).sum();
 
         let (response, token) = self
-            .send_with_token(|http| {
+            .send_with_token(cost, |http| {
                 http.post(url.clone())
                     .header(CONTENT_TYPE, &content_type)
                     .body(body.clone())
