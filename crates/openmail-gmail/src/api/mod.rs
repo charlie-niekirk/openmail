@@ -3,6 +3,7 @@
 //! [`GmailClient`] wraps `reqwest` and returns serde models that mirror Gmail's
 //! JSON resources. Those convert into `openmail-core` domain types.
 
+mod batch;
 mod client;
 mod convert;
 mod endpoints;
@@ -12,6 +13,7 @@ mod pagination;
 mod retry;
 
 pub use crate::auth::{TokenError, TokenFuture, TokenProvider};
+pub use batch::MAX_BATCH_SIZE;
 pub use client::{GmailClient, GmailClientBuilder, default_http_client};
 pub use error::{Error, QuotaKind, Result};
 pub use models::{

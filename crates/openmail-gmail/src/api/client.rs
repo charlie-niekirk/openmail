@@ -69,6 +69,24 @@ impl GmailClient {
         url
     }
 
+    /// The batch endpoint, `batch/gmail/v1`.
+    pub(crate) fn batch_url(&self) -> Url {
+        let mut url = self.inner.base_url.clone();
+        url.path_segments_mut()
+            .expect("the builder only accepts http(s) base URLs")
+            .pop_if_empty()
+            .extend(["batch", "gmail", "v1"]);
+        url
+    }
+
+    pub(crate) fn tokens(&self) -> &dyn TokenProvider {
+        &*self.inner.tokens
+    }
+
+    pub(crate) fn retry_policy(&self) -> &RetryPolicy {
+        &self.inner.retry
+    }
+
     /// Sends a GET for a `users/me` resource and decodes the JSON response.
     pub(crate) async fn get_json<T: DeserializeOwned>(
         &self,
@@ -147,7 +165,11 @@ impl GmailClient {
 
 /// `Retry-After` in seconds. (Google does not send the HTTP-date form.)
 fn retry_after(response: &Response) -> Option<Duration> {
-    let value = response.headers().get(RETRY_AFTER)?.to_str().ok()?;
+    parse_retry_after(response.headers().get(RETRY_AFTER)?.to_str().ok()?)
+}
+
+/// Parses a `Retry-After` value in seconds.
+pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
     value.trim().parse().ok().map(Duration::from_secs)
 }
 
