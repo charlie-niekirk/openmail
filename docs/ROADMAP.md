@@ -60,7 +60,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
     raw) and history.list.
   - Pagination; exponential backoff on 429 and 5xx.
   - `wiremock` tests.
-- [ ] **1.4 Batch and mutations** — `feat/1.4-batch-mutations`
+- [x] **1.4 Batch and mutations** — `feat/1.4-batch-mutations`
   - `multipart/mixed` batch endpoint (≤ 50 requests per batch).
   - messages/threads `modify`, `batchModify`, trash/untrash, delete, labels CRUD.
 - [x] **1.5 MIME** ∥ — `feat/1.5-mime`
