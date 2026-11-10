@@ -5,11 +5,11 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{
-    BatchResponder, Listing, Mailbox, PROFILE_HISTORY_ID, list_page, mount_labels, mount_profile,
-    page, setup, setup_retrying,
+    BatchResponder, Listing, Mailbox, PROFILE_HISTORY_ID, fast_retries, list_page, mount_labels,
+    mount_profile, page, setup, setup_paced, setup_retrying,
 };
 use openmail_core::{HistoryId, LabelId, MessageId, ThreadId};
-use openmail_gmail::api;
+use openmail_gmail::api::{self, AdaptiveRate, QuotaPacing};
 use openmail_store::Store;
 use openmail_sync::{
     CancellationToken, Cutoff, Error, InitialSync, InitialSyncConfig, Phase, Progress,
@@ -139,8 +139,8 @@ async fn full_run_syncs_labels_inbox_and_backfill() {
             rate_limit_wait: None,
             retried_requests: 0,
             rate_limited_requests: 0,
-            // The default adaptive rate, with no rate limits to cut it.
-            units_per_second: Some(150),
+            // The test client has no quota limiter.
+            units_per_second: None,
         }
     );
     // Counts grow page by page.
@@ -840,9 +840,20 @@ async fn a_stored_thread_gone_when_fetched_is_deleted() {
     assert_eq!(done.deleted_threads, 5);
 }
 
+/// Adaptive pacing at 800 units/s, with lockouts and probes in milliseconds.
+fn fast_adaptive() -> QuotaPacing {
+    QuotaPacing::Adaptive(AdaptiveRate {
+        units_per_minute: 60_000,
+        lockout: Duration::from_millis(50),
+        max_lockout: Duration::from_millis(100),
+        probe_every: Duration::from_millis(50),
+        ..AdaptiveRate::default()
+    })
+}
+
 #[tokio::test]
-async fn a_rate_limit_burst_cuts_the_quota_rate_without_pausing_the_sync() {
-    let (server, client) = setup_retrying().await;
+async fn a_rate_limit_burst_slows_the_client_without_pausing_the_sync() {
+    let (server, client) = setup_paced(fast_adaptive(), fast_retries()).await;
     let mailbox = mailbox();
     mount_profile(&server, 1).await;
     mount_labels(&server).await;
@@ -866,8 +877,8 @@ async fn a_rate_limit_burst_cuts_the_quota_rate_without_pausing_the_sync() {
 
     assert_eq!(done.threads, 5);
     assert_eq!(done.rate_limited_requests, 5);
-    // The client slowed down and retried; the 60 s sync-level pause was never
-    // needed.
+    // The client locked itself out briefly, slowed down and retried; the 60 s
+    // sync-level pause was never needed.
     assert_eq!(pauses(&seen), 0);
     assert!(
         started.elapsed() < Duration::from_secs(30),
@@ -876,4 +887,38 @@ async fn a_rate_limit_burst_cuts_the_quota_rate_without_pausing_the_sync() {
     );
     let rate = done.units_per_second.unwrap();
     assert!(rate < start, "{rate} vs {start}");
+}
+
+#[tokio::test]
+async fn the_default_pacing_stays_under_a_6000_per_minute_quota() {
+    // Gmail's default quota, enforced over short windows: 100 units a second,
+    // counted over any 3 s.
+    let (server, client) = setup_paced(QuotaPacing::default(), fast_retries()).await;
+    let mut mailbox = Mailbox::default();
+    for n in 1..=36 {
+        mailbox = mailbox.with(n, &[]);
+    }
+    let ids: Vec<String> = (1..=36).map(|n| format!("t{n}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &[], None))
+        .mount(&server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &ids, None))
+        .mount(&server)
+        .await;
+    let batch = BatchResponder::new(mailbox).enforce_quota(300, Duration::from_secs(3));
+    batch.mount(&server).await;
+
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config());
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+
+    assert_eq!(done.threads, 36);
+    assert_eq!(batch.quota_rejections(), 0);
+    assert_eq!(done.rate_limited_requests, 0);
+    assert_eq!(pauses(&seen), 0);
 }

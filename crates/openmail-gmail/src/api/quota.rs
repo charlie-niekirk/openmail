@@ -2,20 +2,29 @@
 //! under the per-user rate limit.
 //!
 //! Gmail charges every call a documented number of quota units and limits each
-//! user to 15,000 units a minute (a moving average of about 250 a second).
+//! user to a number of units a minute: 6,000 by default for new Cloud projects
+//! (it used to be 15,000; a project owner can raise it). The limit is enforced
+//! over short windows too, so a client has to spread its spending evenly.
 //! [`GmailClient`](super::GmailClient) charges each request, and each item of a
 //! batch, to a token bucket shared by all its clones before sending it.
 //!
-//! By default the bucket's rate adapts: Gmail's effective limit is lower than
-//! the documented one (failed calls seem to count too), so the rate is halved
-//! whenever Gmail answers with a rate limit and creeps back up while it does
-//! not, like TCP congestion control.
+//! By default the bucket's rate adapts ([`AdaptiveRate`]): it starts at 80% of
+//! the per-minute budget, and when Gmail rate-limits a request anyway it stops
+//! sending for a while (Gmail keeps rejecting for up to a minute), remembers
+//! the rate that tripped it, resumes below it and probes back up slowly.
 
 use std::sync::Mutex;
 use std::time::Duration;
 
 use reqwest::Method;
 use tokio::time::Instant;
+
+/// Gmail's default "Units per minute per user" quota for a new Cloud project.
+pub const DEFAULT_QUOTA_PER_MINUTE: u32 = 6_000;
+
+/// The environment variable that overrides [`DEFAULT_QUOTA_PER_MINUTE`], for
+/// projects whose quota has been raised.
+pub const QUOTA_PER_MINUTE_ENV: &str = "OPENMAIL_GMAIL_QUOTA_PER_MINUTE";
 
 /// A fixed rate at which a client may spend Gmail quota units.
 ///
@@ -26,7 +35,7 @@ use tokio::time::Instant;
 pub struct QuotaLimit {
     /// The sustained rate.
     pub units_per_second: u32,
-    /// The most units spent at once. A batch of 50 `threads.get` costs 500.
+    /// The most units spent at once. A batch of 5 `threads.get` costs 50.
     pub burst: u32,
 }
 
@@ -41,41 +50,82 @@ impl QuotaLimit {
 }
 
 impl Default for QuotaLimit {
-    /// 200 units a second with bursts of 200: at most 12,200 units in any
-    /// minute, under Gmail's 15,000. A large burst after an idle spell is
-    /// enough on its own to trip Gmail's moving average.
+    /// 80 units a second with bursts of 80: at most 4,880 units in any
+    /// minute, 80% of Gmail's default 6,000.
     fn default() -> Self {
-        Self::per_second(200)
+        Self::per_second(80)
     }
 }
 
-/// A quota rate that adapts to Gmail's rate limiting: halved (with the bucket
-/// emptied) when Gmail rate-limits a request, and raised by `step` after every
-/// `step_every` without one. Bursts are one second's worth at the current
-/// rate.
+/// A quota rate that adapts to Gmail's rate limiting.
+///
+/// It starts at the budget, `utilization_percent` of `units_per_minute`.
+/// When Gmail rate-limits a request sent at rate `R`, nothing more is sent
+/// for `lockout` (doubled, up to `max_lockout`, if the first requests after a
+/// lockout are limited again), and sending resumes at 70% of `R`, the
+/// remembered ceiling. From there the rate rises by `probe_step` after every
+/// `probe_every` without a rate limit, up to the budget. Bursts are half a
+/// second's worth at the current rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdaptiveRate {
-    /// Units per second to start at.
-    pub initial: u32,
-    /// The lowest rate halving goes to.
+    /// The project's "Units per minute per user" quota.
+    pub units_per_minute: u32,
+    /// The share of it to use, leaving headroom for other clients and for
+    /// Gmail's short-window enforcement.
+    pub utilization_percent: u32,
+    /// The lowest rate, in units per second.
     pub min: u32,
-    /// The highest rate recovery goes to.
-    pub max: u32,
-    /// Units per second added after each clean `step_every`.
-    pub step: u32,
+    /// How long to stop sending after a rate limit, at first.
+    pub lockout: Duration,
+    /// The longest lockout.
+    pub max_lockout: Duration,
+    /// Units per second added after each clean `probe_every`.
+    pub probe_step: u32,
     /// How long without a rate limit before each step up.
-    pub step_every: Duration,
+    pub probe_every: Duration,
+}
+
+impl AdaptiveRate {
+    /// The defaults, for a project allowing `units_per_minute` per user.
+    pub fn per_minute(units_per_minute: u32) -> Self {
+        Self {
+            units_per_minute,
+            ..Self::default()
+        }
+    }
+
+    /// The defaults, with the per-minute quota from [`QUOTA_PER_MINUTE_ENV`]
+    /// if it is set to a positive number (otherwise
+    /// [`DEFAULT_QUOTA_PER_MINUTE`]).
+    pub fn from_env() -> Self {
+        let configured = std::env::var(QUOTA_PER_MINUTE_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|&units| units > 0);
+        Self::per_minute(configured.unwrap_or(DEFAULT_QUOTA_PER_MINUTE))
+    }
+
+    /// The highest rate it uses, in units per second.
+    pub fn budget(&self) -> u32 {
+        let per_minute = u64::from(self.units_per_minute) * u64::from(self.utilization_percent);
+        u32::try_from(per_minute / 100 / 60)
+            .unwrap_or(u32::MAX)
+            .max(self.min.max(1))
+    }
 }
 
 impl Default for AdaptiveRate {
-    /// Start at 150 units/s, halve down to 25, and add 10 every 10 s up to 240.
+    /// 80% of 6,000 units a minute (80 units/s), never below 10/s; a 15 s
+    /// lockout growing to 2 min; probing up by 5 units/s every 30 s.
     fn default() -> Self {
         Self {
-            initial: 150,
-            min: 25,
-            max: 240,
-            step: 10,
-            step_every: Duration::from_secs(10),
+            units_per_minute: DEFAULT_QUOTA_PER_MINUTE,
+            utilization_percent: 80,
+            min: 10,
+            lockout: Duration::from_secs(15),
+            max_lockout: Duration::from_secs(120),
+            probe_step: 5,
+            probe_every: Duration::from_secs(30),
         }
     }
 }
@@ -112,7 +162,7 @@ pub(crate) struct QuotaLimiter {
 #[derive(Debug, Clone, Copy)]
 enum Pacing {
     Fixed { burst: u32 },
-    Adaptive(AdaptiveRate),
+    Adaptive { config: AdaptiveRate, budget: u32 },
 }
 
 #[derive(Debug)]
@@ -121,36 +171,38 @@ struct Bucket {
     units: f64,
     /// Units per second.
     rate: u32,
-    /// When `units` was last brought up to date. `None` until first use, so
-    /// the clock is read inside the runtime.
+    /// When `units` was last brought up to date: the bucket fills from then.
+    /// `None` until first use, so the clock is read inside the runtime. During
+    /// a lockout it is the lockout's end, so nothing accrues before it.
     updated: Option<Instant>,
-    /// When the rate last changed (or the bucket was first used): the next
-    /// step up is `step_every` after it.
-    changed: Option<Instant>,
-    /// When the rate was last halved. Rate limits on requests sent before
-    /// then were caused by the old rate, so they do not halve it again.
-    decreased: Option<Instant>,
+    /// When the next probe step may happen.
+    next_probe: Option<Instant>,
+    /// The last rate limit: when it was recorded, and when sending resumed
+    /// after it. Rate limits on requests sent before it are ignored.
+    tripped: Option<(Instant, Instant)>,
+    /// The current lockout length.
+    lockout: Duration,
+    /// The rate Gmail last rate-limited at.
+    ceiling: Option<u32>,
 }
 
 impl QuotaLimiter {
     pub(crate) fn new(pacing: QuotaPacing) -> Option<Self> {
-        let (pacing, rate) = match pacing {
+        let (pacing, rate, lockout) = match pacing {
             QuotaPacing::Off => return None,
             QuotaPacing::Fixed(limit) => (
                 Pacing::Fixed { burst: limit.burst },
                 limit.units_per_second.max(1),
+                Duration::ZERO,
             ),
             QuotaPacing::Adaptive(config) => {
-                let min = config.min.max(1);
                 let config = AdaptiveRate {
-                    min,
-                    max: config.max.max(min),
+                    min: config.min.max(1),
+                    max_lockout: config.max_lockout.max(config.lockout),
                     ..config
                 };
-                (
-                    Pacing::Adaptive(config),
-                    config.initial.clamp(config.min, config.max),
-                )
+                let budget = config.budget();
+                (Pacing::Adaptive { config, budget }, budget, config.lockout)
             }
         };
         let limiter = Self {
@@ -159,8 +211,10 @@ impl QuotaLimiter {
                 units: 0.0,
                 rate,
                 updated: None,
-                changed: None,
-                decreased: None,
+                next_probe: None,
+                tripped: None,
+                lockout,
+                ceiling: None,
             }),
         };
         limiter.bucket().units = limiter.burst(rate);
@@ -177,7 +231,7 @@ impl QuotaLimiter {
     fn burst(&self, rate: u32) -> f64 {
         match self.pacing {
             Pacing::Fixed { burst } => f64::from(burst),
-            Pacing::Adaptive(_) => f64::from(rate),
+            Pacing::Adaptive { .. } => f64::from(rate) / 2.0,
         }
     }
 
@@ -188,34 +242,37 @@ impl QuotaLimiter {
         bucket.rate
     }
 
-    /// Brings the bucket up to `now`: refills it, stepping the adaptive rate
-    /// up at each `step_every` boundary on the way.
+    /// Brings the bucket up to `now`: refills it, stepping an adaptive rate up
+    /// at each probe time on the way.
     fn advance(&self, bucket: &mut Bucket, now: Instant) {
-        let (Some(mut updated), Some(changed)) = (bucket.updated, bucket.changed) else {
+        let Some(mut updated) = bucket.updated else {
             bucket.updated = Some(now);
-            bucket.changed = Some(now);
             return;
         };
-        if let Pacing::Adaptive(config) = self.pacing
-            && !config.step_every.is_zero()
+        if let Pacing::Adaptive { config, budget } = self.pacing
+            && !config.probe_every.is_zero()
         {
-            let mut next = changed + config.step_every;
-            while bucket.rate < config.max && next <= now {
+            let mut next = *bucket
+                .next_probe
+                .get_or_insert(updated + config.probe_every);
+            while bucket.rate < budget && next <= now {
                 self.refill(bucket, updated, next);
-                updated = next;
+                updated = updated.max(next);
                 let old = bucket.rate;
-                bucket.rate = (bucket.rate + config.step).min(config.max);
-                bucket.changed = Some(next);
+                bucket.rate = (bucket.rate + config.probe_step).min(budget);
                 tracing::debug!(
                     from = old,
                     to = bucket.rate,
-                    "no Gmail rate limits; raising the quota rate"
+                    "no Gmail rate limits; probing a higher quota rate"
                 );
-                next += config.step_every;
+                next += config.probe_every;
+                bucket.next_probe = Some(next);
             }
         }
-        self.refill(bucket, updated, now);
-        bucket.updated = Some(now);
+        if now > updated {
+            self.refill(bucket, updated, now);
+            bucket.updated = Some(now);
+        }
     }
 
     fn refill(&self, bucket: &mut Bucket, from: Instant, to: Instant) {
@@ -230,10 +287,12 @@ impl QuotaLimiter {
         let mut bucket = self.bucket();
         self.advance(&mut bucket, now);
         bucket.units -= f64::from(cost);
+        // During a lockout `updated` is its end: the debt is repaid from then.
+        let start = bucket.updated.map_or(Duration::ZERO, |at| at - now.min(at));
         if bucket.units >= 0.0 {
-            Duration::ZERO
+            start
         } else {
-            Duration::from_secs_f64(-bucket.units / f64::from(bucket.rate))
+            start + Duration::from_secs_f64(-bucket.units / f64::from(bucket.rate))
         }
     }
 
@@ -245,29 +304,46 @@ impl QuotaLimiter {
         }
     }
 
-    /// Records that Gmail rate-limited a request sent at `sent`. An adaptive
-    /// rate is halved (down to its minimum) and the bucket emptied, so nothing
-    /// is sent in a burst straight after; a rate limit on a request sent
-    /// before the last halving is ignored. Returns the new rate if it changed.
+    /// Records that Gmail rate-limited a request sent at `sent`, and returns
+    /// the new rate if an adaptive rate changed.
+    ///
+    /// Requests sent before the last rate limit are ignored: the old rate
+    /// caused them. Otherwise sending stops for the lockout. If the request
+    /// was among the first after the last lockout, Gmail is still locking the
+    /// user out, so the lockout doubles and the rate stays; if not, the
+    /// lockout starts over and the rate drops to 70% of the rate that was
+    /// limited, which is remembered as the ceiling.
     pub(crate) fn rate_limited(&self, sent: Instant) -> Option<u32> {
-        let Pacing::Adaptive(config) = self.pacing else {
+        let Pacing::Adaptive { config, .. } = self.pacing else {
             return None;
         };
         let now = Instant::now();
         let mut bucket = self.bucket();
-        if bucket.decreased.is_some_and(|at| sent < at) {
+        let previous = bucket.tripped;
+        if previous.is_some_and(|(at, _)| sent < at) {
             return None;
         }
         self.advance(&mut bucket, now);
         let old = bucket.rate;
-        bucket.rate = (bucket.rate / 2).max(config.min);
+        let still_locked_out = previous.is_some_and(|(_, resumed)| sent < resumed + config.lockout);
+        if still_locked_out {
+            bucket.lockout = (bucket.lockout * 2).min(config.max_lockout);
+        } else {
+            bucket.lockout = config.lockout;
+            bucket.ceiling = Some(old);
+            bucket.rate = (old * 7 / 10).max(config.min);
+        }
+        let resume = now + bucket.lockout;
         bucket.units = bucket.units.min(0.0);
-        bucket.changed = Some(now);
-        bucket.decreased = Some(now);
+        bucket.updated = Some(resume);
+        bucket.next_probe = Some(resume + config.probe_every);
+        bucket.tripped = Some((now, resume));
         tracing::debug!(
+            ceiling = bucket.ceiling,
             from = old,
             to = bucket.rate,
-            "Gmail rate limit; halving the quota rate"
+            lockout_s = bucket.lockout.as_secs(),
+            "Gmail rate limit; pausing, then resuming below the limited rate"
         );
         (bucket.rate != old).then_some(bucket.rate)
     }
@@ -319,22 +395,22 @@ mod tests {
         QuotaLimiter::new(QuotaPacing::Adaptive(config)).unwrap()
     }
 
-    fn config() -> AdaptiveRate {
-        AdaptiveRate {
-            initial: 160,
-            min: 25,
-            max: 240,
-            step: 10,
-            step_every: Duration::from_secs(10),
-        }
-    }
-
     async fn advance(secs: f64) {
         tokio::time::advance(Duration::from_secs_f64(secs)).await;
     }
 
+    fn secs(d: Duration) -> f64 {
+        d.as_secs_f64()
+    }
+
     #[test]
-    fn pacing_can_be_off() {
+    fn the_default_budget_is_80_percent_of_6000_a_minute() {
+        let config = AdaptiveRate::default();
+        assert_eq!(config.units_per_minute, 6_000);
+        assert_eq!(config.budget(), 80);
+        assert_eq!(AdaptiveRate::per_minute(15_000).budget(), 200);
+        // Never below the minimum.
+        assert_eq!(AdaptiveRate::per_minute(60).budget(), 10);
         assert!(QuotaLimiter::new(QuotaPacing::Off).is_none());
         assert_eq!(
             QuotaPacing::default(),
@@ -343,89 +419,130 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_adaptive_burst_is_one_second_at_the_current_rate() {
-        let limiter = adaptive(config());
-        // Long idle: still only one second's worth.
+    async fn starts_at_the_budget_with_half_second_bursts() {
+        let limiter = adaptive(AdaptiveRate::default());
         advance(300.0).await;
-        assert_eq!(limiter.rate(), 160);
-        assert_eq!(limiter.reserve(160), Duration::ZERO);
-        assert_eq!(limiter.reserve(80), Duration::from_millis(500));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_rate_limit_halves_the_rate_and_empties_the_bucket() {
-        let limiter = adaptive(config());
-        assert_eq!(limiter.rate(), 160);
-        assert_eq!(limiter.rate_limited(Instant::now()), Some(80));
-        // Nothing left: 80 units take a second at the new rate.
-        assert_eq!(limiter.reserve(80), Duration::from_secs(1));
-        // Debt is kept, not forgiven: 40 units still owed at 40/s.
-        advance(0.5).await;
-        assert_eq!(limiter.rate_limited(Instant::now()), Some(40));
-        assert_eq!(limiter.reserve(0), Duration::from_secs(1));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn requests_sent_before_a_halving_do_not_halve_again() {
-        let limiter = adaptive(config());
-        let early = Instant::now();
-        advance(1.0).await;
-        assert_eq!(limiter.rate_limited(Instant::now()), Some(80));
-        // In flight before the halving: ignored.
-        assert_eq!(limiter.rate_limited(early), None);
         assert_eq!(limiter.rate(), 80);
-        // Sent afterwards: halves.
+        // The bucket holds 40 units, so a batch of 5 threads.get (50 units)
+        // waits 125 ms, and the next one waits its full 625 ms after that.
+        assert_eq!(limiter.reserve(40), Duration::ZERO);
+        assert_eq!(limiter.reserve(50), Duration::from_millis(625));
+        assert_eq!(limiter.reserve(50), Duration::from_millis(1250));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limit_stops_sending_for_the_lockout_then_resumes_lower() {
+        let limiter = adaptive(AdaptiveRate::default());
+        limiter.reserve(40);
+        assert_eq!(limiter.rate_limited(Instant::now()), Some(56));
+        // Nothing until the 15 s lockout ends, and no burst after it: the
+        // first 28 units take half a second at 56/s.
+        assert_eq!(secs(limiter.reserve(28)), 15.5);
+        advance(15.5).await;
+        assert_eq!(limiter.reserve(0), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn requests_sent_before_a_rate_limit_are_ignored() {
+        let limiter = adaptive(AdaptiveRate::default());
+        let in_flight = Instant::now();
         advance(1.0).await;
-        assert_eq!(limiter.rate_limited(Instant::now()), Some(40));
+        assert_eq!(limiter.rate_limited(Instant::now()), Some(56));
+        assert_eq!(limiter.rate_limited(in_flight), None);
+        assert_eq!(limiter.rate(), 56);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_rate_never_halves_below_its_minimum() {
-        let limiter = adaptive(config());
-        let mut rates = Vec::new();
-        for _ in 0..5 {
-            advance(0.1).await;
-            rates.push(limiter.rate_limited(Instant::now()));
-        }
-        assert_eq!(rates, [Some(80), Some(40), Some(25), None, None]);
+    async fn a_limit_right_after_a_lockout_doubles_it_and_keeps_the_rate() {
+        let limiter = adaptive(AdaptiveRate::default());
+        assert_eq!(limiter.rate_limited(Instant::now()), Some(56));
+        // The first request after the lockout is limited too.
+        advance(15.0).await;
+        assert_eq!(limiter.rate_limited(Instant::now()), None);
+        assert_eq!(limiter.rate(), 56);
+        assert_eq!(secs(limiter.reserve(0)), 30.0);
+        advance(30.0).await;
+        assert_eq!(limiter.rate_limited(Instant::now()), None);
+        assert_eq!(secs(limiter.reserve(0)), 60.0);
+        advance(60.0).await;
+        assert_eq!(limiter.rate_limited(Instant::now()), None);
+        // Capped at two minutes.
+        assert_eq!(secs(limiter.reserve(0)), 120.0);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_rate_recovers_additively_up_to_its_cap() {
-        let limiter = adaptive(config());
+    async fn a_later_limit_restarts_the_lockout_and_lowers_the_ceiling() {
+        let limiter = adaptive(AdaptiveRate::default());
         limiter.rate_limited(Instant::now());
-        assert_eq!(limiter.rate(), 80);
-        advance(9.9).await;
-        assert_eq!(limiter.rate(), 80);
-        advance(0.1).await;
-        assert_eq!(limiter.rate(), 90);
-        advance(25.0).await;
-        assert_eq!(limiter.rate(), 110);
-        // A rate limit restarts the clean period.
-        advance(4.0).await;
-        assert_eq!(limiter.rate_limited(Instant::now()), Some(55));
-        advance(9.0).await;
-        assert_eq!(limiter.rate(), 55);
+        advance(15.0).await;
+        limiter.rate_limited(Instant::now());
+        // Clean well past the lockout (which ended at 45 s), then limited
+        // again at 56: the 30 s lockout is forgotten, rate to 70% of 56.
+        advance(50.0).await;
+        assert_eq!(limiter.rate(), 56);
+        assert_eq!(limiter.rate_limited(Instant::now()), Some(39));
+        assert_eq!(secs(limiter.reserve(0)), 15.0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_rate_probes_up_slowly_to_the_budget() {
+        let limiter = adaptive(AdaptiveRate::default());
+        limiter.rate_limited(Instant::now());
+        // Lockout ends at 15 s; the first probe is 30 s later.
+        advance(44.0).await;
+        assert_eq!(limiter.rate(), 56);
         advance(1.0).await;
-        assert_eq!(limiter.rate(), 65);
-        advance(10_000.0).await;
-        assert_eq!(limiter.rate(), 240);
+        assert_eq!(limiter.rate(), 61);
+        advance(30.0).await;
+        assert_eq!(limiter.rate(), 66);
+        advance(3_600.0).await;
+        assert_eq!(limiter.rate(), 80);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_rate_never_drops_below_its_minimum() {
+        let limiter = adaptive(AdaptiveRate {
+            lockout: Duration::from_secs(1),
+            ..AdaptiveRate::default()
+        });
+        let mut rates = Vec::new();
+        for _ in 0..8 {
+            advance(10.0).await;
+            limiter.rate_limited(Instant::now());
+            rates.push(limiter.rate());
+        }
+        assert_eq!(rates, [56, 39, 27, 18, 12, 10, 10, 10]);
     }
 
     #[tokio::test(start_paused = true)]
     async fn refill_uses_the_rate_in_force_at_each_moment() {
         let limiter = adaptive(AdaptiveRate {
-            initial: 100,
-            max: 200,
-            step: 100,
-            ..config()
+            probe_step: 40,
+            probe_every: Duration::from_secs(10),
+            ..AdaptiveRate::default()
         });
-        // Empty the bucket, then wait 20 s: 10 s at 100/s, then 10 s at 200/s,
-        // capped at the new one-second burst of 200.
-        assert_eq!(limiter.reserve(100), Duration::ZERO);
-        advance(20.0).await;
-        assert_eq!(limiter.reserve(200), Duration::ZERO);
-        assert_eq!(limiter.reserve(100), Duration::from_millis(500));
+        limiter.rate_limited(Instant::now());
+        assert_eq!(limiter.rate(), 56);
+        // Resumes at 15 s, probes to 80 at 25 s: the bucket is full again
+        // (half a second at 80).
+        advance(30.0).await;
+        assert_eq!(limiter.rate(), 80);
+        assert_eq!(limiter.reserve(40), Duration::ZERO);
+        assert_eq!(limiter.reserve(40), Duration::from_millis(500));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_adaptive_default_spends_under_the_per_minute_quota() {
+        let limiter = adaptive(AdaptiveRate::default());
+        let start = Instant::now();
+        let mut spent = 0;
+        while start.elapsed() < Duration::from_secs(60) {
+            limiter.acquire(50).await;
+            if start.elapsed() < Duration::from_secs(60) {
+                spent += 50;
+            }
+        }
+        assert!((4_500..=4_900).contains(&spent), "{spent}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -434,21 +551,6 @@ mod tests {
         assert_eq!(limiter.rate_limited(Instant::now()), None);
         assert_eq!(limiter.rate(), 100);
         assert_eq!(limiter.reserve(100), Duration::ZERO);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn the_adaptive_default_stays_well_under_gmails_limit() {
-        let limiter = adaptive(AdaptiveRate::default());
-        let start = Instant::now();
-        let mut spent = 0;
-        while start.elapsed() < Duration::from_secs(60) {
-            limiter.acquire(100).await;
-            if start.elapsed() < Duration::from_secs(60) {
-                spent += 100;
-            }
-        }
-        // 150 rising to 200 units/s.
-        assert!((10_000..=12_500).contains(&spent), "{spent}");
     }
 
     #[test]
@@ -528,18 +630,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stays_under_gmails_per_minute_limit_by_default() {
+    async fn a_fixed_default_stays_under_the_default_per_minute_quota() {
         let limiter = fixed(QuotaLimit::default());
         let start = Instant::now();
         let mut spent = 0;
-        // Batches of 50 threads.get, back to back, for one minute.
+        // Batches of 5 threads.get, back to back, for one minute.
         while start.elapsed() < Duration::from_secs(60) {
-            limiter.acquire(500).await;
+            limiter.acquire(50).await;
             if start.elapsed() < Duration::from_secs(60) {
-                spent += 500;
+                spent += 50;
             }
         }
-        assert!(spent <= 15_000, "{spent}");
-        assert!(spent >= 12_000, "{spent}");
+        assert!(spent <= DEFAULT_QUOTA_PER_MINUTE, "{spent}");
+        assert!(spent >= 4_500, "{spent}");
     }
 }

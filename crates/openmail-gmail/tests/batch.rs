@@ -512,19 +512,21 @@ async fn rate_limited_items_are_retried_without_holding_up_other_batches() {
     assert_eq!((stats.retries, stats.rate_limited), (1, 1));
 }
 
-/// A client pacing quota adaptively from 1,000 units/s (bursts of 1,000),
-/// stepping back up by 100 every 200 ms.
+/// A client pacing quota adaptively from 1,000 units/s, with 50 ms lockouts
+/// (up to 100 ms) and probing up by 100 units/s every 50 ms.
 async fn adaptive_client() -> (MockServer, GmailClient) {
     let server = MockServer::start().await;
     let client = GmailClient::builder(std::sync::Arc::new(common::TestTokens::default()))
         .base_url(reqwest::Url::parse(&server.uri()).unwrap())
         .retry_policy(fast_retries(3))
         .quota_pacing(QuotaPacing::Adaptive(AdaptiveRate {
-            initial: 1000,
-            min: 100,
-            max: 1000,
-            step: 100,
-            step_every: Duration::from_millis(200),
+            units_per_minute: 75_000,
+            utilization_percent: 80,
+            min: 10,
+            lockout: Duration::from_millis(50),
+            max_lockout: Duration::from_millis(100),
+            probe_step: 100,
+            probe_every: Duration::from_millis(50),
         }))
         .batch_size(5)
         .build()
@@ -547,18 +549,19 @@ async fn a_rate_limit_burst_cuts_the_quota_rate_and_it_recovers() {
     mount(&server, &responder).await;
     assert_eq!(client.stats().units_per_second, Some(1000));
 
-    // Every batch is rate-limited: the first rate limit halves the rate, and
-    // each one on a request sent after a halving halves it again (how many
-    // depends on timing).
+    // Every batch is rate-limited: the first rate limit locks the client out
+    // and cuts the rate to 70%; retries wait out the lockout.
+    let started = Instant::now();
     let results = client
         .get_messages(&message_ids(10), MessageFormat::Minimal, &[])
         .await
         .unwrap();
     assert!(results.iter().all(Result::is_err));
+    assert!(started.elapsed() >= Duration::from_millis(50));
     let cut = client.stats().units_per_second.unwrap();
-    assert!(cut <= 500, "{cut}");
+    assert!(cut <= 700, "{cut}");
 
-    // Clean again: the rate steps back up over time, shared by clones.
+    // Clean again: the rate probes back up over time, shared by clones.
     throttled.store(false, std::sync::atomic::Ordering::SeqCst);
     let clone = client.clone();
     let results = clone
@@ -566,7 +569,7 @@ async fn a_rate_limit_burst_cuts_the_quota_rate_and_it_recovers() {
         .await
         .unwrap();
     assert!(results.iter().all(Result::is_ok));
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let recovered = client.stats().units_per_second.unwrap();
     assert!(recovered > cut, "{recovered} vs {cut}");
 }

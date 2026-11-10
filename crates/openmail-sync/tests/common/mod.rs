@@ -2,11 +2,11 @@
 
 #![allow(dead_code)] // Each test binary uses a different subset.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use openmail_gmail::api::{GmailClient, RetryPolicy, TokenFuture, TokenProvider};
+use openmail_gmail::api::{GmailClient, QuotaPacing, RetryPolicy, TokenFuture, TokenProvider};
 use serde_json::{Value, json};
 use url::Url;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
@@ -41,25 +41,37 @@ pub async fn setup() -> (MockServer, GmailClient) {
 
 /// A mock server and a client for it that retries quickly.
 pub async fn setup_retrying() -> (MockServer, GmailClient) {
-    setup_with(RetryPolicy {
+    setup_with(fast_retries()).await
+}
+
+async fn setup_with(retry: RetryPolicy) -> (MockServer, GmailClient) {
+    setup_paced(QuotaPacing::Off, retry).await
+}
+
+/// A mock server and a client for it with this quota pacing and retry
+/// policy. (The other setups have no quota limiter, so rate limits in tests
+/// do not lock the client out.)
+pub async fn setup_paced(pacing: QuotaPacing, retry: RetryPolicy) -> (MockServer, GmailClient) {
+    let server = MockServer::start().await;
+    let client = GmailClient::builder(Arc::new(StaticToken))
+        .base_url(Url::parse(&server.uri()).unwrap())
+        .retry_policy(retry)
+        .quota_pacing(pacing)
+        .build()
+        .unwrap();
+    (server, client)
+}
+
+/// The retry policy of [`setup_retrying`].
+pub fn fast_retries() -> RetryPolicy {
+    RetryPolicy {
         max_retries: 3,
         initial_backoff: Duration::from_millis(1),
         max_backoff: Duration::from_millis(5),
         rate_limit_initial_backoff: Duration::from_millis(1),
         rate_limit_max_backoff: Duration::from_millis(5),
         rate_limit_max_wait: Duration::from_millis(50),
-    })
-    .await
-}
-
-async fn setup_with(retry: RetryPolicy) -> (MockServer, GmailClient) {
-    let server = MockServer::start().await;
-    let client = GmailClient::builder(Arc::new(StaticToken))
-        .base_url(Url::parse(&server.uri()).unwrap())
-        .retry_policy(retry)
-        .build()
-        .unwrap();
-    (server, client)
+    }
 }
 
 /// `GET users/me/<resource>`.
@@ -233,6 +245,18 @@ pub struct BatchResponder {
     calls: Arc<Mutex<Vec<Vec<BatchItem>>>>,
     /// IDs answered with a rate-limit 429 the first time they are requested.
     rate_limit_once: Arc<Mutex<HashSet<String>>>,
+    /// A per-user quota enforced over a sliding window, if any.
+    quota: Arc<Mutex<Option<QuotaWindow>>>,
+}
+
+/// Gmail's per-user quota as a sliding window: `units` per `window`, with
+/// every call counted, rejected ones included.
+#[derive(Debug)]
+struct QuotaWindow {
+    units: u32,
+    window: Duration,
+    spent: VecDeque<(Instant, u32)>,
+    rejected: usize,
 }
 
 impl BatchResponder {
@@ -241,7 +265,30 @@ impl BatchResponder {
             mailbox: Arc::new(Mutex::new(mailbox)),
             calls: Arc::default(),
             rate_limit_once: Arc::default(),
+            quota: Arc::default(),
         }
+    }
+
+    /// Enforces a per-user quota of `units` per sliding `window`, counting
+    /// `threads.get` as 10 units and `messages.get` as 5, and answering calls
+    /// over it with a rate-limit 429 (which still count).
+    pub fn enforce_quota(self, units: u32, window: Duration) -> Self {
+        *self.quota.lock().unwrap() = Some(QuotaWindow {
+            units,
+            window,
+            spent: VecDeque::new(),
+            rejected: 0,
+        });
+        self
+    }
+
+    /// How many calls the enforced quota rejected.
+    pub fn quota_rejections(&self) -> usize {
+        self.quota
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |q| q.rejected)
     }
 
     /// Answers these IDs with a rate-limit 429 the first time they are
@@ -291,6 +338,28 @@ impl BatchResponder {
         let (path, _) = target.split_once('?').unwrap_or((target, ""));
         let rest = path.strip_prefix(USER).unwrap_or(path);
         let id = rest.rsplit('/').next().unwrap_or_default();
+        if let Some(quota) = self.quota.lock().unwrap().as_mut() {
+            let now = Instant::now();
+            while quota
+                .spent
+                .front()
+                .is_some_and(|(at, _)| now.duration_since(*at) >= quota.window)
+            {
+                quota.spent.pop_front();
+            }
+            let cost = if rest.starts_with("/threads/") { 10 } else { 5 };
+            let used: u32 = quota.spent.iter().map(|(_, units)| units).sum();
+            quota.spent.push_back((now, cost));
+            if used + cost > quota.units {
+                quota.rejected += 1;
+                return (
+                    429,
+                    json!({"error": {"code": 429,
+                           "message": "Quota exceeded for quota metric 'Queries'",
+                           "errors": [{"reason": "rateLimitExceeded"}]}}),
+                );
+            }
+        }
         if self.rate_limit_once.lock().unwrap().remove(id) {
             return (
                 429,

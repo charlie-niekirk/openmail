@@ -372,6 +372,15 @@ impl GmailClientBuilder {
         self
     }
 
+    /// Paces quota adaptively for a project whose "Units per minute per user"
+    /// quota is `units_per_minute` (Gmail's default for new projects is
+    /// [`DEFAULT_QUOTA_PER_MINUTE`](super::DEFAULT_QUOTA_PER_MINUTE)).
+    pub fn quota_per_minute(self, units_per_minute: u32) -> Self {
+        self.quota_pacing(QuotaPacing::Adaptive(super::AdaptiveRate::per_minute(
+            units_per_minute.max(1),
+        )))
+    }
+
     /// Sets how the client paces the quota units it spends. Defaults to
     /// [`QuotaPacing::Adaptive`] with
     /// [`AdaptiveRate::default`](super::AdaptiveRate::default).
