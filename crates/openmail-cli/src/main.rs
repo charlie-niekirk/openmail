@@ -2,7 +2,9 @@
 //!
 //! See the crate's `README.md` for setting up a Google OAuth client and for usage.
 
+mod accounts;
 mod cli;
+mod session;
 
 use std::process::ExitCode;
 
@@ -31,6 +33,9 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err:#}");
+            if session::needs_sign_in(&err) {
+                eprintln!("hint: run `openmail-cli login` to sign in again");
+            }
             ExitCode::FAILURE
         }
     }
@@ -49,11 +54,13 @@ fn init_tracing() {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     tracing::debug!(?cli, "starting");
+    let account = cli.account.as_deref();
     match cli.command {
-        Command::Login
-        | Command::Logout
-        | Command::Labels
-        | Command::Threads { .. }
-        | Command::Show { .. } => bail!("not implemented yet"),
+        Command::Login => session::login().await,
+        Command::Logout => session::logout(account).await,
+        Command::Labels | Command::Threads { .. } | Command::Show { .. } => {
+            let _client = session::gmail_client(account)?;
+            bail!("not implemented yet")
+        }
     }
 }
