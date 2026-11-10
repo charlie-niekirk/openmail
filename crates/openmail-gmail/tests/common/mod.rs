@@ -2,6 +2,8 @@
 
 #![allow(dead_code)] // Each test binary uses a different subset.
 
+pub mod batch;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;

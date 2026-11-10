@@ -3,8 +3,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::header::RETRY_AFTER;
-use reqwest::{RequestBuilder, Response, StatusCode, Url};
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
+use reqwest::{Method, RequestBuilder, Response, StatusCode, Url};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::error::{Error, Result, classify};
@@ -69,6 +70,24 @@ impl GmailClient {
         url
     }
 
+    /// The batch endpoint, `batch/gmail/v1`.
+    pub(crate) fn batch_url(&self) -> Url {
+        let mut url = self.inner.base_url.clone();
+        url.path_segments_mut()
+            .expect("the builder only accepts http(s) base URLs")
+            .pop_if_empty()
+            .extend(["batch", "gmail", "v1"]);
+        url
+    }
+
+    pub(crate) fn tokens(&self) -> &dyn TokenProvider {
+        &*self.inner.tokens
+    }
+
+    pub(crate) fn retry_policy(&self) -> &RetryPolicy {
+        &self.inner.retry
+    }
+
     /// Sends a GET for a `users/me` resource and decodes the JSON response.
     pub(crate) async fn get_json<T: DeserializeOwned>(
         &self,
@@ -81,6 +100,51 @@ impl GmailClient {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    /// Sends `method` to a `users/me` resource with an optional JSON body, and
+    /// decodes the JSON response.
+    pub(crate) async fn call_json<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        segments: &[&str],
+        body: Option<&(impl Serialize + ?Sized)>,
+    ) -> Result<T> {
+        let bytes = self.call(method, segments, body).await?.bytes().await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    /// Like [`call_json`](Self::call_json), for calls whose success response
+    /// has no body we need.
+    pub(crate) async fn call_empty(
+        &self,
+        method: Method,
+        segments: &[&str],
+        body: Option<&(impl Serialize + ?Sized)>,
+    ) -> Result<()> {
+        self.call(method, segments, body).await?;
+        Ok(())
+    }
+
+    async fn call(
+        &self,
+        method: Method,
+        segments: &[&str],
+        body: Option<&(impl Serialize + ?Sized)>,
+    ) -> Result<Response> {
+        let url = self.user_url(segments);
+        let body = body.map(serde_json::to_vec).transpose()?;
+        self.send(|http| {
+            let request = http.request(method.clone(), url.clone());
+            match &body {
+                Some(body) => request
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(body.clone()),
+                // Google may answer a body-less POST without a length with 411.
+                None => request.header(CONTENT_LENGTH, 0),
+            }
+        })
+        .await
+    }
+
     /// Sends a request built by `build`, adding the access token, refreshing it
     /// once on `401` and retrying retryable failures. Returns the successful
     /// response; any other status becomes an [`Error`].
@@ -90,6 +154,18 @@ impl GmailClient {
         &self,
         build: impl Fn(&reqwest::Client) -> RequestBuilder,
     ) -> Result<Response> {
+        self.send_with_token(build)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    /// Like [`send`](Self::send), but also returns the access token the
+    /// successful attempt used, so a caller that sees a `401` inside the
+    /// response (as in a batch) can refresh exactly that token.
+    pub(crate) async fn send_with_token(
+        &self,
+        build: impl Fn(&reqwest::Client) -> RequestBuilder,
+    ) -> Result<(Response, String)> {
         let inner = &*self.inner;
         let mut token = inner.tokens.access_token().await.map_err(Error::Token)?;
         let mut refreshed = false;
@@ -108,7 +184,7 @@ impl GmailClient {
 
             let status = response.status();
             if status.is_success() {
-                return Ok(response);
+                return Ok((response, token));
             }
             if status == StatusCode::UNAUTHORIZED && !refreshed {
                 refreshed = true;
@@ -135,7 +211,11 @@ impl GmailClient {
 
 /// `Retry-After` in seconds. (Google does not send the HTTP-date form.)
 fn retry_after(response: &Response) -> Option<Duration> {
-    let value = response.headers().get(RETRY_AFTER)?.to_str().ok()?;
+    parse_retry_after(response.headers().get(RETRY_AFTER)?.to_str().ok()?)
+}
+
+/// Parses a `Retry-After` value in seconds.
+pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
     value.trim().parse().ok().map(Duration::from_secs)
 }
 

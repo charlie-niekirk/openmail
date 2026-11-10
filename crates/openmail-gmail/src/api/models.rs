@@ -13,7 +13,7 @@ use openmail_core::{
     AttachmentId, HistoryId, LabelId, LabelListVisibility, LabelType, MessageId,
     MessageListVisibility, ThreadId,
 };
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 use super::{Error, Result};
 
@@ -50,11 +50,72 @@ pub struct ApiLabel {
 }
 
 /// A label's color, as Gmail's JSON spells it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+///
+/// Gmail only accepts colors from its own palette, such as `"#16a765"`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiLabelColor {
     pub text_color: String,
     pub background_color: String,
+}
+
+/// The fields to set with `labels.create` or `labels.patch`. Fields left as
+/// `None` are not sent: `labels.create` uses Gmail's defaults for them, and
+/// `labels.patch` leaves them unchanged.
+///
+/// `labels.create` needs a [`name`](Self::name). System labels cannot be
+/// renamed or recolored.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[must_use]
+pub struct LabelRequest {
+    /// The full name. Nest labels with `/`, as in `"Work/Projects"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_list_visibility: Option<MessageListVisibility>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_list_visibility: Option<LabelListVisibility>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<ApiLabelColor>,
+}
+
+impl LabelRequest {
+    /// No changes.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Sets whether messages show the label in the message list.
+    pub fn message_list_visibility(mut self, visibility: MessageListVisibility) -> Self {
+        self.message_list_visibility = Some(visibility);
+        self
+    }
+
+    /// Sets whether the label shows in the label list.
+    pub fn label_list_visibility(mut self, visibility: LabelListVisibility) -> Self {
+        self.label_list_visibility = Some(visibility);
+        self
+    }
+
+    /// Sets the text and background colors.
+    pub fn color(
+        mut self,
+        text_color: impl Into<String>,
+        background_color: impl Into<String>,
+    ) -> Self {
+        self.color = Some(ApiLabelColor {
+            text_color: text_color.into(),
+            background_color: background_color.into(),
+        });
+        self
+    }
 }
 
 /// The `labels.list` response.
@@ -343,6 +404,45 @@ impl ListRequest {
             query.push(("includeSpamTrash", "true".to_owned()));
         }
         query
+    }
+}
+
+/// Labels to add to and remove from messages or threads, for
+/// `messages.modify`, `messages.batchModify` and `threads.modify`.
+///
+/// Gmail applies the additions and removals together. Archiving is removing
+/// `INBOX`; marking read is removing `UNREAD`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[must_use]
+pub struct ModifyLabels {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub add_label_ids: Vec<LabelId>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remove_label_ids: Vec<LabelId>,
+}
+
+impl ModifyLabels {
+    /// No changes.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a label.
+    pub fn add_label(mut self, id: impl Into<LabelId>) -> Self {
+        self.add_label_ids.push(id.into());
+        self
+    }
+
+    /// Removes a label.
+    pub fn remove_label(mut self, id: impl Into<LabelId>) -> Self {
+        self.remove_label_ids.push(id.into());
+        self
+    }
+
+    /// Whether there is nothing to add or remove.
+    pub fn is_empty(&self) -> bool {
+        self.add_label_ids.is_empty() && self.remove_label_ids.is_empty()
     }
 }
 
