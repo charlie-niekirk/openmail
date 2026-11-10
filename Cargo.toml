@@ -28,6 +28,10 @@ gpui-platform = { package = "gpui-pre-platform", version = "=0.3.12", features =
 ] }
 gpui-component = "=0.9.1"
 
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+
 [workspace.lints.rust]
 # Deny rather than forbid, so a crate that genuinely needs FFI (for example the
 # webview bridge) can opt out locally with a justified `#[allow(unsafe_code)]`.
