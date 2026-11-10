@@ -65,11 +65,17 @@ pub async fn logout(requested: Option<&str>) -> anyhow::Result<()> {
 
 /// A Gmail client for the account picked by `--account` (or the only one).
 pub fn gmail_client(requested: Option<&str>) -> anyhow::Result<GmailClient> {
+    account_client(requested).map(|(_, client)| client)
+}
+
+/// The account picked by `--account` (or the only one), and a Gmail client for it.
+pub fn account_client(requested: Option<&str>) -> anyhow::Result<(String, GmailClient)> {
     let config = oauth_config()?;
     let account = accounts::select(&AccountList::open_default()?.load()?, requested)?;
     tracing::debug!(%account, "using account");
-    let provider = RefreshingTokenProvider::new(OAuthClient::new(&config)?, keychain(), account);
-    Ok(GmailClient::new(Arc::new(provider))?)
+    let provider =
+        RefreshingTokenProvider::new(OAuthClient::new(&config)?, keychain(), account.clone());
+    Ok((account, GmailClient::new(Arc::new(provider))?))
 }
 
 /// Whether `err` means the account has to sign in again.

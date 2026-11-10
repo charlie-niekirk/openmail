@@ -47,6 +47,24 @@ pub enum Command {
         /// The thread ID, as printed by `threads`.
         thread_id: String,
     },
+    /// Download labels and thread metadata into the local store: the whole
+    /// Inbox, then older mail back to a cutoff. Interrupted syncs resume.
+    Sync {
+        /// How many days of mail outside the Inbox to sync.
+        #[arg(
+            long,
+            default_value_t = 90,
+            value_parser = clap::value_parser!(u32).range(1..),
+            conflicts_with = "all"
+        )]
+        days: u32,
+        /// Sync the whole mailbox instead of the last `--days`.
+        #[arg(long)]
+        all: bool,
+        /// Also fetch the bodies of the N newest Inbox messages.
+        #[arg(long, value_name = "N")]
+        prefetch: Option<usize>,
+    },
 }
 
 #[cfg(test)]
@@ -174,8 +192,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_sync() {
+        let cli = parse(&["sync"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Sync {
+                days: 90,
+                all: false,
+                prefetch: None,
+            }
+        );
+
+        let cli = parse(&["sync", "--days", "7", "--prefetch", "50"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Sync {
+                days: 7,
+                all: false,
+                prefetch: Some(50),
+            }
+        );
+
+        let cli = parse(&["sync", "--all"]).unwrap();
+        assert!(matches!(cli.command, Command::Sync { all: true, .. }));
+    }
+
+    #[test]
+    fn sync_rejects_zero_days_and_days_with_all() {
+        let err = parse(&["sync", "--days", "0"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        let err = parse(&["sync", "--days", "7", "--all"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
     fn rejects_unknown_commands() {
-        let err = parse(&["sync"]).unwrap_err();
+        let err = parse(&["frobnicate"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 }
