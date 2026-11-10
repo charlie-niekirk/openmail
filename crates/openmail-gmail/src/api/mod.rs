@@ -15,7 +15,7 @@ mod quota;
 mod retry;
 
 pub use crate::auth::{TokenError, TokenFuture, TokenProvider};
-pub use batch::MAX_BATCH_SIZE;
+pub use batch::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE};
 pub use client::{ClientStats, GmailClient, GmailClientBuilder, default_http_client};
 pub use error::{Error, QuotaKind, Result};
 pub use models::{

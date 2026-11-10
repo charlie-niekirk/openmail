@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
+use futures_util::{StreamExt as _, stream};
 use openmail_core::{MessageId, ThreadId};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::{Method, StatusCode};
@@ -24,6 +25,14 @@ use super::{ApiMessage, ApiThread, Error, GmailClient, MessageFormat, Result, Th
 /// The most calls Gmail accepts in one batch. (The API allows 100, but Gmail
 /// rate-limits batches larger than 50.)
 pub const MAX_BATCH_SIZE: usize = 50;
+
+/// Calls per batch by default. Gmail works through a batch's calls slowly
+/// and throttles large batches ("too many concurrent requests for user"), so
+/// several small batches in flight beat one large one.
+pub const DEFAULT_BATCH_SIZE: usize = 10;
+
+/// Batches in flight at once by default.
+pub const DEFAULT_BATCH_CONCURRENCY: usize = 4;
 
 /// One call inside a batch: a method on a `users/me` resource.
 #[derive(Debug, Clone)]
@@ -104,23 +113,33 @@ impl GmailClient {
         self.batch(requests).await
     }
 
-    /// Sends `requests` in batches of at most [`MAX_BATCH_SIZE`], one batch at
-    /// a time, and decodes each successful response as `T`.
+    /// Sends `requests` in batches of the client's batch size, with up to its
+    /// batch concurrency in flight, and decodes each successful response as
+    /// `T`. Results come back in the order of `requests`.
     ///
     /// Each batch is charged the quota units of all its calls before it is
     /// sent. Calls that fail with a retryable status (429, rate-limit 403, 5xx)
     /// are resent in a smaller batch after a backoff, per the client's
     /// [`RetryPolicy`](super::RetryPolicy). A `401` refreshes the token once per batch and
     /// resends the calls it rejected. Other failures become that item's `Err`.
-    pub(crate) async fn batch<T: DeserializeOwned>(
+    pub(crate) async fn batch<T: DeserializeOwned + Send>(
         &self,
         requests: Vec<BatchRequest>,
     ) -> Result<Vec<Result<T>>> {
         let mut results: Vec<Option<Result<T>>> = requests.iter().map(|_| None).collect();
         let indices: Vec<usize> = (0..requests.len()).collect();
-        for chunk in indices.chunks(MAX_BATCH_SIZE) {
-            self.run_batch(&requests, chunk.to_vec(), &mut results)
-                .await?;
+        let (size, concurrency) = self.batch_settings();
+        // Owned chunks: a stream over borrowed slices would make callers'
+        // futures not `Send` (a higher-ranked lifetime limitation).
+        let chunks: Vec<Vec<usize>> = indices.chunks(size).map(<[usize]>::to_vec).collect();
+        let requests = &requests;
+        let mut batches = stream::iter(chunks)
+            .map(|chunk| self.run_batch(requests, chunk))
+            .buffer_unordered(concurrency);
+        while let Some(batch) = batches.next().await {
+            for (index, result) in batch? {
+                results[index] = Some(result);
+            }
         }
         Ok(results
             .into_iter()
@@ -136,13 +155,13 @@ impl GmailClient {
     }
 
     /// Sends the `pending` requests as one batch, retrying failed items until
-    /// each has a result in `results`.
+    /// each has a result, and returns them by request index.
     async fn run_batch<T: DeserializeOwned>(
         &self,
         requests: &[BatchRequest],
         mut pending: Vec<usize>,
-        results: &mut [Option<Result<T>>],
-    ) -> Result<()> {
+    ) -> Result<Vec<(usize, Result<T>)>> {
+        let mut results = Vec::with_capacity(pending.len());
         let mut retrier = Retrier::new(*self.retry_policy());
         let mut refreshed = false;
 
@@ -163,14 +182,19 @@ impl GmailClient {
             let mut retry_after: Option<Duration> = None;
             for (index, response) in pending.iter().copied().zip(responses) {
                 let Some(response) = response else {
-                    results[index] = Some(Err(Error::InvalidResponse(format!(
-                        "batch response had no part for item {index}"
-                    ))));
+                    results.push((
+                        index,
+                        Err(Error::InvalidResponse(format!(
+                            "batch response had no part for item {index}"
+                        ))),
+                    ));
                     continue;
                 };
                 if response.status.is_success() {
-                    results[index] =
-                        Some(serde_json::from_slice(&response.body).map_err(Into::into));
+                    results.push((
+                        index,
+                        serde_json::from_slice(&response.body).map_err(Into::into),
+                    ));
                     continue;
                 }
                 if response.status == StatusCode::UNAUTHORIZED && !refreshed {
@@ -189,7 +213,7 @@ impl GmailClient {
                     retry_after = retry_after.max(response.retry_after);
                     retryable.push((index, failure.error));
                 } else {
-                    results[index] = Some(Err(failure.error));
+                    results.push((index, Err(failure.error)));
                 }
             }
 
@@ -208,15 +232,17 @@ impl GmailClient {
                     retry.extend(retryable.iter().map(|(index, _)| *index));
                     retry.sort_unstable();
                 } else {
-                    for (index, error) in retryable {
-                        results[index] = Some(Err(error));
-                    }
+                    results.extend(
+                        retryable
+                            .into_iter()
+                            .map(|(index, error)| (index, Err(error))),
+                    );
                 }
             }
 
             self.count(retry.len(), rate_limited_items);
             if retry.is_empty() {
-                return Ok(());
+                return Ok(results);
             }
             tracing::debug!(
                 items = retry.len(),

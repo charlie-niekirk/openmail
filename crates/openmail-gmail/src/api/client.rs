@@ -9,6 +9,7 @@ use reqwest::{Method, RequestBuilder, Response, StatusCode, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use super::batch::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE};
 use super::error::{Error, Result, classify};
 use super::quota::{self, QuotaLimiter};
 use super::retry::Retrier;
@@ -35,6 +36,8 @@ struct Inner {
     tokens: Arc<dyn TokenProvider>,
     retry: RetryPolicy,
     quota: Option<QuotaLimiter>,
+    batch_size: usize,
+    batch_concurrency: usize,
     retries: AtomicU64,
     rate_limited: AtomicU64,
 }
@@ -76,6 +79,8 @@ impl GmailClient {
             http: None,
             retry: RetryPolicy::default(),
             quota: Some(QuotaLimit::default()),
+            batch_size: DEFAULT_BATCH_SIZE,
+            batch_concurrency: DEFAULT_BATCH_CONCURRENCY,
         }
     }
 
@@ -107,6 +112,11 @@ impl GmailClient {
 
     pub(crate) fn retry_policy(&self) -> &RetryPolicy {
         &self.inner.retry
+    }
+
+    /// Calls per batch, and batches in flight at once.
+    pub(crate) fn batch_settings(&self) -> (usize, usize) {
+        (self.inner.batch_size, self.inner.batch_concurrency)
     }
 
     /// How many requests have been retried, and rate-limited, so far.
@@ -296,6 +306,8 @@ pub struct GmailClientBuilder {
     http: Option<reqwest::Client>,
     retry: RetryPolicy,
     quota: Option<QuotaLimit>,
+    batch_size: usize,
+    batch_concurrency: usize,
 }
 
 impl GmailClientBuilder {
@@ -325,6 +337,21 @@ impl GmailClientBuilder {
         self
     }
 
+    /// Sets how many calls go in one batch request (1 to [`MAX_BATCH_SIZE`];
+    /// [`DEFAULT_BATCH_SIZE`] by default).
+    pub fn batch_size(mut self, size: usize) -> Self {
+        self.batch_size = size.clamp(1, MAX_BATCH_SIZE);
+        self
+    }
+
+    /// Sets how many batch requests one batched call keeps in flight at once
+    /// (at least 1; [`DEFAULT_BATCH_CONCURRENCY`] by default). The quota
+    /// limiter still caps the overall rate.
+    pub fn batch_concurrency(mut self, concurrency: usize) -> Self {
+        self.batch_concurrency = concurrency.max(1);
+        self
+    }
+
     /// Builds the client.
     pub fn build(self) -> Result<GmailClient> {
         let base_url = match self.base_url {
@@ -347,6 +374,8 @@ impl GmailClientBuilder {
                 tokens: self.tokens,
                 retry: self.retry,
                 quota: self.quota.map(QuotaLimiter::new),
+                batch_size: self.batch_size,
+                batch_concurrency: self.batch_concurrency,
                 retries: AtomicU64::new(0),
                 rate_limited: AtomicU64::new(0),
             }),

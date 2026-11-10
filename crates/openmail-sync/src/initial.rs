@@ -55,8 +55,10 @@ pub struct InitialSyncConfig {
     ///
     /// Fixed when a sync starts: a resumed sync keeps the cutoff it started with.
     pub cutoff: Cutoff,
-    /// Threads per `threads.list` page. Each page is fetched in batches of
-    /// [`MAX_BATCH_SIZE`] and written in one transaction.
+    /// Threads per `threads.list` page. Each page's metadata is fetched with
+    /// the client's batch size and concurrency (see
+    /// [`GmailClientBuilder::batch_size`](openmail_gmail::api::GmailClientBuilder::batch_size))
+    /// and written in one transaction.
     pub page_size: u32,
     /// Fetch the bodies of this many of the newest Inbox messages after the
     /// Inbox is synced. `None` (the default) fetches no bodies.

@@ -8,7 +8,8 @@ use common::batch::{BATCH, BatchResponder, Call, Part, error_json};
 use common::{fast_retries, setup, setup_with};
 use openmail_core::{MessageId, ThreadId};
 use openmail_gmail::api::{
-    ClientStats, Error, GmailClient, MAX_BATCH_SIZE, MessageFormat, QuotaLimit, ThreadFormat,
+    ClientStats, DEFAULT_BATCH_SIZE, Error, GmailClient, MAX_BATCH_SIZE, MessageFormat, QuotaLimit,
+    ThreadFormat,
 };
 use reqwest::StatusCode;
 use wiremock::matchers::{method, path};
@@ -168,9 +169,44 @@ async fn mixed_success_and_failure_are_reported_per_item() {
     assert!(results[4].is_ok());
 }
 
+/// A client with this batch size and concurrency, fast retries and no quota
+/// limit.
+async fn batching_client(size: usize, concurrency: usize) -> (MockServer, GmailClient) {
+    let server = MockServer::start().await;
+    let client = GmailClient::builder(std::sync::Arc::new(common::TestTokens::default()))
+        .base_url(reqwest::Url::parse(&server.uri()).unwrap())
+        .retry_policy(fast_retries(3))
+        .quota_limit(None)
+        .batch_size(size)
+        .batch_concurrency(concurrency)
+        .build()
+        .unwrap();
+    (server, client)
+}
+
+#[tokio::test]
+async fn inputs_are_split_into_batches_of_the_default_size() {
+    let (server, client, _) = setup().await;
+    let responder = BatchResponder::new(|_, part| (200, message_json(part)));
+    mount(&server, &responder).await;
+
+    let ids = message_ids(3 * DEFAULT_BATCH_SIZE + 5);
+    let results = client
+        .get_messages(&ids, MessageFormat::Minimal, &[])
+        .await
+        .unwrap();
+
+    let mut sizes: Vec<_> = responder.calls().iter().map(|c| c.parts.len()).collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [5, 10, 10, 10]);
+    // Batches finish in any order; results keep the input order.
+    let got: Vec<_> = results.into_iter().map(|r| r.unwrap().id).collect();
+    assert_eq!(got, ids);
+}
+
 #[tokio::test]
 async fn large_inputs_are_split_into_batches_of_fifty() {
-    let (server, client, _) = setup().await;
+    let (server, client) = batching_client(MAX_BATCH_SIZE, 1).await;
     let responder = BatchResponder::new(|_, part| (200, message_json(part)));
     mount(&server, &responder).await;
 
@@ -370,6 +406,7 @@ async fn limited_client(burst: u32) -> (MockServer, GmailClient) {
             units_per_second: 1000,
             burst,
         }))
+        .batch_size(MAX_BATCH_SIZE)
         .build()
         .unwrap();
     (server, client)
@@ -416,4 +453,71 @@ async fn requests_within_the_burst_are_not_delayed_by_the_limiter() {
         .await
         .unwrap();
     assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+/// Delays every batch response.
+struct Delayed(BatchResponder, Duration);
+
+impl wiremock::Respond for Delayed {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        self.0.respond(request).set_delay(self.1)
+    }
+}
+
+#[tokio::test]
+async fn several_batches_are_in_flight_at_once() {
+    let (server, client) = batching_client(2, 3).await;
+    let responder = BatchResponder::new(|_, part| (200, message_json(part)));
+    Mock::given(method("POST"))
+        .and(path(BATCH))
+        .respond_with(Delayed(responder.clone(), Duration::from_millis(300)))
+        .mount(&server)
+        .await;
+
+    // Six batches of two, three at a time: two rounds of 300 ms, not six.
+    let started = Instant::now();
+    let results = client
+        .get_messages(&message_ids(12), MessageFormat::Minimal, &[])
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(600), "{elapsed:?}");
+    assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+    assert_eq!(responder.calls().len(), 6);
+    assert!(results.iter().all(Result::is_ok));
+}
+
+#[tokio::test]
+async fn rate_limited_items_are_retried_without_holding_up_other_batches() {
+    let (server, client) = batching_client(2, 2).await;
+    let first_m1 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let responder = BatchResponder::new(move |_, part| {
+        let id = resource_id(part);
+        if id == "m1" && first_m1.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            (429, error_json(429, "rateLimitExceeded"))
+        } else {
+            (200, message_json(part))
+        }
+    });
+    mount(&server, &responder).await;
+
+    let ids = message_ids(6);
+    let results = client
+        .get_messages(&ids, MessageFormat::Minimal, &[])
+        .await
+        .unwrap();
+
+    let got: Vec<_> = results.into_iter().map(|r| r.unwrap().id).collect();
+    assert_eq!(got, ids);
+    // Three batches, plus m1 resent alone.
+    let mut calls: Vec<Vec<usize>> = responder.calls().iter().map(Call::ids).collect();
+    calls.sort();
+    assert_eq!(calls, [vec![0, 1], vec![1], vec![2, 3], vec![4, 5]]);
+    assert_eq!(
+        client.stats(),
+        ClientStats {
+            retries: 1,
+            rate_limited: 1
+        }
+    );
 }
