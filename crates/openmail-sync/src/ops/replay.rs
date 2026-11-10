@@ -282,7 +282,9 @@ impl OpsQueue {
                 release(store, &queued, units[n..].iter().flatten())?;
                 return Err(Error::Cancelled);
             };
-            let mut settle = |unit: &[usize], result| {
+            // Takes the store as an argument: a closure holding `&Store`
+            // across the `await` below would make the future not `Send`.
+            let mut settle = |store: &Store, unit: &[usize], result| {
                 self.settle(
                     store,
                     &queued,
@@ -293,14 +295,14 @@ impl OpsQueue {
                     on_event,
                 )
             };
-            let outcome = match settle(&ready, result) {
+            let outcome = match settle(store, &ready, result) {
                 // Gmail rejected several ops together: find the culprit by
                 // sending them one at a time.
                 Ok(true) => {
                     let mut outcome = Ok(false);
                     for &i in &ready {
                         let result = self.send(&queued, &[i]).await;
-                        outcome = settle(&[i], result);
+                        outcome = settle(store, &[i], result);
                         if outcome.is_err() {
                             break;
                         }
