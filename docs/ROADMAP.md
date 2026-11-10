@@ -37,7 +37,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
     titlebar.
   - Pin `gpui` and `gpui-component` to compatible revisions.
   - Must build in CI on all three OSes.
-- [ ] **0.5 Webview spike (risk check)** — `feat/0.5-webview-spike`
+- [x] **0.5 Webview spike (risk check)** — `feat/0.5-webview-spike`
   - Embed a `wry` child webview inside a GPUI window, positioned at a layout rect,
     showing static HTML. Check `gpui-component`'s webview feature first.
   - Prove it on macOS; record findings for Windows and Linux in `ARCHITECTURE.md`.

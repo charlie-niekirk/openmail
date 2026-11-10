@@ -1,8 +1,12 @@
 //! GPUI views, theme, keymap and the bridge between `MailService` events and UI state.
 
 mod main_window;
+mod message_body;
 
 pub use main_window::{MainWindow, main_window_options};
+pub use message_body::{
+    BODY_CSP, MessageBodyView, SAMPLE_NEWSLETTER, allows_navigation, body_document,
+};
 
 use gpui::{App, AppContext as _, Bounds, WindowHandle};
 use gpui_component::{Root, Theme};
