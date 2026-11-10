@@ -49,7 +49,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 - [x] **1.1 Core domain types** — `feat/1.1-core-types`
   - IDs, `Label` (system or user, colors, visibility), `Thread`, `Message`, `Address`,
     `Attachment`, `Draft`, and error types.
-- [ ] **1.2 OAuth2** ∥ — `feat/1.2-oauth`
+- [x] **1.2 OAuth2** ∥ — `feat/1.2-oauth`
   - Installed-app flow with PKCE and a loopback redirect on `127.0.0.1:<random>`;
     opens the system browser.
   - Token refresh; tokens stored in the OS keychain via `keyring`.
