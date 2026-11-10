@@ -10,7 +10,7 @@ use common::{
 };
 use openmail_core::{HistoryId, LabelId, MessageId, ThreadId};
 use openmail_gmail::api::{self, MinuteBudget, QuotaPacing};
-use openmail_store::Store;
+use openmail_store::{QuotaBudget, Store};
 use openmail_sync::{
     CancellationToken, Cutoff, Error, InitialSync, InitialSyncConfig, Phase, Progress,
 };
@@ -141,6 +141,8 @@ async fn full_run_syncs_labels_inbox_and_backfill() {
             rate_limited_requests: 0,
             // The test client has no quota limiter.
             units_per_second: None,
+            budget_per_minute: None,
+            spent_last_minute: None,
         }
     );
     // Counts grow page by page.
@@ -888,6 +890,52 @@ async fn a_rate_limit_burst_slows_the_client_without_pausing_the_sync() {
     );
     let rate = done.units_per_second.unwrap();
     assert!(rate < start, "{rate} vs {start}");
+    // The learned budget is saved for the next sync.
+    let learned = sync.store().quota_budget().unwrap().unwrap();
+    assert_eq!(Some(learned.budget), done.budget_per_minute);
+    assert_eq!(learned.units_per_minute, 60_000);
+}
+
+#[tokio::test]
+async fn a_saved_quota_budget_seeds_the_client() {
+    let (server, client) = setup_paced(fast_budget(), fast_retries()).await;
+    mount_all(&server).await;
+    let store = Store::open_in_memory().unwrap();
+    // Saved by an earlier sync under the same quota.
+    let saved = QuotaBudget {
+        budget: 30_000,
+        units_per_minute: 60_000,
+    };
+    store.set_quota_budget(Some(saved)).unwrap();
+
+    let mut sync = InitialSync::new(client.clone(), store, config());
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+    assert!(seen.iter().all(|p| p.budget_per_minute == Some(30_000)));
+    assert_eq!(done.budget_per_minute, Some(30_000));
+    assert!(done.spent_last_minute.unwrap() > 0);
+    assert_eq!(sync.store().quota_budget().unwrap(), Some(saved));
+
+    // One learned under another quota is not used, and is replaced.
+    let (server, client) = setup_paced(fast_budget(), fast_retries()).await;
+    mount_all(&server).await;
+    let store = Store::open_in_memory().unwrap();
+    store
+        .set_quota_budget(Some(QuotaBudget {
+            budget: 3_000,
+            units_per_minute: 6_000,
+        }))
+        .unwrap();
+    let mut sync = InitialSync::new(client, store, config());
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    assert_eq!(done.budget_per_minute, Some(48_000));
+    assert_eq!(
+        sync.store().quota_budget().unwrap(),
+        Some(QuotaBudget {
+            budget: 48_000,
+            units_per_minute: 60_000
+        })
+    );
 }
 
 #[tokio::test]

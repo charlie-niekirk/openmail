@@ -5,10 +5,10 @@ use std::future::Future;
 use openmail_core::{Label, LabelId, MessageId, SystemLabel, ThreadId};
 use openmail_gmail::GmailClient;
 use openmail_gmail::api::{
-    self, ApiThread, ListRequest, MAX_BATCH_SIZE, MessageFormat, ThreadFormat,
+    self, ApiThread, LearnedBudget, ListRequest, MAX_BATCH_SIZE, MessageFormat, ThreadFormat,
 };
 use openmail_mime::ParsedMessage;
-use openmail_store::{MessageBody, Store, SyncState};
+use openmail_store::{MessageBody, QuotaBudget, Store, SyncState};
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 use tokio_util::sync::CancellationToken;
@@ -130,9 +130,16 @@ pub struct Progress {
     pub retried_requests: u64,
     /// Requests and batch items Gmail rejected with a rate limit.
     pub rate_limited_requests: u64,
-    /// The quota units per second the client allows itself right now (it
-    /// adapts to Gmail's rate limiting unless fixed); `None` if unlimited.
+    /// The quota units per second the client paces itself to right now;
+    /// `None` if unlimited.
     pub units_per_second: Option<u32>,
+    /// The most quota units the client allows itself per trailing minute
+    /// (learned from Gmail's rate limiting unless the rate is fixed); `None`
+    /// if unlimited.
+    pub budget_per_minute: Option<u32>,
+    /// The quota units the client charged in the trailing minute, failed
+    /// attempts included; `None` if unlimited.
+    pub spent_last_minute: Option<u32>,
 }
 
 impl Progress {
@@ -153,11 +160,16 @@ impl Progress {
 /// Each page of threads is written in one transaction together with a
 /// checkpoint in `sync_state`, so a sync that fails or is cancelled continues
 /// from the next page when run again.
+///
+/// The client's learned quota budget is saved in the store as the sync goes,
+/// and a client that has not learned one yet starts at the saved one.
 #[derive(Debug)]
 pub struct InitialSync {
     client: GmailClient,
     store: Store,
     config: InitialSyncConfig,
+    /// The quota budget last saved in the store.
+    saved_budget: Option<QuotaBudget>,
 }
 
 impl InitialSync {
@@ -167,6 +179,7 @@ impl InitialSync {
             client,
             store,
             config,
+            saved_budget: None,
         }
     }
 
@@ -233,21 +246,33 @@ impl InitialSync {
                 retried_requests: now.retries - start.retries,
                 rate_limited_requests: now.rate_limited - start.rate_limited,
                 units_per_second: now.units_per_second,
+                budget_per_minute: now.budget_per_minute,
+                spent_last_minute: now.spent_last_minute,
                 ..report.clone()
             }
         };
         let mut progress = |report: &Progress| progress(&with_stats(report));
+        self.seed_budget()?;
         let mut report = Progress::default();
         let mut pauses = 0;
         let mut at_last_pause = report.advanced();
         let mut first = true;
         loop {
-            let err = match self
+            let result = self
                 .run_once(cancel, first, &mut report, &mut progress)
-                .await
-            {
-                Ok(()) => return Ok(with_stats(&report)),
-                Err(err) => err,
+                .await;
+            let saved = self.save_budget();
+            let err = match result {
+                Ok(()) => {
+                    saved?;
+                    return Ok(with_stats(&report));
+                }
+                Err(err) => {
+                    if let Err(save_err) = saved {
+                        tracing::warn!(%save_err, "could not save the quota budget");
+                    }
+                    err
+                }
             };
             first = false;
             if report.advanced() != at_last_pause {
@@ -430,6 +455,7 @@ impl InitialSync {
             report.messages += threads.iter().map(|(_, m)| m.len() as u64).sum::<u64>();
             report.skipped_threads += (listed.len() - threads.len()) as u64;
             report.deleted_threads += deleted;
+            self.save_budget()?;
             progress(report);
         }
         Ok(checkpoint)
@@ -496,6 +522,39 @@ impl InitialSync {
             })?;
             report.bodies += bodies.len() as u64;
             progress(report);
+        }
+        Ok(())
+    }
+
+    /// Starts the client at the quota budget saved by an earlier sync, unless
+    /// it has learned its own.
+    fn seed_budget(&mut self) -> Result<()> {
+        let Some(saved) = self.store.quota_budget()? else {
+            return Ok(());
+        };
+        self.saved_budget = Some(saved);
+        let seeded = self.client.seed_budget(LearnedBudget {
+            units_per_minute: saved.units_per_minute,
+            budget: saved.budget,
+        });
+        if seeded {
+            tracing::debug!(budget = saved.budget, "starting at the saved quota budget");
+        }
+        Ok(())
+    }
+
+    /// Saves the client's quota budget if it changed.
+    fn save_budget(&mut self) -> Result<()> {
+        let Some(learned) = self.client.learned_budget() else {
+            return Ok(());
+        };
+        let budget = QuotaBudget {
+            budget: learned.budget,
+            units_per_minute: learned.units_per_minute,
+        };
+        if self.saved_budget != Some(budget) {
+            self.store.set_quota_budget(Some(budget))?;
+            self.saved_budget = Some(budget);
         }
         Ok(())
     }
