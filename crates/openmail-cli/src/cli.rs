@@ -84,6 +84,18 @@ pub enum Command {
         )]
         batch_concurrency: Option<usize>,
     },
+    /// Keep the local store in sync until Ctrl-C: finish the initial sync if
+    /// needed, then poll Gmail's history, printing a line per poll.
+    Watch {
+        /// Seconds between polls.
+        #[arg(
+            long,
+            value_name = "S",
+            default_value_t = 30,
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        interval: u64,
+    },
 }
 
 #[cfg(test)]
@@ -261,6 +273,16 @@ mod tests {
             let err = parse(&["sync", "--batch-size", size]).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::ValueValidation, "{size}");
         }
+    }
+
+    #[test]
+    fn parses_watch() {
+        let cli = parse(&["watch"]).unwrap();
+        assert_eq!(cli.command, Command::Watch { interval: 30 });
+        let cli = parse(&["watch", "--interval", "5"]).unwrap();
+        assert_eq!(cli.command, Command::Watch { interval: 5 });
+        let err = parse(&["watch", "--interval", "0"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
     }
 
     #[test]

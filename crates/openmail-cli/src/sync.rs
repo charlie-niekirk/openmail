@@ -1,6 +1,7 @@
 //! `sync`: the initial sync into the account's local store.
 
 use std::io::Write as _;
+use std::path::PathBuf;
 
 use anyhow::Context as _;
 use openmail_core::{Account, AccountId};
@@ -16,16 +17,7 @@ pub async fn run(
     cutoff: Cutoff,
     prefetch: Option<usize>,
 ) -> anyhow::Result<()> {
-    let data_dir = DataDir::from_env_or_platform().context("could not find the data directory")?;
-    let id = AccountId::new(account);
-    let path = data_dir.account_database(&id)?;
-    let store = Store::open(&path)
-        .with_context(|| format!("could not open the store at {}", path.display()))?;
-    store.upsert_account(&Account {
-        id,
-        email: account.to_owned(),
-        display_name: None,
-    })?;
+    let (store, path) = open_store(account)?;
     if store.sync_state()?.backfill_complete {
         println!(
             "The initial sync of {account} is already complete ({}).",
@@ -34,14 +26,7 @@ pub async fn run(
         return Ok(());
     }
 
-    let cancel = CancellationToken::new();
-    let on_ctrl_c = cancel.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            on_ctrl_c.cancel();
-        }
-    });
-
+    let cancel = cancel_on_ctrl_c();
     let config = InitialSyncConfig {
         cutoff,
         prefetch_inbox_bodies: prefetch,
@@ -77,6 +62,34 @@ pub async fn run(
     }
 }
 
+/// Opens (creating if needed) the local store of `account`, and returns it
+/// with its path.
+pub fn open_store(account: &str) -> anyhow::Result<(Store, PathBuf)> {
+    let data_dir = DataDir::from_env_or_platform().context("could not find the data directory")?;
+    let id = AccountId::new(account);
+    let path = data_dir.account_database(&id)?;
+    let store = Store::open(&path)
+        .with_context(|| format!("could not open the store at {}", path.display()))?;
+    store.upsert_account(&Account {
+        id,
+        email: account.to_owned(),
+        display_name: None,
+    })?;
+    Ok((store, path))
+}
+
+/// A token cancelled by Ctrl-C.
+pub fn cancel_on_ctrl_c() -> CancellationToken {
+    let cancel = CancellationToken::new();
+    let on_ctrl_c = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            on_ctrl_c.cancel();
+        }
+    });
+    cancel
+}
+
 /// One status line, such as `Inbox: 120 threads, 130 messages (4 unchanged)`.
 pub fn progress_line(progress: &Progress) -> String {
     let phase = match progress.phase {
@@ -98,6 +111,9 @@ pub fn progress_line(progress: &Progress) -> String {
     }
     if progress.bodies > 0 {
         line.push_str(&format!(", {} bodies", progress.bodies));
+    }
+    if progress.deleted_threads > 0 {
+        line.push_str(&format!(", {} gone", progress.deleted_threads));
     }
     if progress.retried_requests > 0 {
         line.push_str(&format!(

@@ -10,8 +10,10 @@ mod show;
 mod sync;
 mod text;
 mod threads;
+mod watch;
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Parser;
 use openmail_sync::Cutoff;
@@ -101,6 +103,10 @@ async fn run(cli: Cli, offset: UtcOffset) -> anyhow::Result<()> {
             })?;
             let cutoff = if all { Cutoff::All } else { Cutoff::Days(days) };
             sync::run(client, &account, cutoff, prefetch).await
+        }
+        Command::Watch { interval } => {
+            let (account, client) = session::account_client(account)?;
+            watch::run(client, &account, Duration::from_secs(interval), offset).await
         }
     }
 }
