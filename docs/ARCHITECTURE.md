@@ -339,7 +339,8 @@ serves views over every thread.
    each newest-first down to a cutoff (90 days by default; Gmail's `after:`
    operator; older threads are left for on-demand fetching), in
    `threads.list` pages of 100. Each page's thread metadata (`format=metadata`
-   with From, To, Cc, Subject, Date and Message-ID) is fetched in batches of 50
+   with From, To, Cc, Subject, Date and Message-ID) is fetched in batches of 10,
+   four in flight (Gmail works through a large batch slowly and throttles it),
    and written in one transaction together with a JSON checkpoint (phase, page
    token, cutoff) in `sync_state.backfill_cursor`, so a failed or cancelled sync
    resumes at the next page. Threads already stored with the same history ID are
@@ -354,7 +355,9 @@ serves views over every thread.
    any minute) before sending it. Rate-limit responses are retried on their own
    budget: delays of up to 60 s, three minutes in all, honouring `Retry-After`.
    If a rate limit still gets through, `InitialSync` reports the wait, pauses
-   and resumes from its checkpoint within the same run.
+   and resumes from its checkpoint within the same run. Batches log their size,
+   latency and failures at debug level, and the client counts retried and
+   rate-limited requests (`GmailClient::stats`) for progress reports.
 2. **Incremental sync.** Poll `history.list` from the stored `historyId` — about every
    30 s while the window is focused, less often when idle — and apply added/deleted
    messages and added/removed labels. If the `historyId` has expired (404), do a full
