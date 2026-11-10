@@ -66,8 +66,9 @@ pub fn format_thread(thread_id: &str, messages: &[ParsedMessage], offset: UtcOff
 pub fn format_message(message: &ParsedMessage, offset: UtcOffset) -> String {
     let headers = &message.headers;
     let mut out = String::new();
+    // Wide enough for the longest name, `Reply-To:`, plus a space.
     let mut header = |name: &str, value: &str| {
-        let _ = writeln!(out, "{:<9}{value}", format!("{name}:"));
+        let _ = writeln!(out, "{:<10}{value}", format!("{name}:"));
     };
     for (name, addresses) in [
         ("From", &headers.from),
@@ -146,6 +147,7 @@ mod tests {
 From: Ada Lovelace <ada@example.com>\r
 To: Grace Hopper <grace@example.com>, bob@example.com\r
 Cc: \"Lovelace, Ada\" <ada.l@example.com>\r
+Reply-To: plans@example.com\r
 Subject: Launch plan\r
 Date: Tue, 10 Nov 2026 14:03:00 +0000\r
 Message-ID: <plan@example.com>\r
@@ -185,11 +187,12 @@ Content-Type: text/html; charset=utf-8\r
         assert_eq!(
             format_message(&parse(WITH_ATTACHMENT), UtcOffset::UTC),
             "\
-From:    Ada Lovelace <ada@example.com>
-To:      Grace Hopper <grace@example.com>, bob@example.com
-Cc:      \"Lovelace, Ada\" <ada.l@example.com>
-Date:    2026-11-10 14:03
-Subject: Launch plan
+From:     Ada Lovelace <ada@example.com>
+To:       Grace Hopper <grace@example.com>, bob@example.com
+Cc:       \"Lovelace, Ada\" <ada.l@example.com>
+Reply-To: plans@example.com
+Date:     2026-11-10 14:03
+Subject:  Launch plan
 
 Here's the latest draft.
 
@@ -207,10 +210,10 @@ Attachments:
         assert!(
             out.starts_with(
                 "\
-From:    news@example.com
-To:      grace@example.com
-Date:    (no date)
-Subject: (no subject)
+From:     news@example.com
+To:       grace@example.com
+Date:     (no date)
+Subject:  (no subject)
 
 "
             ),
