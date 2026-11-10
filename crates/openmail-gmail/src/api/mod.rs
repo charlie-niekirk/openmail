@@ -4,6 +4,7 @@
 //! JSON resources. Those convert into `openmail-core` domain types.
 
 mod client;
+mod convert;
 mod endpoints;
 mod error;
 mod models;
