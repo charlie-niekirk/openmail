@@ -1,0 +1,56 @@
+---
+source: crates/openmail-mime/tests/build.rs
+expression: normalize_boundaries(&message.to_rfc5322())
+---
+From: "Ada Lovelace" <ada@example.com>
+Subject: =?utf-8?B?Q2Fmw6kg4piVIG1lbnU=?=
+Date: Tue, 7 Jan 2025 08:30:00 +0000
+Message-ID: <fixed-1@example.com>
+To: "Charles Babbage" <charles@example.org>
+MIME-Version: 1.0
+Content-Type: multipart/mixed;
+ boundary="BOUNDARY-0"
+
+--BOUNDARY-0
+Content-Type: multipart/alternative;
+ boundary="BOUNDARY-1"
+
+--BOUNDARY-1
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Charles,
+
+See the notes.
+
+Ada
+
+--BOUNDARY-1
+Content-Type: multipart/related;
+ boundary="BOUNDARY-2"
+
+--BOUNDARY-2
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+<p>Menu: <img src="cid:menu@example.com"></p>
+--BOUNDARY-2
+Content-Type: image/gif
+Content-Disposition: inline
+Content-ID: <menu@example.com>
+Content-Transfer-Encoding: base64
+
+R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7
+
+--BOUNDARY-2--
+
+--BOUNDARY-1--
+
+--BOUNDARY-0
+Content-Type: application/pdf
+Content-Disposition: attachment; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJSVFT0YK
+
+--BOUNDARY-0--

@@ -1,0 +1,67 @@
+---
+source: crates/openmail-mime/tests/parse.rs
+expression: message
+---
+ParsedMessage {
+    headers: ParsedHeaders {
+        from: [
+            Address {
+                name: Some(
+                    "Example News",
+                ),
+                email: "digest@news.example.com",
+            },
+        ],
+        to: [
+            Address {
+                name: None,
+                email: "reader@example.org",
+            },
+        ],
+        cc: [],
+        bcc: [],
+        reply_to: [],
+        subject: Some(
+            "Weekly digest",
+        ),
+        date: Some(
+            2025-01-10 6:00:00.0 +00:00:00,
+        ),
+        message_id: Some(
+            "digest-42@news.example.com",
+        ),
+        in_reply_to: [],
+        references: [],
+    },
+    text: Some(
+        "Weekly digest\r\n\r\nThree new posts this week.\r\n\r\nUnsubscribe: https://news.example.com/unsubscribe\r\n",
+    ),
+    html: Some(
+        "<!DOCTYPE html>\r\n<html><head><meta charset=\"utf-8\"><title>Weekly digest</title></head>\r\n<body>\r\n<img src=\"cid:logo@news.example.com\" alt=\"Example News\" width=\"1\" height=\"1\">\r\n<h1>Weekly digest</h1>\r\n<p>Three new posts this week.</p>\r\n<img src=\"cid:chart.gif\" alt=\"Chart\">\r\n<p><a href=\"https://news.example.com/unsubscribe\">Unsubscribe</a></p>\r\n</body></html>\r\n",
+    ),
+    inline: {
+        "chart.gif": ParsedPart {
+            part_id: "1.2",
+            mime_type: "image/gif",
+            filename: None,
+            content_id: Some(
+                "chart.gif",
+            ),
+            is_inline: true,
+            size: 42,
+        },
+        "logo@news.example.com": ParsedPart {
+            part_id: "1.1",
+            mime_type: "image/gif",
+            filename: Some(
+                "logo.gif",
+            ),
+            content_id: Some(
+                "logo@news.example.com",
+            ),
+            is_inline: true,
+            size: 42,
+        },
+    },
+    attachments: [],
+}

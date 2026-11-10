@@ -1,0 +1,77 @@
+---
+source: crates/openmail-mime/tests/parse.rs
+expression: message
+---
+ParsedMessage {
+    headers: ParsedHeaders {
+        from: [
+            Address {
+                name: Some(
+                    "Billing",
+                ),
+                email: "billing@example.com",
+            },
+        ],
+        to: [
+            Address {
+                name: Some(
+                    "Ada Lovelace",
+                ),
+                email: "ada@example.com",
+            },
+        ],
+        cc: [],
+        bcc: [],
+        reply_to: [],
+        subject: Some(
+            "Your invoice",
+        ),
+        date: Some(
+            2025-01-13 12:00:00.0 +00:00:00,
+        ),
+        message_id: Some(
+            "invoice-7@billing.example.com",
+        ),
+        in_reply_to: [],
+        references: [],
+    },
+    text: Some(
+        "Your invoice and usage report are attached.\r\n",
+    ),
+    html: None,
+    inline: {},
+    attachments: [
+        ParsedPart {
+            part_id: "1",
+            mime_type: "application/pdf",
+            filename: Some(
+                "invoice.pdf",
+            ),
+            content_id: None,
+            is_inline: false,
+            size: 58,
+        },
+        ParsedPart {
+            part_id: "2",
+            mime_type: "text/csv",
+            filename: Some(
+                "résumé d'usage.csv",
+            ),
+            content_id: None,
+            is_inline: false,
+            size: 35,
+        },
+        ParsedPart {
+            part_id: "3",
+            mime_type: "image/gif",
+            filename: Some(
+                "stamp.gif",
+            ),
+            content_id: Some(
+                "stamp@billing.example.com",
+            ),
+            is_inline: false,
+            size: 42,
+        },
+    ],
+}

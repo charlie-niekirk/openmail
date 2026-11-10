@@ -58,6 +58,13 @@ tokio = { version = "1.54.1", default-features = false }
 url = "2.5.8"
 wiremock = "0.6.5"
 
+# MIME parsing and building. `full_encoding` adds encoding_rs for the legacy
+# multi-byte charsets (ISO-2022-JP, Shift_JIS, GB18030, Big5, …).
+mail-parser = { version = "1.0.1", features = ["full_encoding"] }
+# Without `gethostname`: Message-IDs are generated on the sender's domain instead.
+mail-builder = { version = "2.0.1", default-features = false }
+insta = "1.49.0"
+
 [workspace.lints.rust]
 # Deny rather than forbid, so a crate that genuinely needs FFI (for example the
 # webview bridge) can opt out locally with a justified `#[allow(unsafe_code)]`.

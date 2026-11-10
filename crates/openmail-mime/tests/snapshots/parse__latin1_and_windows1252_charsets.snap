@@ -1,0 +1,46 @@
+---
+source: crates/openmail-mime/tests/parse.rs
+expression: message
+---
+ParsedMessage {
+    headers: ParsedHeaders {
+        from: [
+            Address {
+                name: Some(
+                    "René Durand",
+                ),
+                email: "rene@example.fr",
+            },
+        ],
+        to: [
+            Address {
+                name: Some(
+                    "Renée Martin",
+                ),
+                email: "renee@example.fr",
+            },
+        ],
+        cc: [],
+        bcc: [],
+        reply_to: [],
+        subject: Some(
+            "Réunion déplacée",
+        ),
+        date: Some(
+            2025-01-14 8:15:00.0 +01:00:00,
+        ),
+        message_id: Some(
+            "charset-1@mail.example.fr",
+        ),
+        in_reply_to: [],
+        references: [],
+    },
+    text: Some(
+        "Bonjour Renée,\r\n\r\nLa réunion est déplacée à 14 h. Ça te va ?\r\n",
+    ),
+    html: Some(
+        "<p>Price: €12 – “quoted”</p>\r\n",
+    ),
+    inline: {},
+    attachments: [],
+}

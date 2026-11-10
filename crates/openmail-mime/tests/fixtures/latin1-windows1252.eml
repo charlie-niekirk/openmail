@@ -1,0 +1,23 @@
+Message-ID: <charset-1@mail.example.fr>
+Date: Tue, 14 Jan 2025 08:15:00 +0100
+From: =?ISO-8859-1?Q?Ren=E9_Durand?= <rene@example.fr>
+To: =?iso-8859-1?q?Ren=E9e_Martin?= <renee@example.fr>
+Subject: =?ISO-8859-1?Q?R=E9union_d=E9plac=E9e?=
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=ISO-8859-1
+Content-Transfer-Encoding: quoted-printable
+
+Bonjour Ren=E9e,
+
+La r=E9union est d=E9plac=E9e =E0 14 h. =C7a te va ?
+
+--b1
+Content-Type: text/html; charset=windows-1252
+Content-Transfer-Encoding: 8bit
+
+<p>Price: €12 – “quoted”</p>
+
+--b1--
