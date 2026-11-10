@@ -14,8 +14,8 @@ use oauth2::basic::{
 use oauth2::{
     AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet,
     EndpointSet, ExtraTokenFields, HttpRequest, HttpResponse, PkceCodeChallenge, RedirectUrl,
-    RequestTokenError, Scope, StandardRevocableToken, StandardTokenResponse, TokenResponse,
-    TokenUrl,
+    RefreshToken, RequestTokenError, Scope, StandardRevocableToken, StandardTokenResponse,
+    TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -73,7 +73,14 @@ impl fmt::Debug for Authorization {
     }
 }
 
-/// An OAuth client for one Google OAuth client ID: signs users in.
+/// A refreshed access token, and the new refresh token if Google rotated it.
+pub(crate) struct Refreshed {
+    pub(crate) access_token: AccessToken,
+    pub(crate) refresh_token: Option<String>,
+}
+
+/// An OAuth client for one Google OAuth client ID: signs users in and refreshes
+/// their access tokens.
 #[derive(Clone)]
 pub struct OAuthClient {
     oauth: GoogleClient,
@@ -193,6 +200,27 @@ impl OAuthClient {
             email,
             refresh_token,
             access_token: access_token(&response),
+        })
+    }
+
+    /// Exchanges a refresh token for a new access token.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::InvalidGrant`] if the refresh token was revoked or expired,
+    /// otherwise a token endpoint error.
+    pub(crate) async fn refresh(&self, refresh_token: &str) -> Result<Refreshed, AuthError> {
+        let refresh_token = RefreshToken::new(refresh_token.to_owned());
+        let http = self.http_client();
+        let response = self
+            .oauth
+            .exchange_refresh_token(&refresh_token)
+            .request_async(&http)
+            .await
+            .map_err(token_error)?;
+        Ok(Refreshed {
+            access_token: access_token(&response),
+            refresh_token: response.refresh_token().map(|t| t.secret().clone()),
         })
     }
 

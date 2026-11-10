@@ -49,6 +49,9 @@ pub enum AuthError {
     /// The ID token was missing or did not carry a verified email address.
     #[error("could not read the account email from the ID token: {0}")]
     InvalidIdToken(String),
+    /// No refresh token is stored for the account.
+    #[error("{0} is not signed in")]
+    NotSignedIn(String),
     /// The token store (usually the OS keychain) could not be read or written.
     #[error("token store failed: {0}")]
     TokenStore(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -57,6 +60,9 @@ pub enum AuthError {
 impl AuthError {
     /// Whether the user has to sign in again to recover.
     pub fn requires_sign_in(&self) -> bool {
-        matches!(self, Self::InvalidGrant(_) | Self::MissingRefreshToken)
+        matches!(
+            self,
+            Self::InvalidGrant(_) | Self::MissingRefreshToken | Self::NotSignedIn(_)
+        )
     }
 }

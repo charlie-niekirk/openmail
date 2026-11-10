@@ -7,17 +7,50 @@
 //! While the app is unverified by Google, anyone can bring their own OAuth client:
 //! the client ID (and the optional secret Google issues to desktop clients) comes
 //! from [`OAuthConfig`], usually built with [`OAuthConfig::from_env`].
+//!
+//! The refresh token is kept in a [`TokenStore`] (the OS keychain in the app), keyed
+//! by the account's email address. Access tokens live only in memory: a
+//! [`TokenProvider`] hands the REST client a valid one, refreshing it as needed.
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), openmail_gmail::auth::AuthError> {
+//! use std::sync::Arc;
+//!
+//! use openmail_gmail::auth::{
+//!     KeyringTokenStore, OAuthClient, OAuthConfig, RefreshingTokenProvider, TokenProvider,
+//! };
+//!
+//! let client = OAuthClient::new(&OAuthConfig::from_env()?)?;
+//! let store = Arc::new(KeyringTokenStore::new());
+//!
+//! // First run: sign in through the browser and keep the refresh token.
+//! let authorization = client.sign_in().await?;
+//! let provider =
+//!     RefreshingTokenProvider::from_authorization(client.clone(), store.clone(), authorization)
+//!         .await?;
+//!
+//! // Later runs: pick the account up from the store.
+//! let provider = RefreshingTokenProvider::new(client, store, provider.account());
+//! let token = provider.access_token().await?;
+//! println!("Authorization: Bearer {}", token.secret());
+//! # Ok(())
+//! # }
+//! ```
 
 mod client;
 mod config;
 mod error;
 mod loopback;
+mod provider;
 mod store;
 mod token;
 
 pub use client::{Authorization, OAuthClient};
 pub use config::{CLIENT_ID_ENV, CLIENT_SECRET_ENV, OAuthConfig};
 pub use error::AuthError;
+pub use provider::{
+    REFRESH_MARGIN, RefreshingTokenProvider, StaticTokenProvider, TokenFuture, TokenProvider,
+};
 pub use store::{KeyringTokenStore, MemoryTokenStore, TokenStore};
 pub use token::AccessToken;
 
