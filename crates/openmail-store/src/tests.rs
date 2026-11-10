@@ -6,7 +6,7 @@ use openmail_core::{
 };
 use time::OffsetDateTime;
 
-use crate::{DataDir, Error, MessageBody, Store, SyncState};
+use crate::{DataDir, Error, MessageBody, QuotaBudget, Store, SyncState};
 
 fn date(secs: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(secs).unwrap()
@@ -271,6 +271,23 @@ fn sync_state_round_trips() {
     };
     store.set_sync_state(&state).unwrap();
     assert_eq!(store.sync_state().unwrap(), state);
+}
+
+#[test]
+fn the_quota_budget_round_trips_apart_from_the_sync_state() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(store.quota_budget().unwrap(), None);
+    let budget = QuotaBudget {
+        budget: 2_340,
+        units_per_minute: 6_000,
+    };
+    store.set_quota_budget(Some(budget)).unwrap();
+    assert_eq!(store.quota_budget().unwrap(), Some(budget));
+    // Resetting the sync state keeps it.
+    store.set_sync_state(&SyncState::default()).unwrap();
+    assert_eq!(store.quota_budget().unwrap(), Some(budget));
+    store.set_quota_budget(None).unwrap();
+    assert_eq!(store.quota_budget().unwrap(), None);
 }
 
 #[test]

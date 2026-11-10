@@ -9,8 +9,8 @@ use common::{
     mount_profile, page, setup, setup_paced, setup_retrying,
 };
 use openmail_core::{HistoryId, LabelId, MessageId, ThreadId};
-use openmail_gmail::api::{self, AdaptiveRate, QuotaPacing};
-use openmail_store::Store;
+use openmail_gmail::api::{self, MinuteBudget, QuotaPacing};
+use openmail_store::{QuotaBudget, Store};
 use openmail_sync::{
     CancellationToken, Cutoff, Error, InitialSync, InitialSyncConfig, Phase, Progress,
 };
@@ -37,6 +37,7 @@ fn config() -> InitialSyncConfig {
         prefetch_inbox_bodies: None,
         rate_limit_pause: Duration::from_millis(10),
         max_rate_limit_pauses: 5,
+        single_message_fetch: true,
     }
 }
 
@@ -141,6 +142,8 @@ async fn full_run_syncs_labels_inbox_and_backfill() {
             rate_limited_requests: 0,
             // The test client has no quota limiter.
             units_per_second: None,
+            budget_per_minute: None,
+            spent_last_minute: None,
         }
     );
     // Counts grow page by page.
@@ -840,20 +843,21 @@ async fn a_stored_thread_gone_when_fetched_is_deleted() {
     assert_eq!(done.deleted_threads, 5);
 }
 
-/// Adaptive pacing at 800 units/s, with lockouts and probes in milliseconds.
-fn fast_adaptive() -> QuotaPacing {
-    QuotaPacing::Adaptive(AdaptiveRate {
+/// A learned budget counted over half-second windows: 48,000 units a window
+/// at first, never below 50.
+fn fast_budget() -> QuotaPacing {
+    QuotaPacing::Budget(MinuteBudget {
         units_per_minute: 60_000,
-        lockout: Duration::from_millis(50),
-        max_lockout: Duration::from_millis(100),
-        probe_every: Duration::from_millis(50),
-        ..AdaptiveRate::default()
+        min: 50,
+        window: Duration::from_millis(500),
+        probe_every: Duration::from_millis(500),
+        ..MinuteBudget::default()
     })
 }
 
 #[tokio::test]
 async fn a_rate_limit_burst_slows_the_client_without_pausing_the_sync() {
-    let (server, client) = setup_paced(fast_adaptive(), fast_retries()).await;
+    let (server, client) = setup_paced(fast_budget(), fast_retries()).await;
     let mailbox = mailbox();
     mount_profile(&server, 1).await;
     mount_labels(&server).await;
@@ -877,8 +881,8 @@ async fn a_rate_limit_burst_slows_the_client_without_pausing_the_sync() {
 
     assert_eq!(done.threads, 5);
     assert_eq!(done.rate_limited_requests, 5);
-    // The client locked itself out briefly, slowed down and retried; the 60 s
-    // sync-level pause was never needed.
+    // The client lowered its budget, waited for room in the window and
+    // retried; the 60 s sync-level pause was never needed.
     assert_eq!(pauses(&seen), 0);
     assert!(
         started.elapsed() < Duration::from_secs(30),
@@ -887,6 +891,52 @@ async fn a_rate_limit_burst_slows_the_client_without_pausing_the_sync() {
     );
     let rate = done.units_per_second.unwrap();
     assert!(rate < start, "{rate} vs {start}");
+    // The learned budget is saved for the next sync.
+    let learned = sync.store().quota_budget().unwrap().unwrap();
+    assert_eq!(Some(learned.budget), done.budget_per_minute);
+    assert_eq!(learned.units_per_minute, 60_000);
+}
+
+#[tokio::test]
+async fn a_saved_quota_budget_seeds_the_client() {
+    let (server, client) = setup_paced(fast_budget(), fast_retries()).await;
+    mount_all(&server).await;
+    let store = Store::open_in_memory().unwrap();
+    // Saved by an earlier sync under the same quota.
+    let saved = QuotaBudget {
+        budget: 30_000,
+        units_per_minute: 60_000,
+    };
+    store.set_quota_budget(Some(saved)).unwrap();
+
+    let mut sync = InitialSync::new(client.clone(), store, config());
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+    assert!(seen.iter().all(|p| p.budget_per_minute == Some(30_000)));
+    assert_eq!(done.budget_per_minute, Some(30_000));
+    assert!(done.spent_last_minute.unwrap() > 0);
+    assert_eq!(sync.store().quota_budget().unwrap(), Some(saved));
+
+    // One learned under another quota is not used, and is replaced.
+    let (server, client) = setup_paced(fast_budget(), fast_retries()).await;
+    mount_all(&server).await;
+    let store = Store::open_in_memory().unwrap();
+    store
+        .set_quota_budget(Some(QuotaBudget {
+            budget: 3_000,
+            units_per_minute: 6_000,
+        }))
+        .unwrap();
+    let mut sync = InitialSync::new(client, store, config());
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    assert_eq!(done.budget_per_minute, Some(48_000));
+    assert_eq!(
+        sync.store().quota_budget().unwrap(),
+        Some(QuotaBudget {
+            budget: 48_000,
+            units_per_minute: 60_000
+        })
+    );
 }
 
 #[tokio::test]
@@ -921,4 +971,295 @@ async fn the_default_pacing_stays_under_a_6000_per_minute_quota() {
     assert_eq!(batch.quota_rejections(), 0);
     assert_eq!(done.rate_limited_requests, 0);
     assert_eq!(pauses(&seen), 0);
+}
+
+/// The `messages.list` requests the server received, as their query pairs.
+async fn message_listings(server: &MockServer) -> Vec<Vec<(String, String)>> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path().ends_with("/messages"))
+        .map(|r| r.url.query_pairs().into_owned().collect())
+        .collect()
+}
+
+/// Inbox: s1 (one message), t2 (a reply sent after it), t4 (a reply to a
+/// message older than the cutoff). Elsewhere: s3 (one message) and s50 (one
+/// message, older than the cutoff). Thread IDs are their first message's ID,
+/// as in Gmail.
+fn message_level_mailbox() -> Mailbox {
+    Mailbox::default()
+        .with_single(1, &["INBOX", "UNREAD"])
+        .with_thread("t2", &[("t2", &["INBOX"], 6), ("m2b", &["SENT"], 2)])
+        .with_single(3, &[])
+        .with_thread("t4", &[("t4", &["INBOX"], 40), ("m4b", &["INBOX"], 4)])
+        .with_single(50, &[])
+}
+
+/// Mounts `message_level_mailbox()` with the threads after its 30-day cutoff
+/// listed: Inbox [s1, t2, t4], backfill [s1, t2, s3, t4].
+async fn mount_message_level(server: &MockServer) -> BatchResponder {
+    let mailbox = message_level_mailbox();
+    mount_profile(server, 1).await;
+    mount_labels(server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &["s1", "t2", "t4"], None))
+        .mount(server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &["s1", "t2", "s3", "t4"], None))
+        .mount(server)
+        .await;
+    let batch = BatchResponder::new(mailbox);
+    batch.mount(server).await;
+    batch
+}
+
+/// A 30-day cutoff before the newest message.
+fn thirty_days() -> InitialSyncConfig {
+    let newest = OffsetDateTime::from_unix_timestamp(common::NEWEST_MS / 1000).unwrap();
+    InitialSyncConfig {
+        cutoff: Cutoff::Since(newest - time::Duration::days(30)),
+        page_size: 10,
+        ..config()
+    }
+}
+
+#[tokio::test]
+async fn single_message_threads_are_fetched_as_messages() {
+    let (server, client) = setup().await;
+    let batch = mount_message_level(&server).await;
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), thirty_days());
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+
+    assert_eq!(done.threads, 4);
+    assert_eq!(done.messages, 6);
+    // s1, t2 and t4 are listed again by the backfill, unchanged.
+    assert_eq!(done.skipped_threads, 3);
+    // Single-message threads cost a messages.get; the others a threads.get.
+    assert_eq!(batch.requested("messages"), ["s1", "s3"]);
+    let mut whole = batch.requested("threads");
+    whole.sort();
+    assert_eq!(whole, ["t2", "t4"]);
+    for item in batch.calls().iter().flatten() {
+        let query = item.target.split_once('?').unwrap().1;
+        assert!(
+            query.starts_with("format=metadata&metadataHeaders=From"),
+            "{query}"
+        );
+    }
+    // One messages.list page covered both phases, with the sync's cutoff.
+    let listings = message_listings(&server).await;
+    assert_eq!(listings.len(), 1);
+    let after = thirty_days().cutoff;
+    let Cutoff::Since(after) = after else {
+        unreachable!()
+    };
+    assert!(listings[0].contains(&("q".to_owned(), format!("after:{}", after.unix_timestamp()))));
+    assert!(listings[0].contains(&("maxResults".to_owned(), "500".to_owned())));
+
+    let store = sync.store();
+    let s1 = store.thread(&ThreadId::new("s1")).unwrap().unwrap();
+    assert!(s1.is_unread());
+    assert_eq!(s1.message_count, 1);
+    assert_eq!(s1.subject.as_deref(), Some("Subject s1"));
+    // The history ID it was listed with, for the unchanged check.
+    assert_eq!(s1.history_id, HistoryId::new(101));
+    assert!(store.message(&MessageId::new("s1")).unwrap().is_some());
+    let t2 = store.thread(&ThreadId::new("t2")).unwrap().unwrap();
+    assert_eq!(t2.message_count, 2);
+    assert!(!stored(store, "s50"));
+}
+
+#[tokio::test]
+async fn threads_spanning_the_cutoff_are_stored_whole() {
+    let (server, client) = setup().await;
+    let batch = mount_message_level(&server).await;
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), thirty_days());
+    sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+
+    // Only m4b is after the cutoff, but its thread is t4, whose first message
+    // (ID t4) is older: it is fetched whole, never stored partially.
+    assert!(batch.requested("threads").contains(&"t4".to_owned()));
+    assert!(!batch.requested("messages").contains(&"m4b".to_owned()));
+    let store = sync.store();
+    let t4 = store.thread(&ThreadId::new("t4")).unwrap().unwrap();
+    assert_eq!(t4.message_count, 2);
+    assert!(store.message(&MessageId::new("t4")).unwrap().is_some());
+    assert!(store.message(&MessageId::new("m4b")).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn the_message_listing_goes_only_as_far_as_the_threads_need() {
+    let (server, client) = setup().await;
+    // 600 single-message threads, s1 newest: two messages.list pages.
+    let mut mailbox = Mailbox::default();
+    for n in 1..=600 {
+        mailbox = mailbox.with_single(n, &[]);
+    }
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &[], None))
+        .mount(&server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &["s1", "s2"], Some("b2")))
+        .mount(&server)
+        .await;
+    list_page(Listing::Backfill, Some("b2"))
+        .respond_with(page(&mailbox, &["s600"], None))
+        .mount(&server)
+        .await;
+    let batch = BatchResponder::new(mailbox);
+    batch.mount(&server).await;
+
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config());
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    assert_eq!(done.threads, 3);
+    assert_eq!(batch.requested("messages"), ["s1", "s2", "s600"]);
+    assert!(batch.requested("threads").is_empty());
+    // The first page needed one listing page; s600 needed the second.
+    let listings = message_listings(&server).await;
+    assert_eq!(listings.len(), 2);
+    assert!(listings[1].contains(&("pageToken".to_owned(), "500".to_owned())));
+}
+
+#[tokio::test]
+async fn single_message_fetch_can_be_turned_off() {
+    let (server, client) = setup().await;
+    let batch = mount_message_level(&server).await;
+    let config = InitialSyncConfig {
+        single_message_fetch: false,
+        ..thirty_days()
+    };
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config);
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    assert_eq!(done.threads, 4);
+    assert!(batch.requested("messages").is_empty());
+    assert!(message_listings(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_resync_skips_unchanged_threads_fetched_as_messages() {
+    let (server, client) = setup().await;
+    let batch = mount_message_level(&server).await;
+    let mut sync = InitialSync::new(
+        client.clone(),
+        Store::open_in_memory().unwrap(),
+        thirty_days(),
+    );
+    sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    let store = sync.into_store();
+    InitialSync::reset(&store).unwrap();
+
+    // Gmail changes s3 (a label, say): its history ID moves on.
+    let mut mailbox = message_level_mailbox();
+    mailbox.threads.get_mut("s3").unwrap().history_id = 900;
+    let (server, client) = setup().await;
+    mount_profile(&server, 1).await;
+    mount_labels(&server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &["s1", "t2", "t4"], None))
+        .mount(&server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &["s1", "t2", "s3", "t4"], None))
+        .mount(&server)
+        .await;
+    let resync = BatchResponder::new(mailbox);
+    resync.mount(&server).await;
+    drop(batch);
+
+    let mut sync = InitialSync::new(client, store, thirty_days());
+    let done = sync.run(&CancellationToken::new(), |_| {}).await.unwrap();
+    assert_eq!(done.threads, 1);
+    assert_eq!(done.skipped_threads, 6);
+    assert_eq!(resync.requested("messages"), ["s3"]);
+    assert!(resync.requested("threads").is_empty());
+    let s3 = sync.store().thread(&ThreadId::new("s3")).unwrap().unwrap();
+    assert_eq!(s3.history_id, HistoryId::new(900));
+}
+
+/// A learned budget over 1 s windows: 800 units a window at first, never
+/// below 50, probing every second.
+fn one_second_budget() -> QuotaPacing {
+    QuotaPacing::Budget(MinuteBudget {
+        units_per_minute: 1_000,
+        min: 50,
+        window: Duration::from_secs(1),
+        probe_every: Duration::from_secs(1),
+        ..MinuteBudget::default()
+    })
+}
+
+/// 150 single-message threads, all listed on one backfill page.
+async fn mount_busy_mailbox(server: &MockServer, history: u64) -> BatchResponder {
+    let mut mailbox = Mailbox::default();
+    for n in 1..=150 {
+        mailbox = mailbox.with_single(n, &[]);
+    }
+    for thread in mailbox.threads.values_mut() {
+        thread.history_id += history;
+    }
+    let ids: Vec<String> = (1..=150).map(|n| format!("s{n}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    mount_profile(server, 1).await;
+    mount_labels(server).await;
+    list_page(Listing::Inbox, None)
+        .respond_with(page(&mailbox, &[], None))
+        .mount(server)
+        .await;
+    list_page(Listing::Backfill, None)
+        .respond_with(page(&mailbox, &ids, None))
+        .mount(server)
+        .await;
+    // Gmail trips well below the configured quota, as on the real account
+    // (at about 46% of it), counting rejected calls too.
+    let batch = BatchResponder::new(mailbox).enforce_quota(460, Duration::from_secs(1));
+    batch.mount(server).await;
+    batch
+}
+
+#[tokio::test]
+async fn the_budget_learns_gmails_real_limit_and_the_next_sync_starts_there() {
+    let (server, client) = setup_paced(one_second_budget(), fast_retries()).await;
+    let batch = mount_busy_mailbox(&server, 0).await;
+    let config = InitialSyncConfig {
+        page_size: 500,
+        rate_limit_pause: Duration::from_secs(60),
+        ..config()
+    };
+    let mut sync = InitialSync::new(client, Store::open_in_memory().unwrap(), config.clone());
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+    assert_eq!(done.threads, 150);
+    // Learning the limit costs a few rejected calls (those in flight when it
+    // tripped), with no lockout spiral and no sync-level pause.
+    let rejected = batch.quota_rejections();
+    assert!((1..=15).contains(&rejected), "{rejected} rejected");
+    assert_eq!(pauses(&seen), 0);
+    let learned = sync.store().quota_budget().unwrap().unwrap();
+    assert!(
+        (300..460).contains(&learned.budget),
+        "learned {}",
+        learned.budget
+    );
+
+    // The next sync's client starts at the learned budget, and Gmail turns
+    // (almost) nothing away.
+    let store = sync.into_store();
+    InitialSync::reset(&store).unwrap();
+    let (server, client) = setup_paced(one_second_budget(), fast_retries()).await;
+    let batch = mount_busy_mailbox(&server, 1_000).await;
+    let mut sync = InitialSync::new(client, store, config);
+    let (result, seen) = run(&mut sync, &CancellationToken::new()).await;
+    let done = result.unwrap();
+    assert_eq!(done.threads, 150);
+    assert!(seen[0].budget_per_minute.unwrap() < 460, "{:?}", seen[0]);
+    let rejected = batch.quota_rejections();
+    assert!(rejected <= 5, "{rejected} rejected");
+    assert_eq!(done.rate_limited_requests, rejected as u64);
 }

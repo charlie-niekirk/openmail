@@ -21,7 +21,7 @@ pub use queries::{
     LabelCounts, MessageDetail, ThreadCursor, ThreadDetail, ThreadPage, ThreadSummary, ThreadView,
 };
 pub use store::Store;
-pub use sync_state::SyncState;
+pub use sync_state::{QuotaBudget, SyncState};
 
 #[cfg(test)]
 mod tests;

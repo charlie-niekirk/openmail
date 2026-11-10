@@ -13,6 +13,7 @@ use crate::{Error, Result};
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_initial.sql"),
     include_str!("../migrations/0002_resync_seen.sql"),
+    include_str!("../migrations/0003_quota_budget.sql"),
 ];
 
 /// Brings the database's schema up to date, all in one transaction.

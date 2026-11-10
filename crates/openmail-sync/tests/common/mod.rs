@@ -178,37 +178,107 @@ impl Mailbox {
         self
     }
 
+    /// Adds thread `sN` with one message whose ID is also `sN`, as Gmail
+    /// gives a thread its first message's ID; otherwise like [`with`](Self::with).
+    pub fn with_single(mut self, n: u32, labels: &[&str]) -> Self {
+        let date = NEWEST_MS - i64::from(n) * 86_400_000;
+        self.threads.insert(
+            format!("s{n}"),
+            FakeThread {
+                history_id: 100 + u64::from(n),
+                messages: vec![(
+                    format!("s{n}"),
+                    labels.iter().map(|l| (*l).to_owned()).collect(),
+                    date,
+                )],
+            },
+        );
+        self
+    }
+
+    /// Adds `thread` with `messages` (`(ID, labels, days older than
+    /// NEWEST_MS)`, oldest first).
+    pub fn with_thread(mut self, thread: &str, messages: &[(&str, &[&str], u32)]) -> Self {
+        self.threads.insert(
+            thread.to_owned(),
+            FakeThread {
+                history_id: 200 + self.threads.len() as u64,
+                messages: messages
+                    .iter()
+                    .map(|(id, labels, days)| {
+                        (
+                            (*id).to_owned(),
+                            labels.iter().map(|l| (*l).to_owned()).collect(),
+                            NEWEST_MS - i64::from(*days) * 86_400_000,
+                        )
+                    })
+                    .collect(),
+            },
+        );
+        self
+    }
+
+    fn message_json(
+        thread_id: &str,
+        thread: &FakeThread,
+        (id, labels, date): &(String, Vec<String>, i64),
+    ) -> Value {
+        json!({
+            "id": id,
+            "threadId": thread_id,
+            "labelIds": labels,
+            "snippet": format!("snippet of {id}"),
+            "historyId": thread.history_id.to_string(),
+            "internalDate": date.to_string(),
+            "sizeEstimate": 1234,
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "From", "value": "Ada Lovelace <ada@example.com>"},
+                    {"name": "To", "value": "bob@example.com"},
+                    {"name": "Subject", "value": format!("Subject {thread_id}")},
+                    {"name": "Message-ID", "value": format!("<{id}@example.com>")},
+                ]
+            }
+        })
+    }
+
     fn thread_json(&self, id: &str) -> Option<Value> {
         let thread = self.threads.get(id)?;
         let messages: Vec<Value> = thread
             .messages
             .iter()
-            .map(|(mid, labels, date)| {
-                json!({
-                    "id": mid,
-                    "threadId": id,
-                    "labelIds": labels,
-                    "snippet": format!("snippet of {mid}"),
-                    "historyId": thread.history_id.to_string(),
-                    "internalDate": date.to_string(),
-                    "sizeEstimate": 1234,
-                    "payload": {
-                        "mimeType": "text/plain",
-                        "headers": [
-                            {"name": "From", "value": "Ada Lovelace <ada@example.com>"},
-                            {"name": "To", "value": "bob@example.com"},
-                            {"name": "Subject", "value": format!("Subject {id}")},
-                            {"name": "Message-ID", "value": format!("<{mid}@example.com>")},
-                        ]
-                    }
-                })
-            })
+            .map(|message| Self::message_json(id, thread, message))
             .collect();
         Some(json!({
             "id": id,
             "historyId": thread.history_id.to_string(),
             "messages": messages,
         }))
+    }
+
+    fn metadata_message_json(&self, id: &str) -> Option<Value> {
+        self.threads.iter().find_map(|(thread_id, thread)| {
+            let message = thread.messages.iter().find(|(m, _, _)| m == id)?;
+            Some(Self::message_json(thread_id, thread, message))
+        })
+    }
+
+    /// Every message as `(message ID, thread ID, date)`, newest first, as
+    /// `messages.list` orders them.
+    pub fn listing(&self) -> Vec<(String, String, i64)> {
+        let mut all: Vec<(String, String, i64)> = self
+            .threads
+            .iter()
+            .flat_map(|(thread_id, thread)| {
+                thread
+                    .messages
+                    .iter()
+                    .map(|(id, _, date)| (id.clone(), thread_id.clone(), *date))
+            })
+            .collect();
+        all.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        all
     }
 
     fn raw_message_json(&self, id: &str) -> Option<Value> {
@@ -306,11 +376,18 @@ impl BatchResponder {
         *self.mailbox.lock().unwrap() = mailbox;
     }
 
-    /// Mounts the responder on the batch endpoint.
+    /// Mounts the responder on the batch endpoint, and `messages.list` over
+    /// the same mailbox.
     pub async fn mount(&self, server: &MockServer) {
         Mock::given(method("POST"))
             .and(path(BATCH))
             .respond_with(self.clone())
+            .mount(server)
+            .await;
+        get("messages")
+            .respond_with(MessageLister {
+                mailbox: self.mailbox.clone(),
+            })
             .mount(server)
             .await;
     }
@@ -335,7 +412,7 @@ impl BatchResponder {
     }
 
     fn answer(&self, target: &str) -> (u16, Value) {
-        let (path, _) = target.split_once('?').unwrap_or((target, ""));
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
         let rest = path.strip_prefix(USER).unwrap_or(path);
         let id = rest.rsplit('/').next().unwrap_or_default();
         if let Some(quota) = self.quota.lock().unwrap().as_mut() {
@@ -371,7 +448,11 @@ impl BatchResponder {
         let found = if let Some(id) = rest.strip_prefix("/threads/") {
             mailbox.thread_json(id)
         } else if let Some(id) = rest.strip_prefix("/messages/") {
-            mailbox.raw_message_json(id)
+            if query.contains("format=raw") {
+                mailbox.raw_message_json(id)
+            } else {
+                mailbox.metadata_message_json(id)
+            }
         } else {
             None
         };
@@ -418,6 +499,44 @@ impl Respond for BatchResponder {
             out.into_bytes(),
             &format!("multipart/mixed; boundary={boundary}"),
         )
+    }
+}
+
+/// Answers `messages.list` from a [`Mailbox`]: every message, newest first,
+/// after the `after:` of `q` if given, in pages of `maxResults` (100 by
+/// default) whose tokens are offsets.
+struct MessageLister {
+    mailbox: Arc<Mutex<Mailbox>>,
+}
+
+impl Respond for MessageLister {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let params: HashMap<String, String> = request.url.query_pairs().into_owned().collect();
+        let after_ms = params
+            .get("q")
+            .and_then(|q| q.strip_prefix("after:"))
+            .map(|secs| secs.parse::<i64>().unwrap() * 1000);
+        let size: usize = params.get("maxResults").map_or(100, |n| n.parse().unwrap());
+        let offset: usize = params.get("pageToken").map_or(0, |t| t.parse().unwrap());
+        let listing: Vec<_> = self
+            .mailbox
+            .lock()
+            .unwrap()
+            .listing()
+            .into_iter()
+            .filter(|(_, _, date)| after_ms.is_none_or(|after| *date > after))
+            .collect();
+        let page: Vec<Value> = listing
+            .iter()
+            .skip(offset)
+            .take(size)
+            .map(|(id, thread, _)| json!({"id": id, "threadId": thread}))
+            .collect();
+        let mut body = json!({"messages": page, "resultSizeEstimate": listing.len()});
+        if offset + size < listing.len() {
+            body["nextPageToken"] = json!((offset + size).to_string());
+        }
+        ResponseTemplate::new(200).set_body_json(body)
     }
 }
 
