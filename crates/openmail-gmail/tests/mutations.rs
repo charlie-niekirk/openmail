@@ -4,7 +4,7 @@ mod common;
 
 use common::{USER, setup};
 use openmail_core::{LabelId, MessageId, ThreadId};
-use openmail_gmail::api::{MAX_BATCH_MODIFY_IDS, ModifyLabels};
+use openmail_gmail::api::{Error, MAX_BATCH_MODIFY_IDS, ModifyLabels};
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, ResponseTemplate};
@@ -142,4 +142,64 @@ async fn batch_modify_messages_with_no_ids_sends_nothing() {
         .await
         .unwrap();
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn trash_and_untrash_messages_and_threads() {
+    let (server, client, _) = setup().await;
+    let message = json!({"id": "m1", "threadId": "t1", "labelIds": ["TRASH"]});
+    let thread = json!({"id": "t1", "messages": [message]});
+    for (resource, action, body) in [
+        ("messages/m1", "trash", &message),
+        ("messages/m1", "untrash", &message),
+        ("threads/t1", "trash", &thread),
+        ("threads/t1", "untrash", &thread),
+    ] {
+        Mock::given(method("POST"))
+            .and(path(format!("{USER}/{resource}/{action}")))
+            .and(header("content-length", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let m = MessageId::new("m1");
+    let t = ThreadId::new("t1");
+    assert_eq!(client.trash_message(&m).await.unwrap().id, m);
+    assert_eq!(client.untrash_message(&m).await.unwrap().id, m);
+    assert_eq!(client.trash_thread(&t).await.unwrap().id, t);
+    assert_eq!(client.untrash_thread(&t).await.unwrap().id, t);
+}
+
+#[tokio::test]
+async fn delete_messages_and_threads() {
+    let (server, client, _) = setup().await;
+    for resource in ["messages/m1", "threads/t1"] {
+        Mock::given(method("DELETE"))
+            .and(path(format!("{USER}/{resource}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    client.delete_message(&MessageId::new("m1")).await.unwrap();
+    client.delete_thread(&ThreadId::new("t1")).await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_a_missing_message_is_not_found() {
+    let (server, client, _) = setup().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("{USER}/messages/gone")))
+        .respond_with(common::json(404, "error_404.json"))
+        .mount(&server)
+        .await;
+
+    let err = client
+        .delete_message(&MessageId::new("gone"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::NotFound { .. }), "{err:?}");
 }

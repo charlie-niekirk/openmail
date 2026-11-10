@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::{Method, RequestBuilder, Response, StatusCode, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -138,8 +138,8 @@ impl GmailClient {
                 Some(body) => request
                     .header(CONTENT_TYPE, "application/json")
                     .body(body.clone()),
-                // An explicit empty body, so POSTs carry `Content-Length: 0`.
-                None => request.body(Vec::new()),
+                // Google may answer a body-less POST without a length with 411.
+                None => request.header(CONTENT_LENGTH, 0),
             }
         })
         .await

@@ -9,6 +9,9 @@ use super::{ApiMessage, ApiThread, GmailClient, ModifyLabels, Result};
 /// The most message IDs `messages.batchModify` accepts in one call.
 pub const MAX_BATCH_MODIFY_IDS: usize = 1000;
 
+/// No request body.
+const NO_BODY: Option<&()> = None;
+
 /// The `messages.batchModify` body.
 #[derive(Serialize)]
 struct BatchModifyBody<'a> {
@@ -60,5 +63,43 @@ impl GmailClient {
             Some(labels),
         )
         .await
+    }
+
+    /// `messages.trash`: moves a message to Trash.
+    pub async fn trash_message(&self, id: &MessageId) -> Result<ApiMessage> {
+        self.call_json(Method::POST, &["messages", id.as_str(), "trash"], NO_BODY)
+            .await
+    }
+
+    /// `messages.untrash`: takes a message out of Trash.
+    pub async fn untrash_message(&self, id: &MessageId) -> Result<ApiMessage> {
+        self.call_json(Method::POST, &["messages", id.as_str(), "untrash"], NO_BODY)
+            .await
+    }
+
+    /// `messages.delete`: deletes a message immediately and permanently,
+    /// skipping Trash.
+    pub async fn delete_message(&self, id: &MessageId) -> Result<()> {
+        self.call_empty(Method::DELETE, &["messages", id.as_str()], NO_BODY)
+            .await
+    }
+
+    /// `threads.trash`: moves every message in a thread to Trash.
+    pub async fn trash_thread(&self, id: &ThreadId) -> Result<ApiThread> {
+        self.call_json(Method::POST, &["threads", id.as_str(), "trash"], NO_BODY)
+            .await
+    }
+
+    /// `threads.untrash`: takes every message in a thread out of Trash.
+    pub async fn untrash_thread(&self, id: &ThreadId) -> Result<ApiThread> {
+        self.call_json(Method::POST, &["threads", id.as_str(), "untrash"], NO_BODY)
+            .await
+    }
+
+    /// `threads.delete`: deletes a thread and its messages immediately and
+    /// permanently, skipping Trash.
+    pub async fn delete_thread(&self, id: &ThreadId) -> Result<()> {
+        self.call_empty(Method::DELETE, &["threads", id.as_str()], NO_BODY)
+            .await
     }
 }
