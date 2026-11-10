@@ -7,18 +7,23 @@
 //! caller uses: the futures and the event stream can be awaited on any
 //! executor, such as GPUI's.
 
+mod bodies;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use openmail_core::{Label, ThreadId};
+use openmail_core::{Label, MessageId, ThreadId};
 use openmail_gmail::GmailClient;
-use openmail_store::{LabelCounts, Store, ThreadCursor, ThreadDetail, ThreadPage, ThreadView};
+use openmail_store::{
+    LabelCounts, MessageBody, Store, ThreadCursor, ThreadDetail, ThreadPage, ThreadView,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use self::bodies::{BodyFetcher, BodyRequest};
 use crate::{
     Activity, Changes, Connectivity, Error, InitialSyncConfig, Op, OpEvent, OpId, OpsConfig,
     OpsQueue, Progress, QueuedOp, Result, Scheduler, SchedulerConfig, SchedulerHandle, SyncEvent,
@@ -41,6 +46,10 @@ pub struct MailServiceConfig {
     pub scheduler: SchedulerConfig,
     /// The undo window and retries of the ops queue.
     pub ops: OpsConfig,
+    /// After each poll, fetch the bodies of this many of the newest Inbox
+    /// messages if they have none (50 by default; 0 turns it off). Other
+    /// bodies are fetched when asked for ([`MailHandle::body`]).
+    pub prefetch_bodies: usize,
 }
 
 impl MailServiceConfig {
@@ -51,6 +60,7 @@ impl MailServiceConfig {
             initial: InitialSyncConfig::default(),
             scheduler: SchedulerConfig::default(),
             ops: OpsConfig::default(),
+            prefetch_bodies: 50,
         }
     }
 }
@@ -75,6 +85,8 @@ pub enum MailEvent {
     /// A queued op was sent, cancelled out, is being retried, or failed and
     /// was rolled back (a [`ThreadsChanged`](Self::ThreadsChanged) follows).
     Op(OpEvent),
+    /// A message's body was fetched and stored, on request or by prefetch.
+    BodyFetched(MessageId),
     /// The ops queue stopped sending, keeping the queue, because nothing more
     /// can be sent until the user acts (signing in again) or the store failed.
     OpsStopped(Arc<Error>),
@@ -142,7 +154,11 @@ type Command = Box<dyn FnOnce(&Local) + Send>;
 ///   Gmail's history;
 /// - the [`OpsQueue`] worker sends queued changes;
 /// - a local task answers [`MailHandle`] calls (queries, enqueuing and undoing
-///   ops) on its own store connection, so they never wait for a sync.
+///   ops) on its own store connection, so they never wait for a sync;
+/// - a body fetcher fetches message bodies when asked
+///   ([`MailHandle::body`]), batching requests that arrive together, and
+///   after each poll prefetches the bodies of the newest Inbox messages
+///   ([`MailServiceConfig::prefetch_bodies`]).
 ///
 /// Each has its own connection to the database, which is in WAL mode.
 /// Dropping the service (or [`shutdown`](Self::shutdown)) cancels the work
@@ -167,6 +183,7 @@ impl MailService {
             initial,
             scheduler,
             ops,
+            prefetch_bodies,
         } = config;
         // The first connection creates and migrates the database, so open
         // them one after another.
@@ -174,6 +191,7 @@ impl MailService {
         let local = open()?;
         let sync_store = open()?;
         let ops_store = open()?;
+        let body_store = open()?;
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(WORKER_THREADS)
@@ -185,11 +203,20 @@ impl MailService {
         let (event_tx, receiver) = mpsc::unbounded_channel();
         let events = Events(event_tx);
         let (commands, command_rx) = mpsc::unbounded_channel();
+        let (bodies, body_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let queue = OpsQueue::new(client.clone(), ops);
+        let fetcher = BodyFetcher {
+            client: client.clone(),
+            store: body_store,
+            prefetch: prefetch_bodies,
+            events: events.clone(),
+            requests: body_rx,
+        };
         let scheduler = Scheduler::new(client, sync_store, initial, scheduler);
         let handle = MailHandle {
             commands,
+            bodies: bodies.clone(),
             scheduler: scheduler.handle(),
         };
 
@@ -203,6 +230,8 @@ impl MailService {
             scheduler,
             queue,
             ops_store,
+            fetcher,
+            prefetch: bodies,
             events,
             cancel: cancel.clone(),
         };
@@ -261,6 +290,7 @@ impl Drop for MailService {
 #[derive(Debug, Clone)]
 pub struct MailHandle {
     commands: mpsc::UnboundedSender<Command>,
+    bodies: mpsc::UnboundedSender<BodyRequest>,
     scheduler: SchedulerHandle,
 }
 
@@ -306,6 +336,20 @@ impl MailHandle {
     pub async fn thread(&self, id: ThreadId) -> Result<Option<ThreadDetail>> {
         self.call(move |local| Ok(local.store.thread_detail(&id)?))
             .await
+    }
+
+    /// A message's body: the stored one, or else fetched from Gmail now (and
+    /// stored, with a [`MailEvent::BodyFetched`]). `None` if the message no
+    /// longer exists or its body could not be read.
+    ///
+    /// Requests that arrive together are fetched in one batch, ahead of any
+    /// prefetching.
+    pub async fn body(&self, id: MessageId) -> Result<Option<MessageBody>> {
+        let (reply, answer) = oneshot::channel();
+        self.bodies
+            .send(BodyRequest::Fetch { id, reply })
+            .map_err(|_| Error::ServiceStopped)?;
+        answer.await.map_err(|_| Error::ServiceStopped)?
     }
 
     /// Applies `op` to the store and queues it for sending (see
@@ -420,6 +464,9 @@ struct Workers {
     scheduler: Scheduler,
     queue: OpsQueue,
     ops_store: Store,
+    fetcher: BodyFetcher,
+    /// Asks the fetcher to prefetch.
+    prefetch: mpsc::UnboundedSender<BodyRequest>,
     events: Events,
     cancel: CancellationToken,
 }
@@ -433,12 +480,20 @@ impl Workers {
             scheduler,
             queue,
             ops_store,
+            fetcher,
+            prefetch,
             events,
             cancel,
         } = self;
         let mut tasks = JoinSet::new();
         tasks.spawn(run_local(local, commands, cancel.clone()));
-        tasks.spawn(run_sync(scheduler, events.clone(), cancel.clone()));
+        tasks.spawn(run_sync(
+            scheduler,
+            prefetch,
+            events.clone(),
+            cancel.clone(),
+        ));
+        tasks.spawn(fetcher.run(cancel.clone()));
         tasks.spawn(run_ops(queue, ops_store, events, cancel.clone()));
         cancel.cancelled().await;
         while let Some(result) = tasks.join_next().await {
@@ -470,12 +525,22 @@ async fn run_local(
     }
 }
 
-/// Runs the scheduler, reporting what it does.
-async fn run_sync(mut scheduler: Scheduler, events: Events, cancel: CancellationToken) {
+/// Runs the scheduler, reporting what it does, and prefetches bodies after
+/// each poll.
+async fn run_sync(
+    mut scheduler: Scheduler,
+    prefetch: mpsc::UnboundedSender<BodyRequest>,
+    events: Events,
+    cancel: CancellationToken,
+) {
     let mut last: Option<Progress> = None;
     let result = scheduler
         .run(&cancel, |event| {
+            let polled = matches!(&event, SyncEvent::Polled(changes) if !changes.full_resync);
             report_sync(&events, &mut last, event);
+            if polled {
+                let _ = prefetch.send(BodyRequest::Prefetch);
+            }
         })
         .await;
     if let Err(err) = result {

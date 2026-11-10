@@ -769,7 +769,7 @@ pub(crate) async fn fetch_threads(
 
 /// Parses a `format=raw` message into a body. A body that does not parse is
 /// skipped with a warning: it will be fetched again when the message is opened.
-fn parse_body(
+pub(crate) fn parse_body(
     id: &MessageId,
     raw: Option<&str>,
     fetched_at: OffsetDateTime,

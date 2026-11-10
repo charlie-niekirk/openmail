@@ -14,6 +14,7 @@ fn collect(receiver: &mut mpsc::UnboundedReceiver<MailEvent>) -> Vec<String> {
             MailEvent::Connectivity(c) => format!("{c:?}"),
             MailEvent::ThreadsChanged => "threads".to_owned(),
             MailEvent::LabelsChanged => "labels".to_owned(),
+            MailEvent::BodyFetched(id) => format!("body {id}"),
             MailEvent::Op(_) => "op".to_owned(),
             MailEvent::OpsStopped(_) => "ops stopped".to_owned(),
         });

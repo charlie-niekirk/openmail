@@ -9,7 +9,7 @@ use common::{
     BatchResponder, Listing, Mailbox, PROFILE_HISTORY_ID, USER, get, history_list, history_page,
     list_page, mount_labels, mount_profile, page, setup,
 };
-use openmail_core::{LabelId, ThreadId};
+use openmail_core::{LabelId, MessageId, ThreadId};
 use openmail_gmail::GmailClient;
 use openmail_store::ThreadView;
 use openmail_sync::{
@@ -58,8 +58,8 @@ async fn gmail() -> (MockServer, GmailClient, BatchResponder) {
     (server, client, batch)
 }
 
-/// Settings for tests: everything since the epoch, one poll, and `undo` as
-/// the undo window.
+/// Settings for tests: everything since the epoch, one poll, `undo` as the
+/// undo window, and no body prefetch.
 fn config(dir: &TempDir, undo: Duration) -> MailServiceConfig {
     MailServiceConfig {
         initial: InitialSyncConfig {
@@ -76,6 +76,7 @@ fn config(dir: &TempDir, undo: Duration) -> MailServiceConfig {
             initial_backoff: Duration::ZERO,
             ..OpsConfig::default()
         },
+        prefetch_bodies: 0,
         ..MailServiceConfig::new(dir.path().join("mail.db"))
     }
 }
@@ -307,4 +308,104 @@ async fn a_sign_in_failure_stops_syncing_but_not_queries() {
     };
     assert!(!error.is_transient());
     assert!(inbox(&handle).await.is_empty());
+}
+
+/// The message IDs whose raw form (the body) was fetched, in order.
+fn raw_fetches(batch: &BatchResponder) -> Vec<String> {
+    batch
+        .calls()
+        .into_iter()
+        .flatten()
+        .filter(|item| item.target.contains("format=raw"))
+        .map(|item| {
+            let path = item.target.split('?').next().unwrap();
+            path.rsplit('/').next().unwrap().to_owned()
+        })
+        .collect()
+}
+
+fn text(body: &openmail_store::MessageBody) -> &str {
+    body.text.as_deref().unwrap_or_default().trim()
+}
+
+#[tokio::test]
+async fn fetches_a_body_when_asked_and_keeps_it() {
+    let (_server, client, batch) = gmail().await;
+    let dir = TempDir::new().unwrap();
+    let (service, mut events) = MailService::start(client, config(&dir, Duration::ZERO)).unwrap();
+    let handle = service.handle();
+    synced(&mut events).await;
+    let detail = handle.thread(ThreadId::new("t3")).await.unwrap().unwrap();
+    assert!(detail.messages[0].body.is_none());
+
+    let body = handle.body(MessageId::new("m3")).await.unwrap().unwrap();
+    assert_eq!(text(&body), "Body of m3");
+    assert!(matches!(
+        events.recv().await,
+        Some(MailEvent::BodyFetched(id)) if id.as_str() == "m3"
+    ));
+    let detail = handle.thread(ThreadId::new("t3")).await.unwrap().unwrap();
+    assert_eq!(detail.messages[0].body.as_ref(), Some(&body));
+
+    // Stored now: not fetched again.
+    let again = handle.body(MessageId::new("m3")).await.unwrap();
+    assert_eq!(again, Some(body));
+    assert_eq!(raw_fetches(&batch), ["m3"]);
+
+    // A message Gmail no longer has.
+    assert_eq!(handle.body(MessageId::new("m9")).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn fetches_a_body_asked_for_twice_once() {
+    let (_server, client, batch) = gmail().await;
+    let dir = TempDir::new().unwrap();
+    let (service, mut events) = MailService::start(client, config(&dir, Duration::ZERO)).unwrap();
+    let handle = service.handle();
+    synced(&mut events).await;
+
+    let (first, second, other) = tokio::join!(
+        handle.body(MessageId::new("m2")),
+        handle.body(MessageId::new("m2")),
+        handle.body(MessageId::new("m1")),
+    );
+    assert_eq!(text(&first.unwrap().unwrap()), "Body of m2");
+    assert_eq!(text(&second.unwrap().unwrap()), "Body of m2");
+    assert_eq!(text(&other.unwrap().unwrap()), "Body of m1");
+    let mut fetched = raw_fetches(&batch);
+    fetched.sort();
+    assert_eq!(fetched, ["m1", "m2"]);
+}
+
+#[tokio::test]
+async fn prefetches_the_newest_inbox_bodies_after_a_poll() {
+    let (_server, client, batch) = gmail().await;
+    let dir = TempDir::new().unwrap();
+    let config = MailServiceConfig {
+        prefetch_bodies: 1,
+        ..config(&dir, Duration::ZERO)
+    };
+    let (service, mut events) = MailService::start(client, config).unwrap();
+    let handle = service.handle();
+
+    let seen = until(&mut events, |e| matches!(e, MailEvent::BodyFetched(_))).await;
+    assert!(seen.iter().any(up_to_date));
+    let Some(MailEvent::BodyFetched(id)) = seen.last() else {
+        unreachable!()
+    };
+    // m1 is the newest Inbox message; m2 is older, m3 is not in the Inbox.
+    assert_eq!(id.as_str(), "m1");
+    assert_eq!(raw_fetches(&batch), ["m1"]);
+    let detail = handle.thread(ThreadId::new("t1")).await.unwrap().unwrap();
+    assert_eq!(
+        text(detail.messages[0].body.as_ref().unwrap()),
+        "Body of m1"
+    );
+
+    // Another poll finds nothing left to prefetch.
+    handle.poll_now();
+    until(&mut events, up_to_date).await;
+    let stored = handle.body(MessageId::new("m1")).await.unwrap();
+    assert!(stored.is_some());
+    assert_eq!(raw_fetches(&batch), ["m1"]);
 }
