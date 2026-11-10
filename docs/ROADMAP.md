@@ -55,7 +55,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
   - Token refresh; tokens stored in the OS keychain via `keyring`.
   - Scopes: `gmail.modify` and `gmail.settings.basic`.
   - Client ID from `OPENMAIL_GOOGLE_CLIENT_ID` or user config (bring your own client).
-- [ ] **1.3 Gmail REST client** ∥ — `feat/1.3-gmail-client`
+- [x] **1.3 Gmail REST client** ∥ — `feat/1.3-gmail-client`
   - Typed serde models for labels, threads.list/get, messages.get (metadata, full,
     raw) and history.list.
   - Pagination; exponential backoff on 429 and 5xx.
