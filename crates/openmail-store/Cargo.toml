@@ -18,7 +18,12 @@ thiserror.workspace = true
 time.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "queries"
+harness = false
 
 [lints]
 workspace = true

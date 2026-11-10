@@ -77,7 +77,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
   - Tables: accounts, labels, threads, messages, message_labels, bodies, attachments,
     drafts, sync_state, pending_ops.
   - FTS5 index, WAL mode, migrations, per-account data directory.
-- [ ] **2.2 Queries and benchmarks** — `feat/2.2-queries-bench`
+- [x] **2.2 Queries and benchmarks** — `feat/2.2-queries-bench`
   - Keyset-paginated threads by label, unread counts per label, thread detail.
   - Criterion benchmark over 100k synthetic threads; first page loads in < 5 ms.
 - [x] **2.3 Initial sync** — `feat/2.3-initial-sync`
