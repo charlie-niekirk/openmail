@@ -9,7 +9,8 @@ use reqwest::{Method, RequestBuilder, Response, StatusCode, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::batch::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE};
+use super::batch::{DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE};
+use super::concurrency::{BatchConcurrency, ConcurrencyGate};
 use super::error::{Error, Result, classify};
 use super::quota::{self, QuotaLimiter};
 use super::retry::Retrier;
@@ -18,7 +19,8 @@ use super::{QuotaLimit, RetryPolicy, TokenProvider};
 /// A typed client for the Gmail REST API (`gmail/v1`), acting as the signed-in
 /// user (`users/me`).
 ///
-/// Cloning is cheap and shares the connection pool and quota limiter. Every
+/// Cloning is cheap and shares the connection pool, quota limiter and batch
+/// concurrency. Every
 /// request gets its access token from the [`TokenProvider`]. A `401` triggers
 /// one token refresh and a retry; `429`, rate-limit `403`s, `5xx` and timeouts
 /// are retried with exponential backoff and jitter, per the [`RetryPolicy`].
@@ -37,19 +39,22 @@ struct Inner {
     retry: RetryPolicy,
     quota: Option<QuotaLimiter>,
     batch_size: usize,
-    batch_concurrency: usize,
+    concurrency: ConcurrencyGate,
     retries: AtomicU64,
     rate_limited: AtomicU64,
 }
 
-/// Counts of a client's (and its clones') retries since it was built, for
-/// progress reports and diagnosis.
+/// Counts of a client's (and its clones') retries since it was built, and its
+/// current batch concurrency, for progress reports and diagnosis.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClientStats {
     /// Requests and batch items sent again after a retryable failure.
     pub retries: u64,
     /// Responses and batch items Gmail rejected with a rate limit.
     pub rate_limited: u64,
+    /// How many batch requests may be in flight right now (see
+    /// [`BatchConcurrency`]).
+    pub batch_concurrency: usize,
 }
 
 impl std::fmt::Debug for GmailClient {
@@ -80,7 +85,7 @@ impl GmailClient {
             retry: RetryPolicy::default(),
             quota: Some(QuotaLimit::default()),
             batch_size: DEFAULT_BATCH_SIZE,
-            batch_concurrency: DEFAULT_BATCH_CONCURRENCY,
+            batch_concurrency: BatchConcurrency::default(),
         }
     }
 
@@ -114,9 +119,14 @@ impl GmailClient {
         &self.inner.retry
     }
 
-    /// Calls per batch, and batches in flight at once.
-    pub(crate) fn batch_settings(&self) -> (usize, usize) {
-        (self.inner.batch_size, self.inner.batch_concurrency)
+    /// Calls per batch.
+    pub(crate) fn batch_size(&self) -> usize {
+        self.inner.batch_size
+    }
+
+    /// Limits the batch requests in flight.
+    pub(crate) fn concurrency(&self) -> &ConcurrencyGate {
+        &self.inner.concurrency
     }
 
     /// How many requests have been retried, and rate-limited, so far.
@@ -124,6 +134,7 @@ impl GmailClient {
         ClientStats {
             retries: self.inner.retries.load(Ordering::Relaxed),
             rate_limited: self.inner.rate_limited.load(Ordering::Relaxed),
+            batch_concurrency: self.inner.concurrency.limit(),
         }
     }
 
@@ -307,7 +318,7 @@ pub struct GmailClientBuilder {
     retry: RetryPolicy,
     quota: Option<QuotaLimit>,
     batch_size: usize,
-    batch_concurrency: usize,
+    batch_concurrency: BatchConcurrency,
 }
 
 impl GmailClientBuilder {
@@ -344,11 +355,19 @@ impl GmailClientBuilder {
         self
     }
 
-    /// Sets how many batch requests one batched call keeps in flight at once
-    /// (at least 1; [`DEFAULT_BATCH_CONCURRENCY`] by default). The quota
-    /// limiter still caps the overall rate.
+    /// Keeps exactly this many batch requests in flight at once (at least 1),
+    /// instead of adapting to Gmail's rate limiting. The quota limiter still
+    /// caps the overall rate.
     pub fn batch_concurrency(mut self, concurrency: usize) -> Self {
-        self.batch_concurrency = concurrency.max(1);
+        self.batch_concurrency = BatchConcurrency::Fixed(concurrency.max(1));
+        self
+    }
+
+    /// Sets how many batch requests the client and its clones keep in flight
+    /// at once. Defaults to [`BatchConcurrency::Adaptive`] with
+    /// [`AdaptiveConcurrency::default`](super::AdaptiveConcurrency::default).
+    pub fn concurrency(mut self, concurrency: BatchConcurrency) -> Self {
+        self.batch_concurrency = concurrency;
         self
     }
 
@@ -375,7 +394,7 @@ impl GmailClientBuilder {
                 retry: self.retry,
                 quota: self.quota.map(QuotaLimiter::new),
                 batch_size: self.batch_size,
-                batch_concurrency: self.batch_concurrency,
+                concurrency: ConcurrencyGate::new(self.batch_concurrency),
                 retries: AtomicU64::new(0),
                 rate_limited: AtomicU64::new(0),
             }),

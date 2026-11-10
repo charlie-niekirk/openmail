@@ -2,7 +2,7 @@
 
 use clap::builder::TypedValueParser as _;
 use clap::{Parser, Subcommand};
-use openmail_gmail::api::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_SIZE};
+use openmail_gmail::api::DEFAULT_BATCH_SIZE;
 
 /// Openmail developer CLI: exercise the Gmail client against a real account
 /// without the desktop UI.
@@ -75,14 +75,14 @@ pub enum Command {
             value_parser = clap::value_parser!(u16).range(1..=50).map(usize::from)
         )]
         batch_size: usize,
-        /// Batch requests in flight at once (1 to 16), for tuning throughput.
+        /// Keep exactly N batch requests in flight (1 to 16), instead of
+        /// adapting to Gmail's rate limiting.
         #[arg(
             long,
             value_name = "N",
-            default_value_t = DEFAULT_BATCH_CONCURRENCY,
             value_parser = clap::value_parser!(u16).range(1..=16).map(usize::from)
         )]
-        batch_concurrency: usize,
+        batch_concurrency: Option<usize>,
     },
 }
 
@@ -220,7 +220,7 @@ mod tests {
                 all: false,
                 prefetch: None,
                 batch_size: DEFAULT_BATCH_SIZE,
-                batch_concurrency: DEFAULT_BATCH_CONCURRENCY,
+                batch_concurrency: None,
             }
         );
 
@@ -243,7 +243,7 @@ mod tests {
                 all: false,
                 prefetch: Some(50),
                 batch_size: 20,
-                batch_concurrency: 2,
+                batch_concurrency: Some(2),
             }
         );
 

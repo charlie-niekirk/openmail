@@ -8,8 +8,8 @@ use common::batch::{BATCH, BatchResponder, Call, Part, error_json};
 use common::{fast_retries, setup, setup_with};
 use openmail_core::{MessageId, ThreadId};
 use openmail_gmail::api::{
-    ClientStats, DEFAULT_BATCH_SIZE, Error, GmailClient, MAX_BATCH_SIZE, MessageFormat, QuotaLimit,
-    ThreadFormat,
+    AdaptiveConcurrency, BatchConcurrency, DEFAULT_BATCH_SIZE, Error, GmailClient, MAX_BATCH_SIZE,
+    MessageFormat, QuotaLimit, ThreadFormat,
 };
 use reqwest::StatusCode;
 use wiremock::matchers::{method, path};
@@ -260,13 +260,8 @@ async fn only_failed_retryable_items_are_resent() {
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[1].ids(), [1, 2, 3]);
     assert!(results.iter().all(Result::is_ok), "{results:?}");
-    assert_eq!(
-        client.stats(),
-        ClientStats {
-            retries: 3,
-            rate_limited: 2
-        }
-    );
+    let stats = client.stats();
+    assert_eq!((stats.retries, stats.rate_limited), (3, 2));
 }
 
 #[tokio::test]
@@ -513,11 +508,72 @@ async fn rate_limited_items_are_retried_without_holding_up_other_batches() {
     let mut calls: Vec<Vec<usize>> = responder.calls().iter().map(Call::ids).collect();
     calls.sort();
     assert_eq!(calls, [vec![0, 1], vec![1], vec![2, 3], vec![4, 5]]);
-    assert_eq!(
-        client.stats(),
-        ClientStats {
-            retries: 1,
-            rate_limited: 1
+    let stats = client.stats();
+    assert_eq!((stats.retries, stats.rate_limited), (1, 1));
+}
+
+#[tokio::test]
+async fn rate_limit_bursts_lower_the_concurrency_and_clean_batches_raise_it() {
+    let server = MockServer::start().await;
+    let client = GmailClient::builder(std::sync::Arc::new(common::TestTokens::default()))
+        .base_url(reqwest::Url::parse(&server.uri()).unwrap())
+        .retry_policy(fast_retries(3))
+        .quota_limit(None)
+        .batch_size(1)
+        .concurrency(BatchConcurrency::Adaptive(AdaptiveConcurrency {
+            initial: 4,
+            max: 4,
+            increase_after: 2,
+            cooldown: Duration::ZERO,
+        }))
+        .build()
+        .unwrap();
+    let throttled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let throttle = throttled.clone();
+    let responder = BatchResponder::new(move |_, part| {
+        if throttle.load(std::sync::atomic::Ordering::SeqCst) {
+            (429, error_json(429, "rateLimitExceeded"))
+        } else {
+            (200, message_json(part))
         }
-    );
+    });
+    mount(&server, &responder).await;
+    assert_eq!(client.stats().batch_concurrency, 4);
+
+    // A burst of rate limits: every batch halves the concurrency, down to 1.
+    let results = client
+        .get_messages(&message_ids(4), MessageFormat::Minimal, &[])
+        .await
+        .unwrap();
+    assert!(results.iter().all(Result::is_err));
+    assert_eq!(client.stats().batch_concurrency, 1);
+
+    // Clean batches bring it back up, one step per two of them.
+    throttled.store(false, std::sync::atomic::Ordering::SeqCst);
+    let clone = client.clone();
+    let results = clone
+        .get_messages(&message_ids(3), MessageFormat::Minimal, &[])
+        .await
+        .unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    // Shared by clones.
+    assert_eq!(client.stats().batch_concurrency, 2);
+    client
+        .get_messages(&message_ids(10), MessageFormat::Minimal, &[])
+        .await
+        .unwrap();
+    assert_eq!(client.stats().batch_concurrency, 4);
+}
+
+#[tokio::test]
+async fn a_fixed_concurrency_does_not_adapt() {
+    let (server, client) = batching_client(1, 3).await;
+    let responder = BatchResponder::new(|_, _| (429, error_json(429, "rateLimitExceeded")));
+    mount(&server, &responder).await;
+
+    client
+        .get_messages(&message_ids(4), MessageFormat::Minimal, &[])
+        .await
+        .unwrap();
+    assert_eq!(client.stats().batch_concurrency, 3);
 }

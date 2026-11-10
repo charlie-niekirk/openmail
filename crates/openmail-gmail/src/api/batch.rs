@@ -31,9 +31,6 @@ pub const MAX_BATCH_SIZE: usize = 50;
 /// several small batches in flight beat one large one.
 pub const DEFAULT_BATCH_SIZE: usize = 10;
 
-/// Batches in flight at once by default.
-pub const DEFAULT_BATCH_CONCURRENCY: usize = 4;
-
 /// One call inside a batch: a method on a `users/me` resource.
 #[derive(Debug, Clone)]
 pub(crate) struct BatchRequest {
@@ -114,8 +111,9 @@ impl GmailClient {
     }
 
     /// Sends `requests` in batches of the client's batch size, with up to its
-    /// batch concurrency in flight, and decodes each successful response as
-    /// `T`. Results come back in the order of `requests`.
+    /// [batch concurrency](super::BatchConcurrency) in flight, and decodes each
+    /// successful response as `T`. Results come back in the order of
+    /// `requests`.
     ///
     /// Each batch is charged the quota units of all its calls before it is
     /// sent. Calls that fail with a retryable status (429, rate-limit 403, 5xx)
@@ -128,14 +126,19 @@ impl GmailClient {
     ) -> Result<Vec<Result<T>>> {
         let mut results: Vec<Option<Result<T>>> = requests.iter().map(|_| None).collect();
         let indices: Vec<usize> = (0..requests.len()).collect();
-        let (size, concurrency) = self.batch_settings();
         // Owned chunks: a stream over borrowed slices would make callers'
         // futures not `Send` (a higher-ranked lifetime limitation).
-        let chunks: Vec<Vec<usize>> = indices.chunks(size).map(<[usize]>::to_vec).collect();
+        let chunks: Vec<Vec<usize>> = indices
+            .chunks(self.batch_size())
+            .map(<[usize]>::to_vec)
+            .collect();
+        // Every batch is polled at once; the client's concurrency gate decides
+        // how many are actually in flight (including retries).
+        let all = chunks.len().max(1);
         let requests = &requests;
         let mut batches = stream::iter(chunks)
             .map(|chunk| self.run_batch(requests, chunk))
-            .buffer_unordered(concurrency);
+            .buffer_unordered(all);
         while let Some(batch) = batches.next().await {
             for (index, result) in batch? {
                 results[index] = Some(result);
@@ -166,9 +169,11 @@ impl GmailClient {
         let mut refreshed = false;
 
         loop {
+            let permit = self.concurrency().acquire().await;
             let started = Instant::now();
             let (responses, token) = self.send_batch(requests, &pending).await?;
             let elapsed = started.elapsed();
+            drop(permit);
             // Failed items by status and reason, for the debug log.
             let mut failures: BTreeMap<String, usize> = BTreeMap::new();
             let mut rate_limited_items = 0;
@@ -217,11 +222,13 @@ impl GmailClient {
                 }
             }
 
+            self.concurrency().record(rate_limited_items > 0);
             tracing::debug!(
                 items = pending.len(),
                 elapsed_ms = elapsed.as_millis(),
                 failed = failures.values().sum::<usize>(),
                 ?failures,
+                in_flight_limit = self.concurrency().limit(),
                 "Gmail batch"
             );
 
