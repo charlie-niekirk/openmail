@@ -5520,6 +5520,7 @@ dependencies = [
  "open",
  "openmail-core",
  "openmail-gmail",
+ "openmail-mime",
  "time",
  "tokio",
  "tracing",

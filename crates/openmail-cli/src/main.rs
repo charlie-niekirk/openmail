@@ -6,12 +6,12 @@ mod accounts;
 mod cli;
 mod labels;
 mod session;
+mod show;
 mod text;
 mod threads;
 
 use std::process::ExitCode;
 
-use anyhow::bail;
 use clap::Parser;
 use time::UtcOffset;
 use tracing_subscriber::EnvFilter;
@@ -80,9 +80,8 @@ async fn run(cli: Cli, offset: UtcOffset) -> anyhow::Result<()> {
             )
             .await
         }
-        Command::Show { .. } => {
-            let _client = session::gmail_client(account)?;
-            bail!("not implemented yet")
+        Command::Show { thread_id } => {
+            show::run(&session::gmail_client(account)?, &thread_id, offset).await
         }
     }
 }

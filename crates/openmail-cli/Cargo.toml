@@ -21,6 +21,7 @@ futures-util.workspace = true
 open.workspace = true
 openmail-core = { path = "../openmail-core" }
 openmail-gmail = { path = "../openmail-gmail" }
+openmail-mime = { path = "../openmail-mime" }
 time = { workspace = true, features = ["local-offset"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tracing.workspace = true
