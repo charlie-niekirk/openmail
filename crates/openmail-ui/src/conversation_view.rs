@@ -354,9 +354,9 @@ impl ConversationView {
                 .child(Spinner::new().small())
                 .child("Loading message…")
                 .into_any_element(),
-            BodyState::Loaded(text) => div()
+            BodyState::Loaded(body) => div()
                 .text_role(TextRole::Body)
-                .child(text.clone())
+                .child(body.text.clone())
                 .into_any_element(),
             BodyState::Unavailable(reason) => div()
                 .text_role(TextRole::Secondary)

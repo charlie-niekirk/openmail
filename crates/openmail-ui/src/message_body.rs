@@ -13,28 +13,7 @@ use gpui_component::{ActiveTheme as _, v_flex};
 use gpui_webview::WebView;
 use wry::{NewWindowResponse, WebViewBuilder};
 
-/// A sample newsletter body in the shape the sanitizer will produce: table layout,
-/// inline styles, an inline `data:` image, links, and no scripts or remote resources.
-pub const SAMPLE_NEWSLETTER: &str = include_str!("message_body/sample_newsletter.html");
-
-/// Content Security Policy for every body document. Nothing loads from the network:
-/// only inline styles and `data:` images and fonts are allowed, and no script at all.
-pub const BODY_CSP: &str = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; \
-                            font-src data:; form-action 'none'; base-uri 'none'";
-
-/// Wraps a sanitized HTML fragment in the trusted document shell the webview loads:
-/// charset, CSP and a neutral base style. `body_html` must already be sanitized.
-pub fn body_document(body_html: &str) -> String {
-    format!(
-        "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
-         <meta http-equiv=\"Content-Security-Policy\" content=\"{BODY_CSP}\">\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <style>html,body{{margin:0;padding:0;background:#ffffff;}}\
-         body{{font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;\
-         overflow-wrap:break-word;}}img{{max-width:100%;}}</style>\
-         </head><body>{body_html}</body></html>"
-    )
-}
+use crate::body_document::body_document;
 
 /// Whether the webview may navigate to `url`. Only the initial document load is
 /// allowed: `with_html` loads at `about:blank` (WebKit) or as a `data:` URL
@@ -107,21 +86,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn document_carries_csp_and_body() {
-        let doc = body_document("<p>Hello</p>");
-        assert!(doc.starts_with("<!DOCTYPE html>"));
-        assert!(doc.contains(&format!("content=\"{BODY_CSP}\"")));
-        assert!(doc.contains("<body><p>Hello</p></body>"));
-    }
-
-    #[test]
-    fn csp_blocks_scripts_and_network() {
-        assert!(BODY_CSP.starts_with("default-src 'none'"));
-        assert!(!BODY_CSP.contains("script-src"));
-        assert!(!BODY_CSP.contains("http"));
-    }
-
-    #[test]
     fn only_the_initial_document_may_load() {
         assert!(allows_navigation("about:blank"));
         assert!(allows_navigation("about:blank#top"));
@@ -131,22 +95,5 @@ mod tests {
         assert!(!allows_navigation("file:///etc/passwd"));
         assert!(!allows_navigation("javascript:alert(1)"));
         assert!(!allows_navigation("data:image/svg+xml,<svg/>"));
-    }
-
-    #[test]
-    fn sample_is_static_and_offline() {
-        let sample = SAMPLE_NEWSLETTER.to_ascii_lowercase();
-        assert!(!sample.contains("<script"));
-        let has_handler = sample.split_whitespace().any(|word| {
-            word.strip_prefix("on").is_some_and(|rest| {
-                rest.split_once('=').is_some_and(|(name, _)| {
-                    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic())
-                })
-            })
-        });
-        assert!(!has_handler, "no inline event handlers");
-        assert!(!sample.contains("src=\"http"), "no remote resources");
-        assert!(sample.contains("<table"));
-        assert!(sample.contains("<img src=\"data:image/"));
     }
 }

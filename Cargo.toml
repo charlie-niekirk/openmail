@@ -82,6 +82,8 @@ mail-parser = { version = "1.0.1", features = ["full_encoding"] }
 # Without `gethostname`: Message-IDs are generated on the sender's domain instead.
 mail-builder = { version = "2.0.1", default-features = false }
 insta = "1.49.0"
+# HTML sanitizing for message bodies before they reach the webview.
+ammonia = "4.2.4"
 
 [workspace.lints.rust]
 # Deny rather than forbid, so a crate that genuinely needs FFI (for example the

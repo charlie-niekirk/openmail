@@ -12,6 +12,7 @@ use openmail_core::{Address, Label, LabelId, MessageId, SystemLabel, ThreadId};
 use openmail_store::{MessageBody, ThreadDetail};
 use time::OffsetDateTime;
 
+use crate::body_document::clean_html;
 pub use crate::thread_list::LabelChip;
 
 /// What a thread with no subject is called.
@@ -149,8 +150,8 @@ pub enum BodyState {
     NotLoaded,
     /// Requested from the mail service.
     Loading,
-    /// The text to show.
-    Loaded(String),
+    /// The body, ready to show.
+    Loaded(LoadedBody),
     /// The message is gone, or its body could not be read or fetched.
     Unavailable(String),
 }
@@ -199,7 +200,7 @@ impl Conversation {
                     unread,
                     expanded: unread || index == last,
                     body: detail.body.as_ref().map_or(BodyState::NotLoaded, |body| {
-                        BodyState::Loaded(body_text(body))
+                        BodyState::Loaded(LoadedBody::new(body))
                     }),
                     id: message.id,
                 }
@@ -264,7 +265,7 @@ impl Conversation {
         if let Some(message) = self.message_mut(id) {
             message.body = body.map_or_else(
                 || BodyState::Unavailable("This message is no longer available.".to_owned()),
-                |body| BodyState::Loaded(body_text(body)),
+                |body| BodyState::Loaded(LoadedBody::new(body)),
             );
         }
     }
@@ -317,8 +318,32 @@ impl Conversation {
     }
 }
 
+/// A body as the reading pane shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedBody {
+    /// Its text ([`body_text`]), shown when it has no HTML or when the HTML
+    /// view is unavailable.
+    pub text: String,
+    /// Its HTML part, sanitized ([`clean_html`]), if it has one with content.
+    pub html: Option<String>,
+}
+
+impl LoadedBody {
+    pub fn new(body: &MessageBody) -> Self {
+        Self {
+            text: body_text(body),
+            html: body
+                .html
+                .as_deref()
+                .filter(|html| !html.trim().is_empty())
+                .map(clean_html)
+                .filter(|html| !html.trim().is_empty()),
+        }
+    }
+}
+
 /// The text to show for a body: its plain text, or text converted from its
-/// HTML when the plain text is missing or blank (the HTML view is Phase 4).
+/// HTML when the plain text is missing or blank.
 pub fn body_text(body: &MessageBody) -> String {
     let text = body
         .text
@@ -511,6 +536,13 @@ mod tests {
         }
     }
 
+    fn loaded_text(message: &MessageItem) -> Option<&str> {
+        match &message.body {
+            BodyState::Loaded(body) => Some(&body.text),
+            _ => None,
+        }
+    }
+
     fn label(id: &str, name: &str, label_type: LabelType) -> Label {
         Label {
             id: LabelId::new(id),
@@ -569,10 +601,7 @@ mod tests {
         let mut messages = ids(1);
         messages[0].body = Some(body(Some("Hello\n"), None));
         let mut conversation = Conversation::new(detail(messages), &[], ME);
-        assert_eq!(
-            conversation.messages[0].body,
-            BodyState::Loaded("Hello".to_owned())
-        );
+        assert_eq!(loaded_text(&conversation.messages[0]), Some("Hello"));
         assert!(conversation.take_bodies_to_load().is_empty());
     }
 
@@ -581,10 +610,7 @@ mod tests {
         let mut conversation = Conversation::new(detail(ids(2)), &[], ME);
         conversation.take_bodies_to_load();
         conversation.body_loaded(&MessageId::new("m2"), Some(&body(Some("Hi"), None)));
-        assert_eq!(
-            conversation.messages[1].body,
-            BodyState::Loaded("Hi".to_owned())
-        );
+        assert_eq!(loaded_text(&conversation.messages[1]), Some("Hi"));
         conversation.body_loaded(&MessageId::new("m2"), None);
         assert!(matches!(
             conversation.messages[1].body,
@@ -619,10 +645,7 @@ mod tests {
 
         conversation.refresh(detail(ids(3)), &[], ME);
         assert_eq!(expanded(&conversation), [true, false, true]);
-        assert_eq!(
-            conversation.messages[0].body,
-            BodyState::Loaded("One".to_owned())
-        );
+        assert_eq!(loaded_text(&conversation.messages[0]), Some("One"));
         assert_eq!(conversation.messages[2].body, BodyState::NotLoaded);
     }
 
@@ -697,6 +720,25 @@ mod tests {
         );
         assert_eq!(body_text(&body(None, Some("<b>Bold</b>"))), "Bold");
         assert_eq!(body_text(&body(None, None)), EMPTY_BODY);
+    }
+
+    #[test]
+    fn html_parts_are_cleaned_and_blank_ones_dropped() {
+        let loaded = LoadedBody::new(&body(
+            Some("Hi"),
+            Some("<p onclick=\"x()\">Hi</p><script>x()</script>"),
+        ));
+        assert_eq!(loaded.text, "Hi");
+        assert_eq!(loaded.html.as_deref(), Some("<p>Hi</p>"));
+
+        assert_eq!(LoadedBody::new(&body(Some("Hi"), Some(" \n"))).html, None);
+        assert_eq!(
+            LoadedBody::new(&body(Some("Hi"), Some("<script>x()</script>"))).html,
+            None
+        );
+        let text_only = LoadedBody::new(&body(None, Some("<b>Bold</b>")));
+        assert_eq!(text_only.text, "Bold");
+        assert_eq!(text_only.html.as_deref(), Some("<b>Bold</b>"));
     }
 
     #[test]
