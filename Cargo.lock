@@ -5754,10 +5754,13 @@ dependencies = [
  "openmail-mime",
  "openmail-store",
  "openmail-sync",
+ "serde",
  "serde_json",
+ "tempfile",
  "time",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]
