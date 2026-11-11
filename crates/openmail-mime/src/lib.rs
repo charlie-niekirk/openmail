@@ -19,5 +19,5 @@ mod reply;
 pub use base64url::{decode_base64url, encode_base64url};
 pub use build::{InlineImage, OutgoingAttachment, OutgoingMessage, generate_message_id};
 pub use error::{Error, Result};
-pub use parse::{ParsedHeaders, ParsedMessage, ParsedPart};
+pub use parse::{ParsedHeaders, ParsedMessage, ParsedPart, html_to_text};
 pub use reply::{ThreadingHeaders, forward_subject, parse_message_ids, reply_subject};

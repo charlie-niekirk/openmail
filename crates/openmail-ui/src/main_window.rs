@@ -11,6 +11,7 @@ use gpui::{
 use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
 
 use crate::bridge::AppModel;
+use crate::conversation_view::ConversationView;
 use crate::onboarding::{Setup, SignIn};
 use crate::onboarding_view::{setup_screen, sign_in_screen};
 use crate::sidebar_view::SidebarView;
@@ -84,6 +85,7 @@ pub struct MainWindow {
     model: Entity<AppModel>,
     sidebar: Entity<SidebarView>,
     thread_list: Entity<ThreadListView>,
+    conversation: Entity<ConversationView>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -98,6 +100,7 @@ impl MainWindow {
             model,
             sidebar: cx.new(SidebarView::new),
             thread_list: cx.new(ThreadListView::new),
+            conversation: cx.new(ConversationView::new),
             _subscriptions: [appearance, status],
         }
     }
@@ -153,16 +156,11 @@ impl MainWindow {
             )
             // Conversation view (PR 3.5).
             .child(
-                v_flex()
+                div()
                     .h_full()
                     .flex_1()
                     .min_w_0()
-                    .items_center()
-                    .justify_center()
-                    .bg(theme.background)
-                    .text_role(TextRole::Secondary)
-                    .text_color(theme.muted_foreground)
-                    .child("No conversation selected"),
+                    .child(self.conversation.clone()),
             )
     }
 

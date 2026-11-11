@@ -17,13 +17,14 @@ use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use openmail_core::{LabelColor, LabelId, ThreadId};
 use openmail_store::ThreadView;
-use time::{OffsetDateTime, UtcOffset};
+use time::OffsetDateTime;
 
 use crate::assets::IMPORTANCE_ICON;
 use crate::bridge::{AppEvent, AppModel};
 use crate::sidebar::parse_hex_color;
 use crate::state::Session;
 use crate::thread_list::{LabelChip, Query, QueryKind, ThreadList, ThreadRow};
+use crate::time_format::local;
 use crate::typography::{TextRole, TypographyExt as _};
 
 /// The height of every row (`uniform_list` needs them all the same).
@@ -364,20 +365,6 @@ fn chip(text: String, color: Option<&LabelColor>, cx: &App) -> gpui::Div {
 /// A Gmail label color such as `#16a765`.
 fn hex(color: &str) -> Option<Hsla> {
     parse_hex_color(color).map(|n| rgb(n).into())
-}
-
-/// `date` in the local time zone at that date (so dates across a daylight
-/// saving change are right), or unchanged if the zone can't be read.
-fn local(date: OffsetDateTime) -> OffsetDateTime {
-    use chrono::{Offset as _, TimeZone as _};
-
-    chrono::Local
-        .timestamp_opt(date.unix_timestamp(), 0)
-        .single()
-        .and_then(|local| {
-            UtcOffset::from_whole_seconds(local.offset().fix().local_minus_utc()).ok()
-        })
-        .map_or(date, |offset| date.to_offset(offset))
 }
 
 impl Render for ThreadListView {

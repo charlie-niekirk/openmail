@@ -9,6 +9,8 @@
 
 mod assets;
 mod bridge;
+mod conversation;
+mod conversation_view;
 mod main_window;
 mod message_body;
 mod onboarding;
@@ -19,10 +21,13 @@ mod state;
 mod theme;
 mod thread_list;
 mod thread_list_view;
+mod time_format;
 mod typography;
 
 pub use assets::{Assets, IMPORTANCE_ICON};
 pub use bridge::{AppEvent, AppModel, Backend, Connection};
+pub use conversation::{BodyState, Conversation, MessageItem};
+pub use conversation_view::ConversationView;
 pub use main_window::{Content, MainWindow, main_window_options};
 pub use message_body::{
     BODY_CSP, MessageBodyView, SAMPLE_NEWSLETTER, allows_navigation, body_document,

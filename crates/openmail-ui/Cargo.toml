@@ -16,6 +16,7 @@ gpui-component.workspace = true
 gpui-kit-assets.workspace = true
 gpui-webview.workspace = true
 openmail-core = { path = "../openmail-core" }
+openmail-mime = { path = "../openmail-mime" }
 openmail-store = { path = "../openmail-store" }
 openmail-sync = { path = "../openmail-sync" }
 serde_json.workspace = true
