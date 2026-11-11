@@ -1,9 +1,11 @@
 //! GPUI views, theme, keymap and the bridge between `MailService` events and UI state.
 
+mod bridge;
 mod main_window;
 mod message_body;
 mod state;
 
+pub use bridge::{AppEvent, AppModel, Connection};
 pub use main_window::{MainWindow, main_window_options};
 pub use message_body::{
     BODY_CSP, MessageBodyView, SAMPLE_NEWSLETTER, allows_navigation, body_document,
