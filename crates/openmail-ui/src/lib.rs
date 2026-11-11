@@ -29,7 +29,7 @@ mod typography;
 
 pub use assets::{Assets, IMPORTANCE_ICON};
 pub use bridge::{AppEvent, AppModel, Backend, Connection};
-pub use conversation::{BodyState, Conversation, MessageItem};
+pub use conversation::{BodyState, Conversation, MessageItem, OFFLINE_BODY, ReadingPane};
 pub use conversation_view::ConversationView;
 pub use main_window::{Content, MainWindow, main_window_options};
 pub use message_body::{
