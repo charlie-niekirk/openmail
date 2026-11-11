@@ -185,6 +185,14 @@ with synthetic input:
   hands focus back, and keys then no longer scroll the page. The spike saw Space
   stop scrolling after a (blocked) link click; with 4.1's document Space, Page
   Down and the arrows all scroll after a link click.
+- **Cursor.** GPUI covers its view with one AppKit cursor rect in its own
+  cursor style, and AppKit keeps applying it over the webview too, so WebKit's
+  cursor (a hand over links, an I-beam over text) never showed. Since 4.2,
+  `WebviewCursor` turns the window's cursor rects off while the pointer is
+  over the visible webview and back on when it leaves or the webview hides.
+  GPUI does receive the mouse moves over the webview, so it can tell. This is
+  the crate's one `unsafe` call (turning GPUI's raw `NSView` handle into a
+  reference); WebView2 and WebKitGTK set their own cursors.
 - **Privacy.** Link clicks reach the navigation handler and are cancelled; nothing
   navigates away. JavaScript is off and the CSP blocks every network load
   (since 4.2, except the remote images the user chose to show).
@@ -247,6 +255,13 @@ constraints above require.
   shows the previous page or a blank one first. An empty, missing or failed
   pane hides it at once, and a change of account (or signing out) drops it
   (`tear_down`); dropping hides the native view and returns focus to GPUI.
+- **Wide mail** fits the pane where it can, as in Gmail web: images shrink
+  to the message (and never pass the pane's width, keeping their aspect
+  ratio), and long words and URLs break. What can't shrink, such as a
+  fixed-width table, makes the thread wider (`.om-thread` is at least its
+  content's min-content width) rather than overflowing its message, so the
+  document itself scrolls sideways, from anywhere in it. (Since 4.2; before,
+  each message clipped its content and scrolled it sideways at its bottom.)
 - **Resizing** needs nothing more than the spike: the element pushes its rect
   every frame, so the dividers and window resizes keep it aligned.
 - **Overlays.** The webview hides while a `gpui-component` dialog or sheet is
