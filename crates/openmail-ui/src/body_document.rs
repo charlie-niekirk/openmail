@@ -75,7 +75,73 @@ fn csp_source(url: &str) -> Option<String> {
 /// What a message whose body is still loading shows in its section.
 pub const LOADING_BODY: &str = "Loading message…";
 
-/// The shell's own styles. Its classes all start with `om-`, which message
+/// The colors of the document's shell, from the app's theme, so the
+/// conversation matches the window around it in light and dark.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellPalette {
+    /// Whether the theme is dark: the shell's `color-scheme`, and how
+    /// messages' own colors are treated.
+    pub dark: bool,
+    pub background: String,
+    pub foreground: String,
+    pub border: String,
+    /// Secondary text: dates, snippets, participants.
+    pub muted: String,
+    /// Behind controls such as the quoted-text toggle.
+    pub muted_background: String,
+    /// Behind a message header under the pointer.
+    pub hover: String,
+    pub link: String,
+    /// The focus ring.
+    pub focus: String,
+}
+
+impl ShellPalette {
+    /// The light palette (Openmail Light's colors), which messages that
+    /// can't be adapted keep in dark mode too.
+    pub fn light() -> Self {
+        Self {
+            dark: false,
+            background: "#ffffff".to_owned(),
+            foreground: "#1f1f1f".to_owned(),
+            border: "#e3e5e8".to_owned(),
+            muted: "#5f6368".to_owned(),
+            muted_background: "#f1f3f4".to_owned(),
+            hover: "#f2f6fc".to_owned(),
+            link: "#0b57d0".to_owned(),
+            focus: "#0b57d0".to_owned(),
+        }
+    }
+
+    /// The `:root` rule declaring the palette as the custom properties
+    /// [`SHELL_CSS`] uses.
+    fn root_rule(&self) -> String {
+        format!(
+            ":root{{color-scheme:{scheme};--om-bg:{};--om-fg:{};--om-border:{};\
+             --om-muted:{};--om-muted-bg:{};--om-hover:{};--om-link:{};--om-focus:{}}}",
+            css_color(&self.background),
+            css_color(&self.foreground),
+            css_color(&self.border),
+            css_color(&self.muted),
+            css_color(&self.muted_background),
+            css_color(&self.hover),
+            css_color(&self.link),
+            css_color(&self.focus),
+            scheme = if self.dark { "dark" } else { "light" },
+        )
+    }
+}
+
+/// `color` if it is a hex color (`#rgb` to `#rrggbbaa`), else black: the
+/// palette is the app's, but it goes into a stylesheet.
+fn css_color(color: &str) -> &str {
+    let hex = color.strip_prefix('#').unwrap_or_default();
+    let valid = matches!(hex.len(), 3 | 4 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit());
+    if valid { color } else { "#000000" }
+}
+
+/// The shell's own styles, in the colors of a [`ShellPalette`] (custom
+/// properties on `:root`). Its classes all start with `om-`, which message
 /// HTML may not use, and message CSS is scoped to the message's wrapper, so
 /// a message can't restyle the shell or take on its styles. `.om-body`
 /// contains its message's painting (`contain: paint`): whatever the message
@@ -90,61 +156,80 @@ pub const LOADING_BODY: &str = "Loading message…";
 /// min-content width), so the document itself scrolls sideways, from
 /// anywhere in it, rather than a scroller at the bottom of the message.
 /// Message CSS outranks these defaults (its selectors start with an ID).
+///
+/// In dark mode a message that can't be adapted keeps its light colors on a
+/// light card (`.om-card`, which brings back the light palette inside it).
 const SHELL_CSS: &str = "\
-:root{color-scheme:light}\
-html,body{margin:0;padding:0;background:#ffffff;color:#1f1f23}\
+html,body{margin:0;padding:0;background:var(--om-bg);color:var(--om-fg)}\
 body{font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;\
 overflow-wrap:break-word}\
 img{max-width:100%}\
 .om-thread{max-width:860px;min-width:min-content;margin:0 auto;padding:4px 24px 24px;\
 box-sizing:border-box}\
-.om-message{border:1px solid #e4e4e9;border-radius:8px;margin:0 0 12px;overflow:hidden}\
+.om-message{border:1px solid var(--om-border);border-radius:8px;margin:0 0 12px;overflow:hidden}\
 .om-header{display:block;list-style:none;cursor:pointer;padding:8px 16px}\
 .om-header::-webkit-details-marker{display:none}\
-.om-header:focus-visible{outline:2px solid #2b59c3;outline-offset:-2px}\
-.om-header:hover{background:#f5f5f8}\
+.om-header:focus-visible{outline:2px solid var(--om-focus);outline-offset:-2px}\
+.om-header:hover{background:var(--om-hover)}\
 .om-message[open]>.om-header{padding-top:12px}\
 .om-header-row{display:flex;align-items:baseline;gap:12px}\
 .om-sender{flex:none;max-width:220px;font-weight:600;overflow:hidden;\
 text-overflow:ellipsis;white-space:nowrap}\
-.om-line{flex:1;min-width:0;color:#6b6b75;overflow:hidden;text-overflow:ellipsis;\
+.om-line{flex:1;min-width:0;color:var(--om-muted);overflow:hidden;text-overflow:ellipsis;\
 white-space:nowrap}\
-.om-date{flex:none;color:#6b6b75;font-size:12px}\
+.om-date{flex:none;color:var(--om-muted);font-size:12px}\
 .om-message:not([open]) .om-recipients,.om-message[open] .om-snippet{display:none}\
-.om-participants{padding:0 16px 12px;color:#6b6b75;font-size:13px}\
+.om-participants{padding:0 16px 12px;color:var(--om-muted);font-size:13px}\
 .om-participants table{border-collapse:collapse}\
 .om-participants th{font-weight:normal;text-align:left;vertical-align:top;\
 padding:0 8px 0 0;width:36px}\
-.om-participants td{padding:0;color:#1f1f23}\
-.om-body{padding:12px 16px 16px;border-top:1px solid #e4e4e9;contain:paint}\
+.om-participants td{padding:0;color:var(--om-fg)}\
+.om-body{padding:12px 16px 16px;border-top:1px solid var(--om-border);contain:paint}\
 .om-mail{overflow-wrap:anywhere}\
+.om-mail a{color:var(--om-link)}\
 .om-mail img{max-width:min(100%,calc(100vw - 82px));height:auto}\
+.om-dark .om-card{--om-fg:#1f1f1f;--om-muted:#5f6368;--om-muted-bg:#f1f3f4;\
+--om-border:#e3e5e8;--om-link:#0b57d0;color-scheme:light;background:#ffffff;\
+color:var(--om-fg);padding:16px;border-radius:6px}\
+.om-dark .om-card img{max-width:min(100%,calc(100vw - 114px))}\
 .om-text{white-space:pre-wrap}\
-.om-notice{margin:0;color:#6b6b75}";
+.om-notice{margin:0;color:var(--om-muted)}";
 
 /// Wraps an HTML fragment in the trusted document shell the webview loads:
-/// charset, CSP ([`document_csp`] for `image_urls`) and the shell's styles.
-/// `body_html` must be trusted, or built from sanitized HTML and
-/// [`escape_html`] text.
-pub fn body_document(body_html: &str, image_urls: &BTreeSet<String>) -> String {
+/// charset, CSP ([`document_csp`] for `image_urls`) and the shell's styles
+/// in `palette`'s colors. `body_html` must be trusted, or built from
+/// sanitized HTML and [`escape_html`] text.
+pub fn body_document(
+    body_html: &str,
+    image_urls: &BTreeSet<String>,
+    palette: &ShellPalette,
+) -> String {
     // Quotes in the policy stay readable; only what would end the attribute
     // is escaped.
     let csp = document_csp(image_urls)
         .replace('&', "&amp;")
         .replace('"', "&quot;");
+    let class = if palette.dark {
+        " class=\"om-dark\""
+    } else {
+        ""
+    };
+    let root = palette.root_rule();
     format!(
-        "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
+        "<!DOCTYPE html>\n<html{class}><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <style>{SHELL_CSS}</style></head><body>{body_html}</body></html>"
+         <style>{root}{SHELL_CSS}</style></head><body>{body_html}</body></html>"
     )
 }
 
-/// The document for `conversation`: every message, oldest first, open if it
-/// is expanded in the view-model. `dates` gives a message's short date (for
-/// its header) and full date (among its participants).
+/// The document for `conversation` in `palette`'s colors: every message,
+/// oldest first, open if it is expanded in the view-model. `dates` gives a
+/// message's short date (for its header) and full date (among its
+/// participants).
 pub fn conversation_document(
     conversation: &Conversation,
+    palette: &ShellPalette,
     dates: impl Fn(OffsetDateTime) -> (String, String),
 ) -> String {
     // A line per section keeps the document (and its snapshots) readable.
@@ -152,7 +237,7 @@ pub fn conversation_document(
     let mut image_urls = BTreeSet::new();
     for message in &conversation.messages {
         let (short, full) = dates(message.date);
-        message_section(&mut html, message, &short, &full);
+        message_section(&mut html, message, palette, &short, &full);
         if let BodyState::Loaded(body) = &message.body
             && let Some(cleaned) = &body.html
         {
@@ -160,11 +245,17 @@ pub fn conversation_document(
         }
     }
     html.push_str("</main>");
-    body_document(&html, &image_urls)
+    body_document(&html, &image_urls, palette)
 }
 
 /// Appends one message's `<details>` section to `html`.
-fn message_section(html: &mut String, message: &MessageItem, short_date: &str, full_date: &str) {
+fn message_section(
+    html: &mut String,
+    message: &MessageItem,
+    palette: &ShellPalette,
+    short_date: &str,
+    full_date: &str,
+) {
     let open = if message.expanded { " open" } else { "" };
     let _ = write!(
         html,
@@ -201,9 +292,16 @@ fn message_section(html: &mut String, message: &MessageItem, short_date: &str, f
     match &message.body {
         BodyState::Loaded(body) => match &body.html {
             Some(cleaned) => {
+                // Mail is written for a light page: in dark mode it keeps
+                // its colors on a light card.
+                let class = if palette.dark {
+                    "om-mail om-card"
+                } else {
+                    "om-mail"
+                };
                 let _ = write!(
                     html,
-                    "<div class=\"om-mail\" id=\"{}\">{}</div>",
+                    "<div class=\"{class}\" id=\"{}\">{}</div>",
                     scope_id(message.id.as_str()),
                     cleaned.html
                 );
@@ -298,7 +396,7 @@ mod tests {
 
     #[test]
     fn document_carries_csp_and_body() {
-        let doc = body_document("<p>Hello</p>", &BTreeSet::new());
+        let doc = body_document("<p>Hello</p>", &BTreeSet::new(), &ShellPalette::light());
         assert!(doc.starts_with("<!DOCTYPE html>"));
         assert!(doc.contains(&format!("content=\"{BODY_CSP}\"")));
         assert!(doc.contains("<body><p>Hello</p></body>"));
@@ -324,13 +422,13 @@ mod tests {
              style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'"
         );
         assert_eq!(document_csp(&BTreeSet::new()), BODY_CSP);
-        let doc = body_document("", &urls);
+        let doc = body_document("", &urls, &ShellPalette::light());
         assert!(doc.contains("img-src data: http://cdn.example:8080/a%3Bb%2Cc%27d.gif"));
     }
 
     #[test]
     fn wide_mail_fits_or_scrolls_the_document() {
-        let doc = body_document("", &BTreeSet::new());
+        let doc = body_document("", &BTreeSet::new(), &ShellPalette::light());
         // Images shrink to the message and long words break…
         assert!(doc.contains(".om-mail{overflow-wrap:anywhere}"));
         assert!(doc.contains(".om-mail img{max-width:min(100%,calc(100vw - 82px));height:auto}"));
@@ -339,8 +437,69 @@ mod tests {
         assert!(doc.contains("min-width:min-content"));
         assert!(!doc.contains("overflow-x"));
         assert!(doc.contains(
-            ".om-body{padding:12px 16px 16px;border-top:1px solid #e4e4e9;contain:paint}"
+            ".om-body{padding:12px 16px 16px;border-top:1px solid var(--om-border);contain:paint}"
         ));
+    }
+
+    fn dark() -> ShellPalette {
+        ShellPalette {
+            dark: true,
+            background: "#1e1f20".to_owned(),
+            foreground: "#e3e3e3".to_owned(),
+            border: "#333537".to_owned(),
+            muted: "#9aa0a6".to_owned(),
+            muted_background: "#282a2c".to_owned(),
+            hover: "#2a2b2d".to_owned(),
+            link: "#a8c7fa".to_owned(),
+            focus: "#a8c7fa".to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_shell_takes_the_theme_colors() {
+        let light = body_document("", &BTreeSet::new(), &ShellPalette::light());
+        assert!(light.contains("<html><head>"));
+        assert!(light.contains(":root{color-scheme:light;--om-bg:#ffffff;--om-fg:#1f1f1f;"));
+
+        let doc = body_document("", &BTreeSet::new(), &dark());
+        assert!(doc.contains("<html class=\"om-dark\"><head>"));
+        assert!(doc.contains(
+            ":root{color-scheme:dark;--om-bg:#1e1f20;--om-fg:#e3e3e3;--om-border:#333537;\
+             --om-muted:#9aa0a6;--om-muted-bg:#282a2c;--om-hover:#2a2b2d;--om-link:#a8c7fa;\
+             --om-focus:#a8c7fa}"
+        ));
+        // The shell's own colors all come from the palette.
+        let shell = SHELL_CSS.replace(".om-dark .om-card{", "");
+        let card = SHELL_CSS.find(".om-dark .om-card{").unwrap();
+        assert!(!shell[..card].contains('#'), "{shell}");
+    }
+
+    #[test]
+    fn palette_colors_cannot_break_out() {
+        let mut palette = ShellPalette::light();
+        palette.link = "red}body{display:none".to_owned();
+        palette.focus = "#12345g".to_owned();
+        let doc = body_document("", &BTreeSet::new(), &palette);
+        assert!(!doc.contains("body{display:none"));
+        assert!(doc.contains("--om-link:#000000;--om-focus:#000000}"));
+    }
+
+    #[test]
+    fn html_mail_sits_on_a_light_card_in_dark_mode() {
+        let message = item(
+            "m4",
+            true,
+            BodyState::Loaded(LoadedBody {
+                text: "Hi".to_owned(),
+                html: Some(clean("<p>Hi</p>")),
+                source: None,
+            }),
+        );
+        let doc = conversation_document(&conversation(vec![message.clone()]), &dark(), dates);
+        assert!(doc.contains("<div class=\"om-mail om-card\" id=\"b-m4\">"));
+        let doc =
+            conversation_document(&conversation(vec![message]), &ShellPalette::light(), dates);
+        assert!(doc.contains("<div class=\"om-mail\" id=\"b-m4\">"));
     }
 
     #[test]
@@ -383,6 +542,7 @@ mod tests {
                     loaded("Hi", Some("<p style=\"color:red\">Hi</p>")),
                 ),
             ]),
+            &ShellPalette::light(),
             dates,
         );
         insta::assert_snapshot!(doc);
@@ -395,6 +555,7 @@ mod tests {
                 item("m1", false, BodyState::NotLoaded),
                 item("m2", true, BodyState::NotLoaded),
             ]),
+            &ShellPalette::light(),
             dates,
         );
         assert!(doc.contains("<details class=\"om-message\" id=\"m-m1\">"));
@@ -415,7 +576,8 @@ mod tests {
             }),
         );
         message.sender = "<img src=x>".to_owned();
-        let doc = conversation_document(&conversation(vec![message]), dates);
+        let doc =
+            conversation_document(&conversation(vec![message]), &ShellPalette::light(), dates);
         assert!(!doc.contains("<script"));
         assert!(!doc.contains("<img"));
         assert!(!doc.contains("<h1>"));
