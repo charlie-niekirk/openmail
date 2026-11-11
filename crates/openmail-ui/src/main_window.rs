@@ -10,6 +10,7 @@ use gpui::{
 use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
 
 use crate::bridge::AppModel;
+use crate::onboarding::{Notice, SignIn};
 use crate::state::{AppState, Session};
 use crate::typography::{TextRole, TypographyExt as _};
 
@@ -56,10 +57,15 @@ impl Content {
     pub fn for_state(state: &AppState) -> Self {
         match state.session() {
             Session::Starting | Session::Ready { .. } => Self::Mailbox,
-            // Onboarding (PR 3.2) replaces this with a sign-in screen.
-            Session::SignedOut { reason } => Self::Notice {
+            Session::SignedOut(sign_in) => Self::Notice {
                 title: "Welcome to Openmail".to_owned(),
-                detail: reason.clone(),
+                detail: match sign_in {
+                    SignIn::Ready { notice } => {
+                        notice.as_ref().map(Notice::text).unwrap_or_default()
+                    }
+                    SignIn::InBrowser => String::new(),
+                    SignIn::Unconfigured { help } => help.clone(),
+                },
             },
             Session::Failed { error } => Self::Notice {
                 title: "Openmail couldn't open your mailbox".to_owned(),
@@ -240,9 +246,9 @@ mod tests {
     #[test]
     fn explains_why_there_is_no_mailbox() {
         let mut state = AppState::new();
-        state.set_session(Session::SignedOut {
-            reason: "No account is synced yet.".to_owned(),
-        });
+        state.set_session(Session::SignedOut(SignIn::Ready {
+            notice: Some(Notice::Info("No account is synced yet.".to_owned())),
+        }));
         let Content::Notice { detail, .. } = Content::for_state(&state) else {
             panic!("expected a notice");
         };

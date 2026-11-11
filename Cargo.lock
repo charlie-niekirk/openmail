@@ -5746,6 +5746,7 @@ dependencies = [
  "gpui-webview",
  "lb-wry",
  "openmail-core",
+ "openmail-gmail",
  "openmail-sync",
  "serde_json",
 ]

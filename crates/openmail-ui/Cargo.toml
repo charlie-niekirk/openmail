@@ -18,5 +18,8 @@ openmail-sync = { path = "../openmail-sync" }
 serde_json.workspace = true
 wry.workspace = true
 
+[dev-dependencies]
+openmail-gmail = { path = "../openmail-gmail" }
+
 [lints]
 workspace = true

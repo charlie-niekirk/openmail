@@ -11,14 +11,15 @@ use std::time::Duration;
 use openmail_core::MessageId;
 use openmail_sync::{Connectivity, MailEvent, Phase, Progress, SyncStatus};
 
+use crate::onboarding::{Notice, SignIn, SignInError, inbox_ready};
+
 /// Whether there is a mailbox to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Session {
     /// The mail service is being started.
     Starting,
-    /// There is no signed-in account to open; `reason` says what is missing.
-    /// Onboarding (PR 3.2) replaces this with a sign-in screen.
-    SignedOut { reason: String },
+    /// There is no signed-in account to open: the sign-in screen.
+    SignedOut(SignIn),
     /// The mail service is running for `account`.
     Ready { account: String },
     /// The mail service could not be started, or stopped unexpectedly.
@@ -67,6 +68,9 @@ pub struct AppState {
     sync: SyncState,
     online: bool,
     ops_stopped: Option<String>,
+    /// The account was signed in from the app and its inbox is not synced
+    /// yet: show the setup screen instead of an empty mailbox.
+    setting_up: bool,
 }
 
 impl Default for AppState {
@@ -83,6 +87,7 @@ impl AppState {
             sync: SyncState::Waiting,
             online: true,
             ops_stopped: None,
+            setting_up: false,
         }
     }
 
@@ -102,6 +107,47 @@ impl AppState {
     /// Why sending changes to Gmail stopped, if it did.
     pub fn ops_stopped(&self) -> Option<&str> {
         self.ops_stopped.as_deref()
+    }
+
+    /// Whether a newly signed-in account's first sync is still storing its
+    /// inbox.
+    pub fn is_setting_up(&self) -> bool {
+        self.setting_up
+    }
+
+    /// Starts a sign-in attempt if the sign-in screen can start one now.
+    /// Reports a status change only if it did.
+    pub fn begin_sign_in(&mut self) -> Changed {
+        let began = match &mut self.session {
+            Session::SignedOut(sign_in) => sign_in.begin(),
+            _ => false,
+        };
+        Changed {
+            status: began,
+            ..Changed::default()
+        }
+    }
+
+    /// A sign-in attempt ended without an account.
+    pub fn sign_in_ended(&mut self, error: SignInError) -> Changed {
+        match &mut self.session {
+            Session::SignedOut(sign_in) => {
+                sign_in.ended(error);
+                Changed {
+                    status: true,
+                    ..Changed::default()
+                }
+            }
+            _ => Changed::default(),
+        }
+    }
+
+    /// The mail service is running for `account`, which was just signed in:
+    /// show the setup screen until its inbox is synced.
+    pub fn signed_in(&mut self, account: String) -> Changed {
+        let changed = self.set_session(Session::Ready { account });
+        self.setting_up = true;
+        changed
     }
 
     /// Replaces the session, resetting what was known about the last one.
@@ -152,7 +198,20 @@ impl AppState {
     }
 
     fn apply_into(&mut self, event: MailEvent, changed: &mut Changed) {
+        // Events still arriving from a service whose account was signed out.
+        let Session::Ready { account } = &self.session else {
+            return;
+        };
         match event {
+            MailEvent::SyncStatus(SyncStatus::Stopped(error)) if error.requires_sign_in() => {
+                let notice = Notice::Expired {
+                    account: account.clone(),
+                };
+                let signed_out = self.set_session(Session::SignedOut(SignIn::Ready {
+                    notice: Some(notice),
+                }));
+                changed.status |= signed_out.status;
+            }
             MailEvent::SyncStatus(status) => {
                 let sync = match status {
                     SyncStatus::Initial(progress) => SyncState::Initial(progress),
@@ -169,6 +228,9 @@ impl AppState {
                 };
                 changed.status |= sync != self.sync;
                 self.sync = sync;
+                if self.setting_up && inbox_ready(&self.sync) {
+                    self.setting_up = false;
+                }
             }
             MailEvent::Connectivity(connectivity) => {
                 let online = connectivity == Connectivity::Online;
@@ -194,7 +256,7 @@ impl AppState {
     pub fn status_text(&self) -> Option<String> {
         match &self.session {
             Session::Starting => return Some("Opening mailbox…".to_owned()),
-            Session::SignedOut { .. } | Session::Failed { .. } => return None,
+            Session::SignedOut(_) | Session::Failed { .. } => return None,
             Session::Ready { .. } => {}
         }
         if !self.online {
@@ -222,7 +284,7 @@ impl AppState {
 }
 
 /// `1234567` as `1,234,567`.
-fn group_thousands(n: u64) -> String {
+pub(crate) fn group_thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -235,7 +297,7 @@ fn group_thousands(n: u64) -> String {
 }
 
 /// A wait as whole seconds under two minutes, else whole minutes (rounded up).
-fn short_duration(d: Duration) -> String {
+pub(crate) fn short_duration(d: Duration) -> String {
     let secs = d.as_secs() + u64::from(d.subsec_nanos() > 0);
     if secs < 120 {
         format!("{secs}s")
@@ -258,6 +320,10 @@ mod tests {
             account: "ada@example.com".to_owned(),
         });
         state
+    }
+
+    fn signed_out() -> Session {
+        Session::SignedOut(SignIn::Ready { notice: None })
     }
 
     fn up_to_date() -> MailEvent {
@@ -303,9 +369,7 @@ mod tests {
     #[test]
     fn signing_out_does_not_ask_for_queries() {
         let mut state = AppState::new();
-        let changed = state.set_session(Session::SignedOut {
-            reason: "No account".to_owned(),
-        });
+        let changed = state.set_session(signed_out());
         assert!(changed.status);
         assert!(!changed.threads && !changed.labels);
         assert_eq!(state.status_text(), None);
@@ -404,10 +468,87 @@ mod tests {
         assert!(state.service_ended().is_empty());
 
         let mut state = AppState::new();
-        state.set_session(Session::SignedOut {
-            reason: String::new(),
-        });
+        state.set_session(signed_out());
         assert!(state.service_ended().is_empty());
+    }
+
+    #[test]
+    fn a_sign_in_attempt_runs_from_the_sign_in_screen() {
+        let mut state = AppState::new();
+        assert!(!state.begin_sign_in().status);
+
+        state.set_session(signed_out());
+        assert!(state.begin_sign_in().status);
+        assert_eq!(state.session(), &Session::SignedOut(SignIn::InBrowser));
+        assert!(!state.begin_sign_in().status);
+
+        assert!(state.sign_in_ended(SignInError::Denied).status);
+        assert_eq!(
+            state.session(),
+            &Session::SignedOut(SignIn::Ready {
+                notice: Some(Notice::Denied)
+            })
+        );
+        assert!(state.begin_sign_in().status);
+    }
+
+    #[test]
+    fn a_new_account_sets_up_until_its_inbox_is_synced() {
+        let mut state = AppState::new();
+        state.set_session(signed_out());
+        state.begin_sign_in();
+
+        let changed = state.signed_in("ada@example.com".to_owned());
+        assert!(changed.status && changed.threads);
+        assert!(state.is_setting_up());
+
+        state.apply(progress(Phase::Labels, 0));
+        state.apply(progress(Phase::Inbox, 50));
+        assert!(state.is_setting_up());
+        assert!(state.apply(progress(Phase::Prefetch, 120)).status);
+        assert!(!state.is_setting_up());
+
+        // A later full resync shows the mailbox, not the setup screen.
+        state.apply(progress(Phase::Labels, 0));
+        assert!(!state.is_setting_up());
+    }
+
+    #[test]
+    fn opening_a_signed_in_account_skips_setup() {
+        let mut state = ready();
+        state.apply(progress(Phase::Inbox, 50));
+        assert!(!state.is_setting_up());
+    }
+
+    #[test]
+    fn a_revoked_sign_in_returns_to_the_sign_in_screen() {
+        let mut state = ready();
+        let token = openmail_gmail::auth::AuthError::InvalidGrant("revoked".to_owned());
+        let error = Error::Gmail(openmail_gmail::api::Error::Token(Box::new(token)));
+        let changed = state.apply_all([
+            MailEvent::SyncStatus(SyncStatus::Stopped(Arc::new(error))),
+            // Events still in flight from the stopped service are ignored.
+            up_to_date(),
+        ]);
+        assert!(changed.status);
+        assert_eq!(
+            state.session(),
+            &Session::SignedOut(SignIn::Ready {
+                notice: Some(Notice::Expired {
+                    account: "ada@example.com".to_owned()
+                })
+            })
+        );
+        assert_eq!(state.sync(), &SyncState::Waiting);
+    }
+
+    #[test]
+    fn other_stops_keep_the_session() {
+        let mut state = ready();
+        state.apply(MailEvent::SyncStatus(SyncStatus::Stopped(Arc::new(
+            Error::ServiceStopped,
+        ))));
+        assert!(matches!(state.session(), Session::Ready { .. }));
     }
 
     #[test]

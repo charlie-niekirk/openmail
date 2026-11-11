@@ -16,6 +16,7 @@ use gpui::{
 use openmail_core::MessageId;
 use openmail_sync::{MailEvent, MailEvents, MailHandle, MailService};
 
+use crate::onboarding::{Notice, SignIn};
 use crate::state::{AppState, Changed, Session};
 
 /// The outcome of starting the mail service, which the app does off the main
@@ -129,7 +130,9 @@ impl AppModel {
                 changed
             }
             Connection::SignedOut { reason } => {
-                self.state.set_session(Session::SignedOut { reason })
+                self.state.set_session(Session::SignedOut(SignIn::Ready {
+                    notice: Some(Notice::Info(reason)),
+                }))
             }
             Connection::Failed { error } => self.state.set_session(Session::Failed { error }),
         };
