@@ -238,6 +238,118 @@ fn failures_are_reported_and_retried_by_a_refresh() {
     assert!(list.load_more(PAGE_SIZE).is_some());
 }
 
+fn online() -> AppState {
+    let mut app = AppState::new();
+    app.set_session(crate::state::Session::Ready {
+        account: "ada@example.com".to_owned(),
+    });
+    app.apply(openmail_sync::MailEvent::SyncStatus(
+        openmail_sync::SyncStatus::UpToDate(openmail_sync::Changes::default()),
+    ));
+    app
+}
+
+fn offline() -> AppState {
+    let mut app = online();
+    app.apply(openmail_sync::MailEvent::Connectivity(
+        openmail_sync::Connectivity::Offline,
+    ));
+    app
+}
+
+#[test]
+fn loading_then_rows() {
+    let store = inbox_store(3);
+    let mut list = ThreadList::default();
+    assert_eq!(list.content(&online()), ListContent::Loading);
+    let first = list.refresh().unwrap();
+    assert_eq!(list.content(&online()), ListContent::Loading);
+    complete(&mut list, &store, first);
+    assert_eq!(list.content(&online()), ListContent::Rows);
+    assert_eq!(list.banner(&online()), None);
+}
+
+#[test]
+fn a_failed_first_page_shows_the_error_until_retried() {
+    let store = inbox_store(3);
+    let mut list = ThreadList::default();
+    let first = list.refresh().unwrap();
+    list.finish(&first, Err("store failed".to_owned()));
+    assert_eq!(
+        list.content(&online()),
+        ListContent::Failed("store failed".to_owned())
+    );
+    assert_eq!(list.banner(&online()), None);
+
+    let retry = list.refresh().unwrap();
+    assert_eq!(list.content(&online()), ListContent::Loading);
+    complete(&mut list, &store, retry);
+    assert_eq!(list.content(&online()), ListContent::Rows);
+}
+
+#[test]
+fn a_failure_with_rows_shows_a_banner() {
+    let store = inbox_store(80);
+    let mut list = ThreadList::default();
+    let first = list.refresh().unwrap();
+    complete(&mut list, &store, first);
+    let more = list.load_more(PAGE_SIZE).unwrap();
+    list.finish(&more, Err("busy".to_owned()));
+    assert_eq!(list.content(&online()), ListContent::Rows);
+    assert_eq!(
+        list.banner(&online()),
+        Some(ListBanner::Failed("busy".to_owned()))
+    );
+    // Offline says more than the failure.
+    assert_eq!(list.banner(&offline()), Some(ListBanner::Offline));
+
+    let retry = list.refresh().unwrap();
+    assert_eq!(list.banner(&online()), None, "hidden while retrying");
+    complete(&mut list, &store, retry);
+    assert_eq!(list.banner(&online()), None);
+}
+
+#[test]
+fn empty_views_are_named_and_explained() {
+    let store = inbox_store(0);
+    let mut list = ThreadList::default();
+    let first = list.refresh().unwrap();
+    complete(&mut list, &store, first);
+    assert_eq!(
+        list.content(&online()),
+        ListContent::Empty {
+            title: "No conversations in Inbox".to_owned(),
+            detail: None,
+        }
+    );
+    let ListContent::Empty { detail, .. } = list.content(&offline()) else {
+        panic!("expected empty");
+    };
+    assert!(detail.unwrap().contains("offline"));
+    assert_eq!(list.banner(&offline()), Some(ListBanner::Offline));
+
+    let mut syncing = online();
+    syncing.apply(openmail_sync::MailEvent::SyncStatus(
+        openmail_sync::SyncStatus::Initial(openmail_sync::Progress::default()),
+    ));
+    let ListContent::Empty { detail, .. } = list.content(&syncing) else {
+        panic!("expected empty");
+    };
+    assert!(detail.unwrap().contains("syncing"));
+}
+
+#[test]
+fn views_are_named_as_in_the_sidebar() {
+    let mut list = ThreadList::new(view("SENT"));
+    assert_eq!(list.view_name(), "Sent");
+    list.set_view(ThreadView::AllMail);
+    assert_eq!(list.view_name(), "All Mail");
+    list.set_view(view("Label_work"));
+    assert_eq!(list.view_name(), "this label");
+    list.set_labels(labels());
+    assert_eq!(list.view_name(), "Work");
+}
+
 #[test]
 fn selection_survives_refreshes() {
     let store = inbox_store(3);

@@ -17,6 +17,7 @@ mod onboarding;
 mod onboarding_view;
 mod pane_sizes;
 mod panes;
+mod placeholder;
 mod sidebar;
 mod sidebar_view;
 mod state;
@@ -45,8 +46,8 @@ pub use sidebar_view::{SidebarEvent, SidebarView};
 pub use state::{AppState, Changed, Session, SyncState};
 pub use theme::{Themes, follow_system_appearance};
 pub use thread_list::{
-    Finished, LabelChip, Query, QueryKind, ThreadList, ThreadRow, condense_senders, format_date,
-    inbox,
+    Finished, LabelChip, ListBanner, ListContent, Query, QueryKind, ThreadList, ThreadRow,
+    condense_senders, format_date, inbox,
 };
 pub use thread_list_view::{ROW_HEIGHT, ThreadListEvent, ThreadListView};
 pub use typography::{TextRole, TypographyExt};

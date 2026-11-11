@@ -21,6 +21,8 @@ use openmail_core::{
 use openmail_store::{ThreadCursor, ThreadPage, ThreadSummary, ThreadView};
 use time::OffsetDateTime;
 
+use crate::state::{AppState, SyncState};
+
 /// Threads per page.
 pub const PAGE_SIZE: usize = 50;
 
@@ -70,6 +72,31 @@ pub struct LabelChip {
     pub name: String,
     /// Gmail's colors for the label, if it has some.
     pub color: Option<LabelColor>,
+}
+
+/// What the list pane shows: its rows, or a state in their place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListContent {
+    /// The first page is loading.
+    Loading,
+    /// The first page could not be loaded; a retry is offered.
+    Failed(String),
+    /// The view has no threads. `detail` says why there may be more soon.
+    Empty {
+        title: String,
+        detail: Option<&'static str>,
+    },
+    /// The rows.
+    Rows,
+}
+
+/// A strip above the rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListBanner {
+    /// Gmail can't be reached: the list shows what is stored locally.
+    Offline,
+    /// Loading more threads, or refreshing them, failed; a retry is offered.
+    Failed(String),
 }
 
 /// One thread as the list shows it.
@@ -188,6 +215,61 @@ impl ThreadList {
 
     pub fn selected(&self) -> Option<&ThreadId> {
         self.selected.as_ref()
+    }
+
+    /// What the pane shows, given the app's state.
+    pub fn content(&self, app: &AppState) -> ListContent {
+        if !self.loaded {
+            return match &self.error {
+                Some(error) if self.in_flight.is_none() => ListContent::Failed(error.clone()),
+                _ => ListContent::Loading,
+            };
+        }
+        if !self.threads.is_empty() {
+            return ListContent::Rows;
+        }
+        let detail = if !app.is_online() {
+            Some("You're offline. New mail will show up once you reconnect.")
+        } else if matches!(app.sync(), SyncState::Initial(_)) {
+            Some("Openmail is still syncing your mail.")
+        } else {
+            None
+        };
+        ListContent::Empty {
+            title: format!("No conversations in {}", self.view_name()),
+            detail,
+        }
+    }
+
+    /// The strip to show above the rows, if any: offline, else a failure
+    /// to load more or refresh what is shown.
+    pub fn banner(&self, app: &AppState) -> Option<ListBanner> {
+        if !app.is_online() {
+            return Some(ListBanner::Offline);
+        }
+        match &self.error {
+            Some(error) if self.loaded && self.in_flight.is_none() => {
+                Some(ListBanner::Failed(error.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// The view's name as the sidebar shows it, such as "Inbox" or
+    /// "Work/Projects".
+    pub fn view_name(&self) -> String {
+        let label_name = |id: &LabelId| match id.system_label() {
+            Some(system) => system.display_name().to_owned(),
+            None => self
+                .labels
+                .get(id)
+                .map_or_else(|| "this label".to_owned(), |label| label.name.clone()),
+        };
+        match &self.view {
+            ThreadView::Label(id) => label_name(id),
+            ThreadView::AllOf(ids) => ids.iter().map(label_name).collect::<Vec<_>>().join(", "),
+            ThreadView::AllMail => "All Mail".to_owned(),
+        }
     }
 
     /// Selects a thread. Returns whether the selection changed.

@@ -3,7 +3,9 @@
 //! what is on screen, and reports the thread the user selects.
 //!
 //! The logic is in the [`ThreadList`] view-model; this view runs its queries
-//! through the [`MailHandle`](openmail_sync::MailHandle) and renders its rows.
+//! through the [`MailHandle`](openmail_sync::MailHandle) and renders its rows,
+//! or the state in their place ([`ListContent`]), under a strip when offline
+//! or after a failure ([`ListBanner`]).
 
 use std::ops::Range;
 
@@ -13,6 +15,7 @@ use gpui::{
     Subscription, Task, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px, rgb,
     uniform_list,
 };
+use gpui_component::button::Button;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use openmail_core::{LabelColor, LabelId, ThreadId};
@@ -21,9 +24,12 @@ use time::OffsetDateTime;
 
 use crate::assets::IMPORTANCE_ICON;
 use crate::bridge::{AppEvent, AppModel};
+use crate::placeholder::{banner, loading, placeholder};
 use crate::sidebar::parse_hex_color;
 use crate::state::Session;
-use crate::thread_list::{LabelChip, Query, QueryKind, ThreadList, ThreadRow};
+use crate::thread_list::{
+    LabelChip, ListBanner, ListContent, Query, QueryKind, ThreadList, ThreadRow,
+};
 use crate::time_format::local;
 use crate::typography::{TextRole, TypographyExt as _};
 
@@ -72,7 +78,11 @@ impl ThreadListView {
             AppEvent::LabelsChanged => this.load_labels(cx),
             AppEvent::BodyFetched(_) => {}
         });
-        let status = cx.observe(&model, |this, _, cx| this.connect(cx));
+        let status = cx.observe(&model, |this, _, cx| {
+            this.connect(cx);
+            // Connectivity changes the banner and the empty state.
+            cx.notify();
+        });
         let mut this = Self {
             model,
             list: ThreadList::default(),
@@ -125,6 +135,12 @@ impl ThreadListView {
         self.query = None;
         self.scroll_to_top();
         self.load_labels(cx);
+        self.refresh(cx);
+        cx.notify();
+    }
+
+    /// Tries again after a failure.
+    fn retry(&mut self, cx: &mut Context<'_, Self>) {
         self.refresh(cx);
         cx.notify();
     }
@@ -367,22 +383,54 @@ fn hex(color: &str) -> Option<Hsla> {
     parse_hex_color(color).map(|n| rgb(n).into())
 }
 
+fn retry_button(id: &'static str, cx: &mut Context<'_, ThreadListView>) -> Button {
+    Button::new(id)
+        .outline()
+        .small()
+        .label("Try again")
+        .on_click(cx.listener(|this, _, _, cx| this.retry(cx)))
+}
+
 impl Render for ThreadListView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        div()
-            .size_full()
-            .bg(theme.colors.list)
-            .child(
-                uniform_list(
-                    "thread-list",
-                    self.list.len(),
-                    cx.processor(|this, range: Range<usize>, _window, cx| this.rows(range, cx)),
+        let app = self.model.read(cx).state();
+        let content = self.list.content(app);
+        let strip = self.list.banner(app).map(|strip| match strip {
+            ListBanner::Offline => banner("Offline. Showing mail stored on this computer.", cx),
+            ListBanner::Failed(error) => {
+                banner(format!("Couldn't load conversations: {error}"), cx)
+                    .child(retry_button("retry-thread-list-banner", cx))
+            }
+        });
+        let body = match content {
+            ListContent::Rows => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(
+                    uniform_list(
+                        "thread-list",
+                        self.list.len(),
+                        cx.processor(|this, range: Range<usize>, _window, cx| this.rows(range, cx)),
+                    )
+                    .track_scroll(&self.scroll)
+                    .size_full(),
                 )
-                .track_scroll(&self.scroll)
-                .size_full(),
-            )
-            .vertical_scrollbar(&self.scroll)
+                .vertical_scrollbar(&self.scroll),
+            ListContent::Loading => loading(),
+            ListContent::Failed(error) => {
+                placeholder("Conversations couldn't be loaded.", Some(error.into()), cx)
+                    .child(retry_button("retry-thread-list", cx))
+            }
+            ListContent::Empty { title, detail } => {
+                placeholder(title, detail.map(SharedString::new_static), cx)
+            }
+        };
+        v_flex()
+            .size_full()
+            .bg(cx.theme().colors.list)
+            .children(strip)
+            .child(body)
     }
 }
 
