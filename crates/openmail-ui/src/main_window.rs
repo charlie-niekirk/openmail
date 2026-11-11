@@ -6,7 +6,7 @@ use gpui::{
     AppContext as _, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement as _, Pixels,
     Render, Styled as _, Subscription, Window, WindowBounds, WindowOptions, div, px, size,
 };
-use gpui_component::{ActiveTheme as _, Theme, TitleBar, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
 
 use crate::message_body::{MessageBodyView, SAMPLE_NEWSLETTER};
 
@@ -49,10 +49,7 @@ pub struct MainWindow {
 impl MainWindow {
     /// Creates the view and keeps the theme in step with the system light/dark setting.
     pub fn new(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
-        Theme::sync_system_appearance(Some(window), cx);
-        let appearance = cx.observe_window_appearance(window, |_, window, cx| {
-            Theme::sync_system_appearance(Some(window), cx);
-        });
+        let appearance = crate::theme::follow_system_appearance(window, cx);
         let message_body = cx.new(|cx| MessageBodyView::new(SAMPLE_NEWSLETTER, window, cx));
         Self {
             message_body,

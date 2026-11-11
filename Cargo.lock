@@ -5739,6 +5739,7 @@ dependencies = [
  "lb-wry",
  "openmail-core",
  "openmail-sync",
+ "serde_json",
 ]
 
 [[package]]

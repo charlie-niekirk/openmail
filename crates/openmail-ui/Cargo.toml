@@ -15,6 +15,7 @@ gpui-component.workspace = true
 gpui-webview.workspace = true
 openmail-core = { path = "../openmail-core" }
 openmail-sync = { path = "../openmail-sync" }
+serde_json.workspace = true
 wry.workspace = true
 
 [lints]

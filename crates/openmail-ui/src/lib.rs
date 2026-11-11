@@ -4,6 +4,8 @@ mod bridge;
 mod main_window;
 mod message_body;
 mod state;
+mod theme;
+mod typography;
 
 pub use bridge::{AppEvent, AppModel, Connection};
 pub use main_window::{MainWindow, main_window_options};
@@ -11,14 +13,16 @@ pub use message_body::{
     BODY_CSP, MessageBodyView, SAMPLE_NEWSLETTER, allows_navigation, body_document,
 };
 pub use state::{AppState, Changed, Session, SyncState};
+pub use theme::{Themes, follow_system_appearance};
+pub use typography::{TextRole, TypographyExt};
 
 use gpui::{App, AppContext as _, Bounds, WindowHandle};
-use gpui_component::{Root, Theme};
+use gpui_component::Root;
 
 /// Initializes `gpui-component` and the app theme. Call once, before opening windows.
 pub fn init(cx: &mut App) {
     gpui_component::init(cx);
-    Theme::sync_system_appearance(None, cx);
+    theme::init(cx);
 
     // There is no menu bar or dock handling yet, so quit with the last window.
     cx.on_window_closed(|cx, _| {
