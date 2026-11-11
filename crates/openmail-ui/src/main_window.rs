@@ -1,7 +1,8 @@
 //! The main window: the frame (a transparent macOS title bar showing the
 //! account and sync status) around either the mailbox, still a placeholder
-//! three-pane layout (sidebar, thread list, reading pane), or a notice when
-//! there is no mailbox to show.
+//! three-pane layout (sidebar, thread list, reading pane), the onboarding
+//! screens (sign-in, then a new account's first sync), or a notice when the
+//! mailbox could not be opened.
 
 use gpui::{
     App, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels, Render, SharedString,
@@ -10,6 +11,8 @@ use gpui::{
 use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
 
 use crate::bridge::AppModel;
+use crate::onboarding::{Setup, SignIn};
+use crate::onboarding_view::{setup_screen, sign_in_screen};
 use crate::state::{AppState, Session};
 use crate::typography::{TextRole, TypographyExt as _};
 
@@ -48,6 +51,10 @@ pub fn main_window_options(bounds: Bounds<Pixels>) -> WindowOptions {
 pub enum Content {
     /// The three panes (empty while the mailbox opens).
     Mailbox,
+    /// The sign-in screen.
+    SignIn(SignIn),
+    /// A newly signed-in account's first sync, until its inbox is ready.
+    Setup { account: String, setup: Setup },
     /// A message in place of the mailbox.
     Notice { title: String, detail: String },
 }
@@ -55,12 +62,13 @@ pub enum Content {
 impl Content {
     pub fn for_state(state: &AppState) -> Self {
         match state.session() {
-            Session::Starting | Session::Ready { .. } => Self::Mailbox,
-            // Onboarding (PR 3.2) replaces this with a sign-in screen.
-            Session::SignedOut { reason } => Self::Notice {
-                title: "Welcome to Openmail".to_owned(),
-                detail: reason.clone(),
+            Session::Starting => Self::Mailbox,
+            Session::Ready { account } if state.is_setting_up() => Self::Setup {
+                account: account.clone(),
+                setup: Setup::for_sync(state.sync()),
             },
+            Session::Ready { .. } => Self::Mailbox,
+            Session::SignedOut(sign_in) => Self::SignIn(sign_in.clone()),
             Session::Failed { error } => Self::Notice {
                 title: "Openmail couldn't open your mailbox".to_owned(),
                 detail: error.clone(),
@@ -178,6 +186,8 @@ impl Render for MainWindow {
         let theme = cx.theme();
         let content = match Content::for_state(state) {
             Content::Mailbox => Self::mailbox(cx).into_any_element(),
+            Content::SignIn(sign_in) => sign_in_screen(&sign_in, cx),
+            Content::Setup { account, setup } => setup_screen(&account, &setup, cx),
             Content::Notice { title, detail } => Self::notice(title, detail, cx).into_any_element(),
         };
 
@@ -195,8 +205,10 @@ impl Render for MainWindow {
 #[cfg(test)]
 mod tests {
     use gpui::{WindowBounds, point};
+    use openmail_sync::{Changes, MailEvent, SyncStatus};
 
     use super::*;
+    use crate::state::SyncState;
 
     fn options() -> WindowOptions {
         main_window_options(Bounds::new(point(px(0.), px(0.)), DEFAULT_SIZE))
@@ -238,16 +250,34 @@ mod tests {
     }
 
     #[test]
+    fn signs_in_then_sets_up_a_new_account() {
+        let mut state = AppState::new();
+        let sign_in = SignIn::Ready { notice: None };
+        state.set_session(Session::SignedOut(sign_in.clone()));
+        assert_eq!(Content::for_state(&state), Content::SignIn(sign_in));
+
+        state.begin_sign_in();
+        assert_eq!(
+            Content::for_state(&state),
+            Content::SignIn(SignIn::InBrowser)
+        );
+
+        state.signed_in("ada@example.com".to_owned());
+        let Content::Setup { account, setup } = Content::for_state(&state) else {
+            panic!("expected the setup screen");
+        };
+        assert_eq!(account, "ada@example.com");
+        assert_eq!(setup, Setup::for_sync(&SyncState::Waiting));
+
+        state.apply(MailEvent::SyncStatus(SyncStatus::UpToDate(
+            Changes::default(),
+        )));
+        assert_eq!(Content::for_state(&state), Content::Mailbox);
+    }
+
+    #[test]
     fn explains_why_there_is_no_mailbox() {
         let mut state = AppState::new();
-        state.set_session(Session::SignedOut {
-            reason: "No account is synced yet.".to_owned(),
-        });
-        let Content::Notice { detail, .. } = Content::for_state(&state) else {
-            panic!("expected a notice");
-        };
-        assert_eq!(detail, "No account is synced yet.");
-
         state.set_session(Session::Failed {
             error: "disk full".to_owned(),
         });

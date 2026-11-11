@@ -17,6 +17,8 @@ openmail-gmail = { path = "../../crates/openmail-gmail" }
 openmail-store = { path = "../../crates/openmail-store" }
 openmail-sync = { path = "../../crates/openmail-sync" }
 openmail-ui = { path = "../../crates/openmail-ui" }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

@@ -5632,6 +5632,8 @@ dependencies = [
  "openmail-sync",
  "openmail-ui",
  "tempfile",
+ "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -5746,8 +5748,11 @@ dependencies = [
  "gpui-webview",
  "lb-wry",
  "openmail-core",
+ "openmail-gmail",
  "openmail-sync",
  "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

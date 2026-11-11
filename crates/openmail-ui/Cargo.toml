@@ -16,7 +16,12 @@ gpui-webview.workspace = true
 openmail-core = { path = "../openmail-core" }
 openmail-sync = { path = "../openmail-sync" }
 serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
 wry.workspace = true
+
+[dev-dependencies]
+openmail-gmail = { path = "../openmail-gmail" }
 
 [lints]
 workspace = true

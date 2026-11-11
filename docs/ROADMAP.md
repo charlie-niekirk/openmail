@@ -107,7 +107,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 - [x] **3.1 UI architecture** — `feat/3.1-ui-architecture`
   - `openmail-ui` crate, bridge from tokio events to GPUI entities, `AppState`.
   - Light and dark themes that follow the system, typography, the window frame.
-- [ ] **3.2 Onboarding** — `feat/3.2-onboarding`
+- [x] **3.2 Onboarding** — `feat/3.2-onboarding`
   - "Sign in with Google" screen and initial-sync progress.
 - [ ] **3.3 Sidebar** ∥ — `feat/3.3-sidebar`
   - System labels, nested user-label tree (split on `/`), label colors, unread counts,
