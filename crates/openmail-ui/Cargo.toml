@@ -12,6 +12,7 @@ publish.workspace = true
 [dependencies]
 gpui.workspace = true
 gpui-component.workspace = true
+gpui-kit-assets.workspace = true
 gpui-webview.workspace = true
 openmail-core = { path = "../openmail-core" }
 openmail-store = { path = "../openmail-store" }

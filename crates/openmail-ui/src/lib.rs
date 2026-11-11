@@ -7,6 +7,7 @@
 //! tested without a window; [`AppModel`] is the GPUI entity that feeds
 //! [`AppState`] from the service's events and hands views a `MailHandle`.
 
+mod assets;
 mod bridge;
 mod main_window;
 mod message_body;
@@ -17,6 +18,7 @@ mod theme;
 mod thread_list;
 mod typography;
 
+pub use assets::{Assets, IMPORTANCE_ICON};
 pub use bridge::{AppEvent, AppModel, Backend, Connection};
 pub use main_window::{Content, MainWindow, main_window_options};
 pub use message_body::{

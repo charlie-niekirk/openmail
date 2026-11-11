@@ -9,16 +9,18 @@ use tracing_subscriber::EnvFilter;
 
 fn main() {
     init_logging();
-    gpui_platform::application().run(|cx| {
-        openmail_ui::init(cx);
-        // Starts the mail service off the main thread; the window shows its
-        // progress through the AppModel.
-        openmail_ui::AppModel::init(cx, Google);
-        if let Err(err) = openmail_ui::open_main_window(cx) {
-            eprintln!("openmail: failed to open the main window: {err:#}");
-            cx.quit();
-        }
-    });
+    gpui_platform::application()
+        .with_assets(openmail_ui::Assets)
+        .run(|cx| {
+            openmail_ui::init(cx);
+            // Starts the mail service off the main thread; the window shows its
+            // progress through the AppModel.
+            openmail_ui::AppModel::init(cx, Google);
+            if let Err(err) = openmail_ui::open_main_window(cx) {
+                eprintln!("openmail: failed to open the main window: {err:#}");
+                cx.quit();
+            }
+        });
 }
 
 /// Gmail accounts, signed in with Google OAuth and tokens in the keychain.

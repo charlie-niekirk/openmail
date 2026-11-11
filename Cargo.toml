@@ -27,6 +27,9 @@ gpui-platform = { package = "gpui-pre-platform", version = "=0.3.12", features =
   "x11",
 ] }
 gpui-component = "=0.9.1"
+# Icons for gpui-component (its default set) and the Lucide icons the app adds.
+# Released in lockstep with gpui-component: pin it to the same version.
+gpui-kit-assets = "=0.9.1"
 # Message-body webview. gpui-component's webview moved into its own crate,
 # `gpui-webview`, released in lockstep with it and built on Longbridge's wry fork
 # (`lb-wry`), which it does not re-export. Pin both exactly, alongside gpui-component.
