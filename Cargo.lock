@@ -5624,8 +5624,16 @@ dependencies = [
 name = "openmail"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "gpui-pre-platform",
+ "openmail-core",
+ "openmail-gmail",
+ "openmail-store",
+ "openmail-sync",
  "openmail-ui",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5737,6 +5745,9 @@ dependencies = [
  "gpui-pre",
  "gpui-webview",
  "lb-wry",
+ "openmail-core",
+ "openmail-sync",
+ "serde_json",
 ]
 
 [[package]]
