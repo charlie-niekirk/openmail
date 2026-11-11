@@ -163,6 +163,17 @@ impl Conversation {
     /// Unread messages and the latest one start expanded; the rest are
     /// collapsed to a line.
     pub fn new(detail: ThreadDetail, labels: &[Label], me: Option<&str>) -> Self {
+        Self::build(detail, labels, me, HashMap::new())
+    }
+
+    /// [`Conversation::new`], carrying over from `previous` what the user
+    /// expanded or collapsed and the bodies already loaded or being loaded.
+    fn build(
+        detail: ThreadDetail,
+        labels: &[Label],
+        me: Option<&str>,
+        mut previous: HashMap<MessageId, MessageItem>,
+    ) -> Self {
         let last = detail.messages.len().saturating_sub(1);
         let subject = detail
             .thread
@@ -184,6 +195,15 @@ impl Conversation {
                 let message = detail.message;
                 let headers = &message.headers;
                 let unread = message.is_unread();
+                let before = previous.remove(&message.id);
+                // A body loaded before is kept rather than cleaned again.
+                let body = match before.as_ref().map(|before| &before.body) {
+                    Some(body @ BodyState::Loaded(_)) => body.clone(),
+                    before_body => detail.body.as_ref().map_or_else(
+                        || before_body.cloned().unwrap_or(BodyState::NotLoaded),
+                        |body| BodyState::Loaded(LoadedBody::new(body)),
+                    ),
+                };
                 MessageItem {
                     sender: headers.from.first().map_or_else(
                         || "(unknown sender)".to_owned(),
@@ -198,10 +218,8 @@ impl Conversation {
                         .trim()
                         .to_owned(),
                     unread,
-                    expanded: unread || index == last,
-                    body: detail.body.as_ref().map_or(BodyState::NotLoaded, |body| {
-                        BodyState::Loaded(LoadedBody::new(body))
-                    }),
+                    expanded: before.map_or(unread || index == last, |before| before.expanded),
+                    body,
                     id: message.id,
                 }
             })
@@ -218,22 +236,12 @@ impl Conversation {
     /// keeping what the user expanded or collapsed and the bodies already
     /// loaded or being loaded. Messages new to the thread get the defaults.
     pub fn refresh(&mut self, detail: ThreadDetail, labels: &[Label], me: Option<&str>) {
-        let mut fresh = Self::new(detail, labels, me);
-        let mut old: HashMap<MessageId, MessageItem> = self
+        let previous = self
             .messages
             .drain(..)
             .map(|message| (message.id.clone(), message))
             .collect();
-        for message in &mut fresh.messages {
-            let Some(previous) = old.remove(&message.id) else {
-                continue;
-            };
-            message.expanded = previous.expanded;
-            if message.body == BodyState::NotLoaded {
-                message.body = previous.body;
-            }
-        }
-        *self = fresh;
+        *self = Self::build(detail, labels, me, previous);
     }
 
     /// Expands a collapsed message or collapses an expanded one. Returns
@@ -675,6 +683,21 @@ mod tests {
         assert_eq!(expanded(&conversation), [true, false, true]);
         assert_eq!(loaded_text(&conversation.messages[0]), Some("One"));
         assert_eq!(conversation.messages[2].body, BodyState::NotLoaded);
+    }
+
+    #[test]
+    fn refresh_keeps_loaded_bodies_and_takes_newly_stored_ones() {
+        let mut conversation = Conversation::new(detail(ids(2)), &[], ME);
+        conversation.take_bodies_to_load();
+        conversation.body_loaded(&MessageId::new("m1"), Some(&body(Some("One"), None)));
+        conversation.body_offline(&MessageId::new("m2"));
+
+        let mut messages = ids(2);
+        messages[0].body = Some(body(Some("Stored"), None));
+        messages[1].body = Some(body(Some("Two"), None));
+        conversation.refresh(detail(messages), &[], ME);
+        assert_eq!(loaded_text(&conversation.messages[0]), Some("One"));
+        assert_eq!(loaded_text(&conversation.messages[1]), Some("Two"));
     }
 
     #[test]
