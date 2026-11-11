@@ -7,6 +7,7 @@
 //! tested without a window; [`AppModel`] is the GPUI entity that feeds
 //! [`AppState`] from the service's events and hands views a `MailHandle`.
 
+mod assets;
 mod bridge;
 mod main_window;
 mod message_body;
@@ -16,8 +17,11 @@ mod sidebar;
 mod sidebar_view;
 mod state;
 mod theme;
+mod thread_list;
+mod thread_list_view;
 mod typography;
 
+pub use assets::{Assets, IMPORTANCE_ICON};
 pub use bridge::{AppEvent, AppModel, Backend, Connection};
 pub use main_window::{Content, MainWindow, main_window_options};
 pub use message_body::{
@@ -28,6 +32,11 @@ pub use sidebar::{Counts, Group, Mailbox, MailboxRow, Row, SNOOZED, Sidebar, par
 pub use sidebar_view::{SidebarEvent, SidebarView};
 pub use state::{AppState, Changed, Session, SyncState};
 pub use theme::{Themes, follow_system_appearance};
+pub use thread_list::{
+    Finished, LabelChip, Query, QueryKind, ThreadList, ThreadRow, condense_senders, format_date,
+    inbox,
+};
+pub use thread_list_view::{ROW_HEIGHT, ThreadListEvent, ThreadListView};
 pub use typography::{TextRole, TypographyExt};
 
 use gpui::{App, AppContext as _, Bounds, WindowHandle};
