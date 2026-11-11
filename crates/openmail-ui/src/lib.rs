@@ -1,4 +1,11 @@
 //! GPUI views, theme, keymap and the bridge between `MailService` events and UI state.
+//!
+//! Start-up, in order: [`init`] (widgets and themes), [`AppModel::init`] (starts
+//! the mail service off the main thread), then [`open_main_window`].
+//!
+//! UI state lives in plain view-models ([`AppState`], [`Content`]) that are
+//! tested without a window; [`AppModel`] is the GPUI entity that feeds
+//! [`AppState`] from the service's events and hands views a `MailHandle`.
 
 mod bridge;
 mod main_window;
@@ -8,7 +15,7 @@ mod theme;
 mod typography;
 
 pub use bridge::{AppEvent, AppModel, Connection};
-pub use main_window::{MainWindow, main_window_options};
+pub use main_window::{Content, MainWindow, main_window_options};
 pub use message_body::{
     BODY_CSP, MessageBodyView, SAMPLE_NEWSLETTER, allows_navigation, body_document,
 };
@@ -33,7 +40,8 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
-/// Opens the main Openmail window, centered on the primary display.
+/// Opens the main Openmail window, centered on the primary display. Call after
+/// [`AppModel::init`].
 pub fn open_main_window(cx: &mut App) -> gpui::Result<WindowHandle<Root>> {
     let bounds = Bounds::centered(None, main_window::DEFAULT_SIZE, cx);
     cx.open_window(main_window_options(bounds), |window, cx| {
