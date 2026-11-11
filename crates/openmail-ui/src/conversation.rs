@@ -1,6 +1,6 @@
 //! The conversation view-model: an open thread's header and its messages,
-//! collapsed or expanded the way Gmail shows them, with each expanded
-//! message's body loaded lazily.
+//! collapsed or expanded the way Gmail shows them, with every message's body
+//! loaded when the thread opens.
 //!
 //! [`ReadingPane`] is what the pane shows: nothing, a thread loading or
 //! failing to, or the open [`Conversation`]. Neither has GPUI types;
@@ -246,12 +246,16 @@ impl Conversation {
         message.expanded
     }
 
-    /// The expanded messages whose bodies have not been requested, now
-    /// marked as loading. The caller requests each of them.
+    /// The messages whose bodies have not been requested, now marked as
+    /// loading. The caller requests each of them (the mail service fetches
+    /// requests that arrive together in one batch).
+    ///
+    /// Every message's body loads, collapsed or not: the webview opens and
+    /// closes messages itself (`<details>`), out of the view-model's sight.
     pub fn take_bodies_to_load(&mut self) -> Vec<MessageId> {
         self.messages
             .iter_mut()
-            .filter(|message| message.expanded && message.body == BodyState::NotLoaded)
+            .filter(|message| message.body == BodyState::NotLoaded)
             .map(|message| {
                 message.body = BodyState::Loading;
                 message.id.clone()
@@ -285,12 +289,23 @@ impl Conversation {
         }
     }
 
-    /// Asks again for the expanded messages' bodies that were unavailable,
-    /// as after reconnecting. Returns whether any need loading.
+    /// Whether every body has loaded or failed to, so the conversation can
+    /// be shown whole.
+    pub fn bodies_settled(&self) -> bool {
+        self.messages.iter().all(|message| {
+            matches!(
+                message.body,
+                BodyState::Loaded(_) | BodyState::Unavailable(_)
+            )
+        })
+    }
+
+    /// Asks again for the bodies that were unavailable, as after
+    /// reconnecting. Returns whether any need loading.
     pub fn retry_unavailable(&mut self) -> bool {
         let mut any = false;
         for message in &mut self.messages {
-            if message.expanded && matches!(message.body, BodyState::Unavailable(_)) {
+            if matches!(message.body, BodyState::Unavailable(_)) {
                 message.body = BodyState::NotLoaded;
                 any = true;
             }
@@ -298,14 +313,12 @@ impl Conversation {
         any
     }
 
-    /// Handles a body the mail service fetched and stored: an expanded
-    /// message that has no body yet (its request failed earlier) asks again.
-    /// Returns whether a body needs loading.
+    /// Handles a body the mail service fetched and stored: a message that
+    /// has no body yet (its request failed earlier) asks again. Returns
+    /// whether a body needs loading.
     pub fn body_fetched(&mut self, id: &MessageId) -> bool {
         match self.message_mut(id) {
-            Some(message)
-                if message.expanded && matches!(message.body, BodyState::Unavailable(_)) =>
-            {
+            Some(message) if matches!(message.body, BodyState::Unavailable(_)) => {
                 message.body = BodyState::NotLoaded;
                 true
             }
@@ -586,14 +599,29 @@ mod tests {
     }
 
     #[test]
-    fn only_expanded_messages_load_bodies_once() {
+    fn every_body_loads_once() {
         let mut conversation = Conversation::new(detail(ids(3)), &[], ME);
-        assert_eq!(conversation.take_bodies_to_load(), [MessageId::new("m3")]);
-        assert_eq!(conversation.messages[2].body, BodyState::Loading);
+        assert_eq!(
+            conversation.take_bodies_to_load(),
+            ["m1", "m2", "m3"].map(MessageId::new)
+        );
+        assert_eq!(conversation.messages[0].body, BodyState::Loading);
         assert!(conversation.take_bodies_to_load().is_empty());
 
         conversation.toggle(&MessageId::new("m1"));
-        assert_eq!(conversation.take_bodies_to_load(), [MessageId::new("m1")]);
+        assert!(conversation.take_bodies_to_load().is_empty());
+    }
+
+    #[test]
+    fn bodies_settle_once_each_has_loaded_or_failed() {
+        let mut conversation = Conversation::new(detail(ids(2)), &[], ME);
+        assert!(!conversation.bodies_settled());
+        conversation.take_bodies_to_load();
+        assert!(!conversation.bodies_settled());
+        conversation.body_loaded(&MessageId::new("m1"), Some(&body(Some("Hi"), None)));
+        assert!(!conversation.bodies_settled());
+        conversation.body_offline(&MessageId::new("m2"));
+        assert!(conversation.bodies_settled());
     }
 
     #[test]
@@ -629,7 +657,7 @@ mod tests {
         };
         assert!(reason.contains("offline"));
 
-        // A collapsed message, or one already loading, doesn't ask again.
+        // A message whose body is loading doesn't ask again.
         assert!(!conversation.body_fetched(&MessageId::new("m1")));
         assert!(conversation.body_fetched(&latest));
         assert_eq!(conversation.take_bodies_to_load(), [latest]);
@@ -839,16 +867,14 @@ mod tests {
     fn offline_bodies_retry_on_reconnect() {
         let mut conversation = Conversation::new(detail(ids(2)), &[], ME);
         let latest = MessageId::new("m2");
-        assert_eq!(
-            conversation.take_bodies_to_load(),
-            std::slice::from_ref(&latest)
-        );
+        assert_eq!(conversation.take_bodies_to_load().len(), 2);
+        conversation.body_loaded(&MessageId::new("m1"), Some(&body(Some("Hi"), None)));
         conversation.body_offline(&latest);
         assert_eq!(
             conversation.messages[1].body,
             BodyState::Unavailable(OFFLINE_BODY.to_owned())
         );
-        // The collapsed message never asked, so it isn't retried.
+        // Only the body that couldn't be fetched is asked for again.
         assert!(conversation.retry_unavailable());
         assert_eq!(conversation.take_bodies_to_load(), [latest]);
         assert!(!conversation.retry_unavailable(), "nothing left to retry");

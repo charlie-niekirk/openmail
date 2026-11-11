@@ -158,7 +158,7 @@ impl ConversationView {
         }
     }
 
-    /// Requests the bodies of expanded messages that have none.
+    /// Requests the bodies of messages that have none.
     fn load_bodies(&mut self, cx: &mut Context<'_, Self>) {
         let Some(conversation) = self.pane.conversation_mut() else {
             return;
