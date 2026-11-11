@@ -13,6 +13,7 @@ mod message_body;
 mod onboarding;
 mod onboarding_view;
 mod sidebar;
+mod sidebar_view;
 mod state;
 mod theme;
 mod typography;
@@ -24,6 +25,7 @@ pub use message_body::{
 };
 pub use onboarding::{Notice, Setup, SignIn, SignInError, inbox_ready};
 pub use sidebar::{Counts, Group, Mailbox, MailboxRow, Row, SNOOZED, Sidebar, parse_hex_color};
+pub use sidebar_view::{SidebarEvent, SidebarView};
 pub use state::{AppState, Changed, Session, SyncState};
 pub use theme::{Themes, follow_system_appearance};
 pub use typography::{TextRole, TypographyExt};
