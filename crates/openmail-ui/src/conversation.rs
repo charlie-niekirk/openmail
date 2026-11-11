@@ -554,6 +554,7 @@ mod tests {
             text: text.map(str::to_owned),
             html: html.map(str::to_owned),
             fetched_at: datetime!(2026-11-10 10:00 UTC),
+            inline: Vec::new(),
         }
     }
 

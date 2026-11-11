@@ -15,6 +15,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_resync_seen.sql"),
     include_str!("../migrations/0003_quota_budget.sql"),
     include_str!("../migrations/0004_ops_queue.sql"),
+    include_str!("../migrations/0005_inline_parts_image_senders.sql"),
 ];
 
 /// Brings the database's schema up to date, all in one transaction.
@@ -91,6 +92,8 @@ mod tests {
                 "attachments",
                 "bodies",
                 "drafts",
+                "image_senders",
+                "inline_parts",
                 "labels",
                 "message_labels",
                 "messages",
@@ -111,6 +114,37 @@ mod tests {
             user_version(&conn),
             i64::try_from(MIGRATIONS.len()).unwrap()
         );
+    }
+
+    #[test]
+    fn bodies_that_lost_their_inline_parts_are_fetched_again() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        for sql in &MIGRATIONS[..4] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.execute_batch(
+            "INSERT INTO threads (id, history_id, snippet, last_message_date, message_count)
+             VALUES ('t', 1, '', 0, 2);
+             INSERT INTO messages (id, thread_id, history_id, snippet, internal_date,
+                                   size_estimate)
+             VALUES ('plain', 't', 1, '', 0, 0), ('inline', 't', 1, '', 0, 0);
+             INSERT INTO bodies (message_id, text, html, fetched_at)
+             VALUES ('plain', 'Hi', '<p>Hi</p>', 0),
+                    ('inline', 'Hi', '<img src=\"cid:logo@x\">', 0);",
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+        let kept: Vec<String> = conn
+            .prepare("SELECT message_id FROM bodies")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(kept, ["plain"]);
     }
 
     #[test]

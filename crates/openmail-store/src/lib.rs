@@ -5,6 +5,7 @@
 
 mod convert;
 mod error;
+mod image_senders;
 mod labels;
 mod mail;
 mod migrations;
@@ -16,7 +17,7 @@ mod sync_state;
 mod sync_writes;
 
 pub use error::{Error, Result};
-pub use mail::MessageBody;
+pub use mail::{InlinePart, MessageBody};
 pub use ops::{LabelDelta, PendingOp, PendingOpState};
 pub use paths::{DATA_DIR_ENV, DataDir};
 pub use queries::{

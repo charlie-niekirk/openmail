@@ -6,7 +6,7 @@ use openmail_core::{
 };
 use time::OffsetDateTime;
 
-use crate::{DataDir, Error, MessageBody, QuotaBudget, Store, SyncState};
+use crate::{DataDir, Error, InlinePart, MessageBody, QuotaBudget, Store, SyncState};
 
 fn date(secs: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(secs).unwrap()
@@ -246,17 +246,40 @@ fn bodies_round_trip() {
     let id = MessageId::new("m1");
     assert_eq!(store.body(&id).unwrap(), None);
 
-    let body = MessageBody {
+    let part = |content_id: &str, data: &[u8]| InlinePart {
+        content_id: content_id.to_owned(),
+        mime_type: "image/png".to_owned(),
+        data: data.to_vec(),
+    };
+    let mut body = MessageBody {
         text: Some("Hello".to_owned()),
-        html: Some("<p>Hello</p>".to_owned()),
+        html: Some("<p>Hello <img src=\"cid:logo@x\"></p>".to_owned()),
         fetched_at: date(1_700_000_100),
+        inline: vec![
+            part("logo@x", &[0x89, b'P', b'N', b'G']),
+            part("sig@x", &[1]),
+        ],
     };
     store.upsert_body(&id, &body).unwrap();
-    assert_eq!(store.body(&id).unwrap(), Some(body));
+    assert!(store.has_body(&id).unwrap());
+    assert_eq!(store.body(&id).unwrap(), Some(body.clone()));
 
-    // Bodies go with their message.
+    // Replacing a body replaces its inline parts.
+    body.inline = vec![part("sig@x", &[2])];
+    store.upsert_body(&id, &body).unwrap();
+    assert_eq!(store.body(&id).unwrap(), Some(body));
+    let detail = store.thread_detail(&ThreadId::new("t1")).unwrap().unwrap();
+    assert_eq!(detail.messages[0].body.as_ref().unwrap().inline.len(), 1);
+
+    // Bodies (and their inline parts) go with their message.
     store.delete_message(&id).unwrap();
     assert_eq!(store.body(&id).unwrap(), None);
+    assert!(!store.has_body(&id).unwrap());
+    let parts: i64 = store
+        .conn()
+        .query_row("SELECT count(*) FROM inline_parts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(parts, 0);
 }
 
 #[test]
@@ -320,6 +343,7 @@ fn search_finds_subject_people_and_body() {
         text: Some(text.to_owned()),
         html: None,
         fetched_at: date(1_700_000_100),
+        inline: Vec::new(),
     };
     store
         .upsert_body(&MessageId::new("m2"), &body("The budget is attached"))

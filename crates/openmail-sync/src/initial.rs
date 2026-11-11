@@ -783,6 +783,7 @@ pub(crate) fn parse_body(
             text: parsed.plain_text(),
             html: parsed.html,
             fetched_at,
+            inline: Vec::new(),
         }),
         Err(err) => {
             tracing::warn!(message = %id, %err, "could not parse a message body");
