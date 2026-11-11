@@ -9,6 +9,7 @@ mod error;
 mod id;
 mod label;
 mod message;
+mod text;
 
 pub use account::Account;
 pub use address::Address;
@@ -19,3 +20,4 @@ pub use label::{
     MessageListVisibility, SystemLabel,
 };
 pub use message::{Attachment, Draft, Message, MessageHeaders, Thread};
+pub use text::decode_entities;
