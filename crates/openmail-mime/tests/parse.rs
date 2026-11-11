@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use openmail_core::Address;
-use openmail_mime::{Error, ParsedMessage, encode_base64url};
+use openmail_mime::{Error, ParsedMessage, encode_base64url, html_to_text};
 
 fn fixture_bytes(name: &str) -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -254,4 +254,13 @@ Content-Transfer-Encoding: base64\r\n\r\nJVBERg==\r\n";
     assert_eq!(message.attachments.len(), 1);
     assert_eq!(message.attachments[0].part_id, "");
     assert_eq!(message.attachments[0].bytes(), b"%PDF");
+}
+
+#[test]
+fn html_to_text_decodes_references_and_drops_tags() {
+    assert_eq!(
+        html_to_text("It&#39;s <b>Ada</b> &amp; Bob").trim(),
+        "It's Ada & Bob"
+    );
+    assert_eq!(html_to_text("Plain words").trim(), "Plain words");
 }

@@ -72,6 +72,12 @@ pub struct ParsedPart {
     data: Vec<u8>,
 }
 
+/// Converts an HTML body to plain text: tags dropped, block elements turned
+/// into line breaks, and character references (`&amp;`, `&#39;`) decoded.
+pub fn html_to_text(html: &str) -> String {
+    mail_parser::html_to_text(html)
+}
+
 impl ParsedMessage {
     /// Parses a raw RFC 5322 message.
     ///
@@ -92,7 +98,7 @@ impl ParsedMessage {
     pub fn plain_text(&self) -> Option<String> {
         self.text
             .clone()
-            .or_else(|| self.html.as_deref().map(mail_parser::html_to_text))
+            .or_else(|| self.html.as_deref().map(html_to_text))
     }
 
     /// Looks up an inline part, then an attachment, by its `Content-ID`.
