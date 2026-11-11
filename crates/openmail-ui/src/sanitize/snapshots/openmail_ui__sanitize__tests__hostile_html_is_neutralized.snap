@@ -1,0 +1,34 @@
+---
+source: crates/openmail-ui/src/sanitize/tests.rs
+expression: "clean(HOSTILE, false).html"
+---
+
+
+
+
+
+<style>#b-m1,#b-m1{top:0;left:0;right:0;bottom:0;z-index:2147483647;background:none}#b-m1 .overlay{inset:0;background:#fff}#b-m1 .om-header,#b-m1 .om-message{display:none}#b-m1 p{background-image:none;color:#333}</style>
+
+
+<div class="overlay" id="b-m1-m-m1">Your session expired. <a rel="noopener noreferrer">Sign in again</a></div>
+<p style="top:0;background:none">Inline overlay</p>
+<p style="color:red">Image set</p>
+<img>
+<img alt="not an image">
+<img alt="missing inline part">
+<img alt="relative">
+<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="ok">
+
+
+
+
+
+
+Go
+<a rel="noopener noreferrer">data link</a>
+<a rel="noopener noreferrer">file link</a>
+<a rel="noopener noreferrer">relative link</a>
+<a href="https://evil.example/ok" rel="noopener noreferrer">ok link</a>
+<table><tbody><tr><td>Table</td></tr></tbody></table>
+<p title="&lt;style&gt;p{color:red}&lt;/style&gt;">Quoted markup</p>
+<p>Tries to close the shell</p>

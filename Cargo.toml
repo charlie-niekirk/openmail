@@ -84,6 +84,8 @@ mail-builder = { version = "2.0.1", default-features = false }
 insta = "1.49.0"
 # HTML sanitizing for message bodies before they reach the webview.
 ammonia = "4.2.4"
+# Filtering and scoping message CSS. The version ammonia already uses.
+cssparser = "0.38.0"
 
 [workspace.lints.rust]
 # Deny rather than forbid, so a crate that genuinely needs FFI (for example the

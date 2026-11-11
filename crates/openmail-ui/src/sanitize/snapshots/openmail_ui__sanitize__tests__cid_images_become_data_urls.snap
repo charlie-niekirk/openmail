@@ -1,0 +1,12 @@
+---
+source: crates/openmail-ui/src/sanitize/tests.rs
+expression: cleaned.html
+---
+
+
+
+<img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Example News" width="1" height="1">
+<h1>Weekly digest</h1>
+<p>Three new posts this week.</p>
+<img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Chart">
+<p><a href="https://news.example.com/unsubscribe" rel="noopener noreferrer">Unsubscribe</a></p>

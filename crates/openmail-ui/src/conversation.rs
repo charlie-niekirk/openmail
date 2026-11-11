@@ -12,7 +12,7 @@ use openmail_core::{Address, Label, LabelId, MessageId, SystemLabel, ThreadId};
 use openmail_store::{MessageBody, ThreadDetail};
 use time::OffsetDateTime;
 
-use crate::body_document::clean_html;
+use crate::sanitize::{CleanHtml, CleanOptions, clean_html};
 pub use crate::thread_list::LabelChip;
 
 /// What a thread with no subject is called.
@@ -201,7 +201,7 @@ impl Conversation {
                     Some(body @ BodyState::Loaded(_)) => body.clone(),
                     before_body => detail.body.as_ref().map_or_else(
                         || before_body.cloned().unwrap_or(BodyState::NotLoaded),
-                        |body| BodyState::Loaded(LoadedBody::new(body)),
+                        |body| BodyState::Loaded(LoadedBody::new(&message.id, body)),
                     ),
                 };
                 MessageItem {
@@ -277,7 +277,7 @@ impl Conversation {
         if let Some(message) = self.message_mut(id) {
             message.body = body.map_or_else(
                 || BodyState::Unavailable("This message is no longer available.".to_owned()),
-                |body| BodyState::Loaded(LoadedBody::new(body)),
+                |body| BodyState::Loaded(LoadedBody::new(id, body)),
             );
         }
     }
@@ -346,19 +346,26 @@ pub struct LoadedBody {
     /// view is unavailable.
     pub text: String,
     /// Its HTML part, sanitized ([`clean_html`]), if it has one with content.
-    pub html: Option<String>,
+    pub html: Option<CleanHtml>,
 }
 
 impl LoadedBody {
-    pub fn new(body: &MessageBody) -> Self {
+    /// `body`, the body of message `id`, ready to show with remote images
+    /// blocked.
+    pub fn new(id: &MessageId, body: &MessageBody) -> Self {
+        let options = CleanOptions {
+            message_id: id.as_str(),
+            remote_images: false,
+            inline: &body.inline,
+        };
         Self {
             text: body_text(body),
             html: body
                 .html
                 .as_deref()
                 .filter(|html| !html.trim().is_empty())
-                .map(clean_html)
-                .filter(|html| !html.trim().is_empty()),
+                .map(|html| clean_html(html, &options))
+                .filter(|cleaned| !cleaned.html.trim().is_empty()),
         }
     }
 }
@@ -776,21 +783,37 @@ mod tests {
 
     #[test]
     fn html_parts_are_cleaned_and_blank_ones_dropped() {
-        let loaded = LoadedBody::new(&body(
-            Some("Hi"),
-            Some("<p onclick=\"x()\">Hi</p><script>x()</script>"),
-        ));
+        let loaded = LoadedBody::new(
+            &MessageId::new("m1"),
+            &body(
+                Some("Hi"),
+                Some("<p onclick=\"x()\">Hi</p><script>x()</script>"),
+            ),
+        );
         assert_eq!(loaded.text, "Hi");
-        assert_eq!(loaded.html.as_deref(), Some("<p>Hi</p>"));
-
-        assert_eq!(LoadedBody::new(&body(Some("Hi"), Some(" \n"))).html, None);
         assert_eq!(
-            LoadedBody::new(&body(Some("Hi"), Some("<script>x()</script>"))).html,
+            loaded.html.map(|cleaned| cleaned.html).as_deref(),
+            Some("<p>Hi</p>")
+        );
+
+        assert_eq!(
+            LoadedBody::new(&MessageId::new("m1"), &body(Some("Hi"), Some(" \n"))).html,
             None
         );
-        let text_only = LoadedBody::new(&body(None, Some("<b>Bold</b>")));
+        assert_eq!(
+            LoadedBody::new(
+                &MessageId::new("m1"),
+                &body(Some("Hi"), Some("<script>x()</script>"))
+            )
+            .html,
+            None
+        );
+        let text_only = LoadedBody::new(&MessageId::new("m1"), &body(None, Some("<b>Bold</b>")));
         assert_eq!(text_only.text, "Bold");
-        assert_eq!(text_only.html.as_deref(), Some("<b>Bold</b>"));
+        assert_eq!(
+            text_only.html.map(|cleaned| cleaned.html).as_deref(),
+            Some("<b>Bold</b>")
+        );
     }
 
     #[test]

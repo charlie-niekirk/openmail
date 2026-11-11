@@ -1,0 +1,51 @@
+---
+source: crates/openmail-ui/src/sanitize/tests.rs
+expression: html
+---
+
+
+
+
+
+
+<style>#b-m1{margin:0;padding:0;background-color:#f2f2f7}#b-m1 table,#b-m1 td{border-collapse:collapse}#b-m1 .container{width:600px;background:#ffffff}#b-m1 .hero{background-image:none;background-color:#2b59c3}#b-m1 .button a{display:inline-block;padding:12px 20px;border-radius:4px;background:#2b59c3;color:#fff !important}#b-m1 #b-m1-footer p{font-size:12px;color:#6b6b75}@media screen and (max-width: 600px) {#b-m1 .container{width:100% !important}#b-m1 .mobile-hide{display:none !important}}</style>
+
+
+<div style="display:none;max-height:0;overflow:hidden">This week: Rust on the desktop, and privacy by default.</div>
+<a name="b-m1-top" rel="noopener noreferrer"></a>
+<table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f2f2f7">
+  <tbody><tr>
+    <td align="center">
+      <table class="container" cellpadding="0" cellspacing="0" border="0">
+        <tbody><tr>
+          <td class="hero" style="padding:24px" height="180" valign="bottom">
+            <img style="display:block" width="120" height="40" alt="The Weekly Digest" border="0">
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:28px 32px 8px;font-size:16px;line-height:1.6;color:#1d1d2b">
+            <p style="margin:0">Hi there,</p>
+            <p>Welcome to this week's issue. <a href="#b-m1-stories" rel="noopener noreferrer">Jump to the stories</a>.</p>
+          </td>
+        </tr>
+        <tr>
+          <td id="b-m1-stories" style="padding:24px 32px">
+            <h2 style="margin:0 0 8px;font-family:Georgia,serif">Rust on the desktop</h2>
+            <p>GPU-rendered native UIs have come a long way.</p>
+            <table cellpadding="0" cellspacing="0"><tbody><tr><td class="button"><a href="https://news.example/r?u=rust-on-the-desktop" rel="noopener noreferrer">Read more</a></td></tr></tbody></table>
+          </td>
+        </tr>
+        <tr class="mobile-hide">
+          <td style="padding:0 32px 24px"><font face="Georgia" color="#44445a" size="2">Sent to you because you subscribed.</font></td>
+        </tr>
+        <tr>
+          <td id="b-m1-footer" align="center" style="padding:24px">
+            <p><a href="https://news.example/unsubscribe?u=123" rel="noopener noreferrer">Unsubscribe</a> · <a href="#b-m1-top" rel="noopener noreferrer">Back to top</a> · <a href="mailto:editor@news.example" rel="noopener noreferrer">Write to us</a></p>
+            <center><small>© 2026 News Example</small></center>
+          </td>
+        </tr>
+      </tbody></table>
+    </td>
+  </tr>
+</tbody></table>
+<img style="display:block;width:1px;height:1px" width="1" height="1" alt="">
