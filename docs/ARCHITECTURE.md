@@ -463,6 +463,38 @@ The main window has a transparent title bar with the macOS traffic lights
 it are the three panes, which are placeholders until PRs 3.3–3.5, or a notice
 when there is no mailbox.
 
+Icons are SVGs served by `openmail_ui::Assets`, which the app registers with
+`with_assets`: `gpui-component`'s default set (from `gpui-kit-assets`), the
+Lucide icons the app adds to it through `icon_assets!`, and the app's own
+(`crates/openmail-ui/assets/icons`).
+
+### Thread list
+
+`ThreadList` is the thread list's view-model; `ThreadListView` renders it in a
+`uniform_list` of fixed-height rows, so only the visible rows are built.
+
+- **Paging.** Threads load a page (50) at a time through
+  `MailHandle::thread_page`'s keyset pagination, newest first. When the last
+  visible row is within 25 of the end of what is loaded, the next page loads.
+  One query runs at a time.
+- **Refresh.** On `ThreadsChanged` the list re-queries everything loaded so far
+  as one page from the top, so rows change in place, threads that gained a
+  message move up and threads that left the view go. Unless the list is at the
+  very top, the row on top of the viewport is kept where it was. A refresh asked
+  for while a query runs follows it.
+- **Views.** It shows the Inbox until `set_label` (or `set_view` with any
+  `ThreadView`) switches it, which clears the list and the selection; results
+  for the previous view are dropped.
+- **Rows.** Senders are condensed as Gmail does (a lone sender's full name;
+  otherwise first names, the first and the last two past three, "me" for the
+  account), with the message count. Dates are relative to now in the local time
+  zone ("3:42 PM" today, "Nov 3" this year, "3/14/24" before). Label chips show
+  user labels Gmail shows in the message list, plus Inbox outside the Inbox, but
+  not the view's own label; at most three, then "+N". Unread threads are bold;
+  stars, Gmail's importance marker and a paperclip show when they apply.
+- **Selection.** Clicking a row selects it and emits
+  `ThreadListEvent::Selected(ThreadId)`; `selected()` returns it.
+
 ## Sync model
 
 1. **Initial sync.** Fetch labels, then thread metadata: Inbox first, then everything
