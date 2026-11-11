@@ -12,7 +12,12 @@
 //! to a document this view is loading. A click on an `http(s):` or `mailto:`
 //! link is cancelled and reported as a [`LinkClicked`] event, for the
 //! reading pane to open outside the webview. While the pointer is over it,
-//! the webview shows its own cursor ([`WebviewCursor`]). See "Webview embedding" in
+//! the webview shows its own cursor ([`WebviewCursor`]).
+//!
+//! The app's one trusted script ([`PAGE_SCRIPT`]) reports which sections are
+//! open and where the page is scrolled; reloading the same conversation
+//! (images shown, a new message, light or dark) hands that back to the new
+//! page ([`with_page_state`]). See "Webview embedding" in
 //! `docs/ARCHITECTURE.md` for the platform findings.
 
 use std::cell::Cell;
@@ -28,6 +33,7 @@ use gpui_webview::WebView;
 use tokio::sync::mpsc;
 use wry::{NewWindowResponse, PageLoadEvent, WebViewBuilder};
 
+use crate::page_state::{PAGE_SCRIPT, PageState, with_page_state};
 use crate::webview_cursor::WebviewCursor;
 
 /// How long the previous document stays up while the next one is prepared.
@@ -74,6 +80,15 @@ pub struct MessageBodyView {
     web: Web,
     /// The document to show, if any.
     document: Option<String>,
+    /// What the document shows (the conversation), to tell a reload of the
+    /// same one from another.
+    key: Option<String>,
+    /// The key of the document last loaded into the webview, and what its
+    /// page last reported.
+    page_key: Option<String>,
+    page: Option<PageState>,
+    /// Counts the documents loaded, to match reports to their page.
+    generation: u64,
     /// Whether `document` has yet to be loaded into the webview.
     stale: bool,
     /// Set from loading a document until it finishes. Shared with the
@@ -92,6 +107,9 @@ pub struct MessageBodyView {
     /// Tells this view which links were clicked.
     links: mpsc::UnboundedSender<String>,
     _links: Task<()>,
+    /// Hears what the page reports (see [`PageState`]).
+    reports: mpsc::UnboundedSender<String>,
+    _reports: Task<()>,
     /// Gives the webview the cursor while the pointer is over it.
     cursor: WebviewCursor,
     /// WebView2's user data folder, kept alive with the webview.
@@ -117,9 +135,24 @@ impl MessageBodyView {
                 }
             }
         });
+        let (reports, mut reported) = mpsc::unbounded_channel::<String>();
+        let listen_reports = cx.spawn(async move |this, cx| {
+            while let Some(report) = reported.recv().await {
+                if this
+                    .update(cx, |this, _| this.page_reported(&report))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         Self {
             web: Web::NotCreated,
             document: None,
+            key: None,
+            page_key: None,
+            page: None,
+            generation: 0,
             stale: false,
             loading: Rc::new(Cell::new(false)),
             revealing: false,
@@ -129,6 +162,8 @@ impl MessageBodyView {
             _page_loads: listen,
             links,
             _links: listen_links,
+            reports,
+            _reports: listen_reports,
             cursor: WebviewCursor::default(),
             #[cfg(windows)]
             _context: None,
@@ -136,13 +171,15 @@ impl MessageBodyView {
     }
 
     /// Shows `document`, a complete document from
-    /// [`conversation_document`](crate::body_document::conversation_document).
-    /// It is loaded into the webview on the next frame unless it is already
-    /// the one shown.
-    pub fn show(&mut self, document: String, cx: &mut Context<'_, Self>) {
+    /// [`conversation_document`](crate::body_document::conversation_document),
+    /// for the conversation `key` names. It is loaded into the webview on the
+    /// next frame unless it is already the one shown. A new document for the
+    /// conversation already shown keeps the page's open sections and place.
+    pub fn show(&mut self, document: String, key: &str, cx: &mut Context<'_, Self>) {
         self.hold = None;
-        if self.document.as_ref() != Some(&document) {
+        if self.document.as_ref() != Some(&document) || self.key.as_deref() != Some(key) {
             self.document = Some(document);
+            self.key = Some(key.to_owned());
             self.stale = true;
         }
         cx.notify();
@@ -165,7 +202,11 @@ impl MessageBodyView {
     pub fn clear(&mut self, cx: &mut Context<'_, Self>) {
         self.hold = None;
         self.document = None;
+        self.key = None;
         self.stale = false;
+        // The next document starts afresh, even for the same conversation.
+        self.page_key = None;
+        self.page = None;
         if let Web::Ready(webview) = &self.web {
             let _ = webview.read(cx).set_visible(false);
         }
@@ -228,6 +269,12 @@ impl MessageBodyView {
             self.page_loads.clone(),
             self.links.clone(),
         );
+        let reports = self.reports.clone();
+        let builder = builder
+            .with_initialization_script(PAGE_SCRIPT)
+            .with_ipc_handler(move |request| {
+                let _ = reports.send(request.into_body());
+            });
         let built = WebView::build(builder, window, cx);
         #[cfg(windows)]
         {
@@ -245,6 +292,30 @@ impl MessageBodyView {
                 Web::Unavailable(format!("HTML mail can't be shown here: {err}").into())
             }
         };
+    }
+
+    /// The page reported its state: kept if it is the page last loaded.
+    fn page_reported(&mut self, report: &str) {
+        match PageState::parse(report) {
+            Some(state) if state.generation == self.generation => {
+                tracing::trace!(?state, "the page reported its state");
+                self.page = Some(state);
+            }
+            Some(_) => {}
+            None => tracing::debug!("ignored a malformed page report"),
+        }
+    }
+
+    /// `document` as it is loaded now: the next generation, carrying the
+    /// previous page's state if it showed the same conversation.
+    fn next_load(&mut self, document: &str) -> String {
+        self.generation += 1;
+        let same = self.key.is_some() && self.page_key == self.key;
+        if !same {
+            self.page = None;
+            self.page_key.clone_from(&self.key);
+        }
+        with_page_state(document, self.generation, self.page.as_ref())
     }
 
     /// The page this view loaded has finished loading.
@@ -334,11 +405,12 @@ impl Render for MessageBodyView {
         let webview = webview.clone();
 
         if self.stale
-            && let Some(document) = &self.document
+            && let Some(document) = self.document.clone()
         {
             self.stale = false;
             self.loading.set(true);
-            if let Err(err) = webview.read(cx).load_html(document) {
+            let html = self.next_load(&document);
+            if let Err(err) = webview.read(cx).load_html(&html) {
                 tracing::warn!("could not load the conversation into the webview: {err}");
             }
             if !webview.read(cx).visible() {

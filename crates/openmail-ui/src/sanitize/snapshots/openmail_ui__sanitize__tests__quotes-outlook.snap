@@ -1,0 +1,6 @@
+---
+source: crates/openmail-ui/src/sanitize/tests.rs
+expression: marked(&cleaned)
+---
+<div class="elementToProof" style="font-family:Aptos;color:var(--om-c0,rgb(0,0,0))">I'll send the invoice tomorrow.</div>[QUOTE[<div id="b-m1-appendonsend"></div><hr style="display:inline-block;width:98%"><div id="b-m1-divRplyFwdMsg" dir="ltr"><font face="Calibri" color="#000000" style="font-size:11pt"><b>From:</b> Bob Smith<br><b>Sent:</b> Tuesday, November 10, 2026 4:00 PM<br><b>Subject:</b> Invoice</font><div>&nbsp;</div></div><div><p class="MsoNormal">Could you send the invoice for October?</p></div>
+]]

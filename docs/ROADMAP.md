@@ -132,7 +132,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
   - `ammonia` email allowlist, strict CSP, JavaScript off.
   - Remote images blocked behind "show images" (per message, or always for a sender).
   - `cid:` rewriting; link clicks open in the system browser with the real URL shown.
-- [ ] **4.3 Body polish** — `feat/4.3-body-polish`
+- [x] **4.3 Body polish** — `feat/4.3-body-polish`
   - Auto-height through a trusted injected script only.
   - Dark-mode adaptation; quoted-text collapsing ("…").
 - [ ] **4.4 Attachments** ∥ — `feat/4.4-attachments`

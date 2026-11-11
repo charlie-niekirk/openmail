@@ -12,13 +12,16 @@
 //! bodies go through [`clean_html`](crate::sanitize::clean_html) first, and
 //! sit in a wrapper ([`scope_id`]) their styles are scoped to.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
 
 use time::OffsetDateTime;
 
 use crate::conversation::{BodyState, Conversation, MessageItem};
-use crate::sanitize::scope_id;
+use crate::sanitize::color::{self, Parsed, Role};
+use crate::sanitize::dark::{AttributeColor, DarkStyle};
+use crate::sanitize::quotes::{self, Trimmed};
+use crate::sanitize::{CleanHtml, scope_id};
 
 /// Content Security Policy for every body document. Nothing loads from the
 /// network: only inline styles and `data:` images and fonts are allowed, and no
@@ -75,7 +78,73 @@ fn csp_source(url: &str) -> Option<String> {
 /// What a message whose body is still loading shows in its section.
 pub const LOADING_BODY: &str = "Loading message…";
 
-/// The shell's own styles. Its classes all start with `om-`, which message
+/// The colors of the document's shell, from the app's theme, so the
+/// conversation matches the window around it in light and dark.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellPalette {
+    /// Whether the theme is dark: the shell's `color-scheme`, and how
+    /// messages' own colors are treated.
+    pub dark: bool,
+    pub background: String,
+    pub foreground: String,
+    pub border: String,
+    /// Secondary text: dates, snippets, participants.
+    pub muted: String,
+    /// Behind controls such as the quoted-text toggle.
+    pub muted_background: String,
+    /// Behind a message header under the pointer.
+    pub hover: String,
+    pub link: String,
+    /// The focus ring.
+    pub focus: String,
+}
+
+impl ShellPalette {
+    /// The light palette (Openmail Light's colors), which messages that
+    /// can't be adapted keep in dark mode too.
+    pub fn light() -> Self {
+        Self {
+            dark: false,
+            background: "#ffffff".to_owned(),
+            foreground: "#1f1f1f".to_owned(),
+            border: "#e3e5e8".to_owned(),
+            muted: "#5f6368".to_owned(),
+            muted_background: "#f1f3f4".to_owned(),
+            hover: "#f2f6fc".to_owned(),
+            link: "#0b57d0".to_owned(),
+            focus: "#0b57d0".to_owned(),
+        }
+    }
+
+    /// The `:root` rule declaring the palette as the custom properties
+    /// [`SHELL_CSS`] uses.
+    fn root_rule(&self) -> String {
+        format!(
+            ":root{{color-scheme:{scheme};--om-bg:{};--om-fg:{};--om-border:{};\
+             --om-muted:{};--om-muted-bg:{};--om-hover:{};--om-link:{};--om-focus:{}}}",
+            css_color(&self.background),
+            css_color(&self.foreground),
+            css_color(&self.border),
+            css_color(&self.muted),
+            css_color(&self.muted_background),
+            css_color(&self.hover),
+            css_color(&self.link),
+            css_color(&self.focus),
+            scheme = if self.dark { "dark" } else { "light" },
+        )
+    }
+}
+
+/// `color` if it is a hex color (`#rgb` to `#rrggbbaa`), else black: the
+/// palette is the app's, but it goes into a stylesheet.
+fn css_color(color: &str) -> &str {
+    let hex = color.strip_prefix('#').unwrap_or_default();
+    let valid = matches!(hex.len(), 3 | 4 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit());
+    if valid { color } else { "#000000" }
+}
+
+/// The shell's own styles, in the colors of a [`ShellPalette`] (custom
+/// properties on `:root`). Its classes all start with `om-`, which message
 /// HTML may not use, and message CSS is scoped to the message's wrapper, so
 /// a message can't restyle the shell or take on its styles. `.om-body`
 /// contains its message's painting (`contain: paint`): whatever the message
@@ -89,70 +158,108 @@ pub const LOADING_BODY: &str = "Loading message…";
 /// of overflowing its box (`.om-thread` is at least its content's
 /// min-content width), so the document itself scrolls sideways, from
 /// anywhere in it, rather than a scroller at the bottom of the message.
+/// A header's recipients or snippet line takes no width of its own
+/// (`width: 0`, then it grows), so a long one is cut off with an ellipsis
+/// rather than widening the thread.
 /// Message CSS outranks these defaults (its selectors start with an ID).
+///
+/// In dark mode a message that can't be adapted keeps its light colors on a
+/// light card (`.om-card`, which brings back the light palette inside it).
+///
+/// Quoted history sits in a `<details class="om-quote">` whose toggle is a
+/// small "•••" pill, as in Gmail. Its look is `!important`, so a message's
+/// own resets (which reach it: it is inside the message) leave it alone.
 const SHELL_CSS: &str = "\
-:root{color-scheme:light}\
-html,body{margin:0;padding:0;background:#ffffff;color:#1f1f23}\
+html,body{margin:0;padding:0;background:var(--om-bg);color:var(--om-fg)}\
 body{font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;\
 overflow-wrap:break-word}\
 img{max-width:100%}\
 .om-thread{max-width:860px;min-width:min-content;margin:0 auto;padding:4px 24px 24px;\
 box-sizing:border-box}\
-.om-message{border:1px solid #e4e4e9;border-radius:8px;margin:0 0 12px;overflow:hidden}\
+.om-message{border:1px solid var(--om-border);border-radius:8px;margin:0 0 12px;overflow:hidden}\
 .om-header{display:block;list-style:none;cursor:pointer;padding:8px 16px}\
 .om-header::-webkit-details-marker{display:none}\
-.om-header:focus-visible{outline:2px solid #2b59c3;outline-offset:-2px}\
-.om-header:hover{background:#f5f5f8}\
+.om-header:focus-visible{outline:2px solid var(--om-focus);outline-offset:-2px}\
+.om-header:hover{background:var(--om-hover)}\
 .om-message[open]>.om-header{padding-top:12px}\
 .om-header-row{display:flex;align-items:baseline;gap:12px}\
 .om-sender{flex:none;max-width:220px;font-weight:600;overflow:hidden;\
 text-overflow:ellipsis;white-space:nowrap}\
-.om-line{flex:1;min-width:0;color:#6b6b75;overflow:hidden;text-overflow:ellipsis;\
-white-space:nowrap}\
-.om-date{flex:none;color:#6b6b75;font-size:12px}\
+.om-line{flex:1 1 0;width:0;min-width:0;color:var(--om-muted);overflow:hidden;\
+text-overflow:ellipsis;white-space:nowrap}\
+.om-date{flex:none;color:var(--om-muted);font-size:12px}\
 .om-message:not([open]) .om-recipients,.om-message[open] .om-snippet{display:none}\
-.om-participants{padding:0 16px 12px;color:#6b6b75;font-size:13px}\
+.om-participants{padding:0 16px 12px;color:var(--om-muted);font-size:13px}\
 .om-participants table{border-collapse:collapse}\
 .om-participants th{font-weight:normal;text-align:left;vertical-align:top;\
 padding:0 8px 0 0;width:36px}\
-.om-participants td{padding:0;color:#1f1f23}\
-.om-body{padding:12px 16px 16px;border-top:1px solid #e4e4e9;contain:paint}\
+.om-participants td{padding:0;color:var(--om-fg)}\
+.om-body{padding:12px 16px 16px;border-top:1px solid var(--om-border);contain:paint}\
 .om-mail{overflow-wrap:anywhere}\
+.om-mail a{color:var(--om-link)}\
 .om-mail img{max-width:min(100%,calc(100vw - 82px));height:auto}\
+.om-dark .om-card{--om-fg:#1f1f1f;--om-muted:#5f6368;--om-muted-bg:#f1f3f4;\
+--om-border:#e3e5e8;--om-link:#0b57d0;color-scheme:light;background:#ffffff;\
+color:var(--om-fg);padding:16px;border-radius:6px}\
+.om-dark .om-card img{max-width:min(100%,calc(100vw - 114px))}\
 .om-text{white-space:pre-wrap}\
-.om-notice{margin:0;color:#6b6b75}";
+.om-quote{display:block;margin:8px 0 0}\
+.om-quote>.om-quote-toggle{display:inline-block!important;list-style:none!important;\
+cursor:pointer!important;margin:0!important;padding:0 7px!important;height:12px!important;\
+border:0!important;border-radius:6px!important;background:var(--om-muted-bg)!important;\
+color:var(--om-muted)!important;font:bold 8px/12px -apple-system,BlinkMacSystemFont,sans-serif!important;\
+letter-spacing:1px!important;vertical-align:middle!important;user-select:none}\
+.om-quote>.om-quote-toggle::-webkit-details-marker{display:none}\
+.om-quote>.om-quote-toggle:hover{background:var(--om-border)!important}\
+.om-quote>.om-quote-toggle:focus-visible{outline:2px solid var(--om-focus);outline-offset:2px}\
+.om-quote[open]>.om-quote-toggle{margin-bottom:8px!important}\
+.om-notice{margin:0;color:var(--om-muted)}";
 
 /// Wraps an HTML fragment in the trusted document shell the webview loads:
-/// charset, CSP ([`document_csp`] for `image_urls`) and the shell's styles.
-/// `body_html` must be trusted, or built from sanitized HTML and
-/// [`escape_html`] text.
-pub fn body_document(body_html: &str, image_urls: &BTreeSet<String>) -> String {
+/// charset, CSP ([`document_csp`] for `image_urls`) and the shell's styles
+/// in `palette`'s colors. `body_html` must be trusted, or built from
+/// sanitized HTML and [`escape_html`] text.
+pub fn body_document(
+    body_html: &str,
+    image_urls: &BTreeSet<String>,
+    palette: &ShellPalette,
+) -> String {
     // Quotes in the policy stay readable; only what would end the attribute
     // is escaped.
     let csp = document_csp(image_urls)
         .replace('&', "&amp;")
         .replace('"', "&quot;");
+    let class = if palette.dark {
+        " class=\"om-dark\""
+    } else {
+        ""
+    };
+    let root = palette.root_rule();
     format!(
-        "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
+        "<!DOCTYPE html>\n<html{class}><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <style>{SHELL_CSS}</style></head><body>{body_html}</body></html>"
+         <style>{root}{SHELL_CSS}</style></head><body>{body_html}</body></html>"
     )
 }
 
-/// The document for `conversation`: every message, oldest first, open if it
-/// is expanded in the view-model. `dates` gives a message's short date (for
-/// its header) and full date (among its participants).
+/// The document for `conversation` in `palette`'s colors: every message,
+/// oldest first, open if it is expanded in the view-model. `dates` gives a
+/// message's short date (for its header) and full date (among its
+/// participants).
 pub fn conversation_document(
     conversation: &Conversation,
+    palette: &ShellPalette,
     dates: impl Fn(OffsetDateTime) -> (String, String),
 ) -> String {
     // A line per section keeps the document (and its snapshots) readable.
     let mut html = String::from("<main class=\"om-thread\">\n");
     let mut image_urls = BTreeSet::new();
+    // The signatures of the messages so far: one seen before is collapsed.
+    let mut signatures = HashSet::new();
     for message in &conversation.messages {
         let (short, full) = dates(message.date);
-        message_section(&mut html, message, &short, &full);
+        message_section(&mut html, message, palette, &mut signatures, &short, &full);
         if let BodyState::Loaded(body) = &message.body
             && let Some(cleaned) = &body.html
         {
@@ -160,11 +267,18 @@ pub fn conversation_document(
         }
     }
     html.push_str("</main>");
-    body_document(&html, &image_urls)
+    body_document(&html, &image_urls, palette)
 }
 
 /// Appends one message's `<details>` section to `html`.
-fn message_section(html: &mut String, message: &MessageItem, short_date: &str, full_date: &str) {
+fn message_section(
+    html: &mut String,
+    message: &MessageItem,
+    palette: &ShellPalette,
+    signatures: &mut HashSet<String>,
+    short_date: &str,
+    full_date: &str,
+) {
     let open = if message.expanded { " open" } else { "" };
     let _ = write!(
         html,
@@ -201,20 +315,25 @@ fn message_section(html: &mut String, message: &MessageItem, short_date: &str, f
     match &message.body {
         BodyState::Loaded(body) => match &body.html {
             Some(cleaned) => {
-                let _ = write!(
-                    html,
-                    "<div class=\"om-mail\" id=\"{}\">{}</div>",
-                    scope_id(message.id.as_str()),
-                    cleaned.html
-                );
+                let scope = scope_id(message.id.as_str());
+                let mut class = "om-mail";
+                if palette.dark {
+                    match &cleaned.dark {
+                        DarkStyle::Card => class = "om-mail om-card",
+                        DarkStyle::Native => {}
+                        DarkStyle::Adapt { colors, attributes } => {
+                            let css = adapted_css(&scope, colors, attributes, palette);
+                            if !css.is_empty() {
+                                let _ = write!(html, "<style>{css}</style>");
+                            }
+                        }
+                    }
+                }
+                let _ = write!(html, "<div class=\"{class}\" id=\"{scope}\">");
+                trimmed_html(html, cleaned, &scope, signatures);
+                html.push_str("</div>");
             }
-            None => {
-                let _ = write!(
-                    html,
-                    "<div class=\"om-text\">{}</div>",
-                    escape_html(&body.text)
-                );
-            }
+            None => trimmed_text(html, &body.text, message, signatures),
         },
         BodyState::NotLoaded | BodyState::Loading => {
             let _ = write!(html, "<p class=\"om-notice\">{LOADING_BODY}</p>");
@@ -224,6 +343,132 @@ fn message_section(html: &mut String, message: &MessageItem, short_date: &str, f
         }
     }
     html.push_str("</div></details>\n");
+}
+
+/// The toggle that shows and hides a message's quoted history ("…").
+const TRIMMED_TOGGLE: &str = "<summary class=\"om-quote-toggle\" title=\"Show trimmed content\" \
+                              aria-label=\"Show trimmed content\">•••</summary>";
+
+/// Appends the HTML of a message (`cleaned`, in wrapper `scope`) to `html`,
+/// with its quoted history collapsed behind a toggle, and its signature
+/// too if one of the messages before ended with the same one (it joins
+/// the quote's toggle if it sits beside it).
+fn trimmed_html(
+    html: &mut String,
+    cleaned: &CleanHtml,
+    scope: &str,
+    signatures: &mut HashSet<String>,
+) {
+    let Trimmed { quote, signature } = &cleaned.trimmed;
+    let repeated = signature
+        .as_ref()
+        .filter(|signature| !signatures.insert(signature.text.clone()));
+    let collapsed = match (repeated, quote) {
+        (Some(signature), Some(quote)) if signature.joins_quote => {
+            Some(signature.range.start..quote.end)
+        }
+        (Some(signature), None) => Some(signature.range.clone()),
+        (_, Some(quote)) => Some(quote.clone()),
+        (None, None) => None,
+    };
+    let source = &cleaned.html;
+    match collapsed.filter(|range| range.end <= source.len() && range.start < range.end) {
+        Some(range) => {
+            let _ = write!(
+                html,
+                "{}<details class=\"om-quote\" id=\"q-{scope}\">{TRIMMED_TOGGLE}{}</details>{}",
+                &source[..range.start],
+                &source[range.clone()],
+                &source[range.end..],
+            );
+        }
+        None => html.push_str(source),
+    }
+}
+
+/// Appends a plain-text body to `html`, quoted history and repeated
+/// signature collapsed as [`trimmed_html`] does.
+fn trimmed_text(
+    html: &mut String,
+    text: &str,
+    message: &MessageItem,
+    signatures: &mut HashSet<String>,
+) {
+    let parts = quotes::split_text(text);
+    let offset = |part: &str| part.as_ptr() as usize - text.as_ptr() as usize;
+    let repeated = parts
+        .signature
+        .filter(|signature| !signatures.insert(quotes::normalize(signature)));
+    let cut = repeated.or(parts.quote).map_or(text.len(), offset);
+    let shown = if cut < text.len() {
+        text[..cut].trim_end()
+    } else {
+        text
+    };
+    let _ = write!(html, "<div class=\"om-text\">{}</div>", escape_html(shown));
+    let hidden = text[cut..].trim();
+    if !hidden.is_empty() {
+        let _ = write!(
+            html,
+            "<details class=\"om-quote\" id=\"q-{}\">{TRIMMED_TOGGLE}\
+             <div class=\"om-text\">{}</div></details>",
+            scope_id(message.id.as_str()),
+            escape_html(hidden)
+        );
+    }
+}
+
+/// The styles adapting a message's colors to a dark `palette` (see
+/// [`DarkStyle::Adapt`]): its custom properties `--om-cN` as the adapted
+/// colors, and rules for its presentational color attributes. They add no
+/// specificity (`:where`), so the message's own rules still win as they
+/// would over the attributes.
+fn adapted_css(
+    scope: &str,
+    colors: &[(Role, String)],
+    attributes: &[AttributeColor],
+    palette: &ShellPalette,
+) -> String {
+    let rgba = |css: &str| match color::parse_value(css) {
+        Parsed::Color(color) => Some(color),
+        _ => None,
+    };
+    let (Some(page), Some(text)) = (
+        rgba(css_color(&palette.background)),
+        rgba(css_color(&palette.foreground)),
+    ) else {
+        return String::new();
+    };
+    let adapt = |role: Role, css: &str| {
+        rgba(css).map(|color| color::adapt(role, color, page, text).to_css())
+    };
+    let mut out = String::new();
+    let properties: Vec<String> = colors
+        .iter()
+        .enumerate()
+        .filter_map(|(n, (role, css))| Some(format!("--om-c{n}:{}", adapt(*role, css)?)))
+        .collect();
+    if !properties.is_empty() {
+        let _ = write!(out, "#{scope}{{{}}}", properties.join(";"));
+    }
+    for attribute in attributes {
+        let Some(color) = adapt(attribute.role, &attribute.color) else {
+            continue;
+        };
+        let property = match attribute.role {
+            Role::Background => "background-color",
+            Role::Text => "color",
+            Role::Border => "border-color",
+        };
+        let _ = write!(
+            out,
+            "#{scope} :where({}[{}=\"{}\" i]){{{property}:{color}}}",
+            attribute.element.unwrap_or_default(),
+            attribute.attribute,
+            attribute.value,
+        );
+    }
+    out
 }
 
 /// `text` escaped for HTML text and double-quoted attribute values.
@@ -298,7 +543,7 @@ mod tests {
 
     #[test]
     fn document_carries_csp_and_body() {
-        let doc = body_document("<p>Hello</p>", &BTreeSet::new());
+        let doc = body_document("<p>Hello</p>", &BTreeSet::new(), &ShellPalette::light());
         assert!(doc.starts_with("<!DOCTYPE html>"));
         assert!(doc.contains(&format!("content=\"{BODY_CSP}\"")));
         assert!(doc.contains("<body><p>Hello</p></body>"));
@@ -324,23 +569,207 @@ mod tests {
              style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'"
         );
         assert_eq!(document_csp(&BTreeSet::new()), BODY_CSP);
-        let doc = body_document("", &urls);
+        let doc = body_document("", &urls, &ShellPalette::light());
         assert!(doc.contains("img-src data: http://cdn.example:8080/a%3Bb%2Cc%27d.gif"));
     }
 
     #[test]
     fn wide_mail_fits_or_scrolls_the_document() {
-        let doc = body_document("", &BTreeSet::new());
+        let doc = body_document("", &BTreeSet::new(), &ShellPalette::light());
         // Images shrink to the message and long words break…
         assert!(doc.contains(".om-mail{overflow-wrap:anywhere}"));
         assert!(doc.contains(".om-mail img{max-width:min(100%,calc(100vw - 82px));height:auto}"));
         // …and what can't shrink widens the thread, so the document scrolls
         // sideways rather than a scroller inside the message.
         assert!(doc.contains("min-width:min-content"));
+        // A long snippet doesn't count towards that width.
+        assert!(doc.contains(".om-line{flex:1 1 0;width:0;min-width:0;"));
         assert!(!doc.contains("overflow-x"));
         assert!(doc.contains(
-            ".om-body{padding:12px 16px 16px;border-top:1px solid #e4e4e9;contain:paint}"
+            ".om-body{padding:12px 16px 16px;border-top:1px solid var(--om-border);contain:paint}"
         ));
+    }
+
+    fn dark() -> ShellPalette {
+        ShellPalette {
+            dark: true,
+            background: "#1e1f20".to_owned(),
+            foreground: "#e3e3e3".to_owned(),
+            border: "#333537".to_owned(),
+            muted: "#9aa0a6".to_owned(),
+            muted_background: "#282a2c".to_owned(),
+            hover: "#2a2b2d".to_owned(),
+            link: "#a8c7fa".to_owned(),
+            focus: "#a8c7fa".to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_shell_takes_the_theme_colors() {
+        let light = body_document("", &BTreeSet::new(), &ShellPalette::light());
+        assert!(light.contains("<html><head>"));
+        assert!(light.contains(":root{color-scheme:light;--om-bg:#ffffff;--om-fg:#1f1f1f;"));
+
+        let doc = body_document("", &BTreeSet::new(), &dark());
+        assert!(doc.contains("<html class=\"om-dark\"><head>"));
+        assert!(doc.contains(
+            ":root{color-scheme:dark;--om-bg:#1e1f20;--om-fg:#e3e3e3;--om-border:#333537;\
+             --om-muted:#9aa0a6;--om-muted-bg:#282a2c;--om-hover:#2a2b2d;--om-link:#a8c7fa;\
+             --om-focus:#a8c7fa}"
+        ));
+        // The shell's own colors all come from the palette.
+        let shell = SHELL_CSS.replace(".om-dark .om-card{", "");
+        let card = SHELL_CSS.find(".om-dark .om-card{").unwrap();
+        assert!(!shell[..card].contains('#'), "{shell}");
+    }
+
+    #[test]
+    fn palette_colors_cannot_break_out() {
+        let mut palette = ShellPalette::light();
+        palette.link = "red}body{display:none".to_owned();
+        palette.focus = "#12345g".to_owned();
+        let doc = body_document("", &BTreeSet::new(), &palette);
+        assert!(!doc.contains("body{display:none"));
+        assert!(doc.contains("--om-link:#000000;--om-focus:#000000}"));
+    }
+
+    fn html_message(html: &str) -> MessageItem {
+        item(
+            "m4",
+            true,
+            BodyState::Loaded(LoadedBody {
+                text: String::new(),
+                html: Some(Box::new(clean(html))),
+                source: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn each_message_gets_its_dark_treatment() {
+        let doc = |html: &str, palette: &ShellPalette| {
+            conversation_document(&conversation(vec![html_message(html)]), palette, dates)
+        };
+        let designed = "<div style=\"background:#0b3d91;color:#fff\">Sale</div>";
+        let own = "<style>@media (prefers-color-scheme: dark){p{color:#eee}}</style><p>Hi</p>";
+        let personal = "<p style=\"color:#222\">Hi</p>";
+        // Designed mail keeps its light colors on a light card.
+        assert!(doc(designed, &dark()).contains("<div class=\"om-mail om-card\" id=\"b-m4\">"));
+        // Mail with its own dark styles is shown on the dark page.
+        assert!(doc(own, &dark()).contains("<div class=\"om-mail\" id=\"b-m4\">"));
+        // Personal mail has its colors adapted.
+        let adapted = doc(personal, &dark());
+        assert!(
+            adapted.contains(
+                "<style>#b-m4{--om-c0:#cfcfd0}</style><div class=\"om-mail\" id=\"b-m4\">"
+            )
+        );
+        // The light theme shows each as it is.
+        for html in [designed, own, personal] {
+            let light = doc(html, &ShellPalette::light());
+            assert!(
+                light.contains("<div class=\"om-mail\" id=\"b-m4\">"),
+                "{html}"
+            );
+            assert!(!light.contains("--om-c0:"), "{html}");
+        }
+    }
+
+    #[test]
+    fn adapted_colors_over_the_personal_fixture() {
+        let cleaned = clean(include_str!("sanitize/fixtures/personal.html"));
+        let DarkStyle::Adapt { colors, attributes } = &cleaned.dark else {
+            panic!("{:?}", cleaned.dark);
+        };
+        let css = adapted_css("b-m4", colors, attributes, &dark());
+        insta::assert_snapshot!(css.replace('}', "}\n"));
+    }
+
+    /// The conversation part of a document, without the shell's head.
+    fn thread(doc: &str) -> &str {
+        &doc[doc.find("<main").unwrap()..]
+    }
+
+    fn text_message(id: &str, text: &str) -> MessageItem {
+        item(
+            id,
+            true,
+            BodyState::Loaded(LoadedBody {
+                text: text.to_owned(),
+                html: None,
+                source: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn quoted_history_collapses_behind_a_toggle() {
+        let reply = "<div>Yes.</div><div class=\"gmail_quote\"><div class=\"gmail_attr\">\
+                     On Mon, Ada wrote:</div><blockquote class=\"gmail_quote\">Lunch?</blockquote></div>";
+        let doc = conversation_document(
+            &conversation(vec![html_message(reply)]),
+            &ShellPalette::light(),
+            dates,
+        );
+        assert!(doc.contains(
+            "<div class=\"om-mail\" id=\"b-m4\"><div>Yes.</div><details class=\"om-quote\" \
+             id=\"q-b-m4\"><summary class=\"om-quote-toggle\" title=\"Show trimmed content\" \
+             aria-label=\"Show trimmed content\">•••</summary><div class=\"gmail_quote\">"
+        ));
+        assert!(doc.contains("</blockquote></div></details></div>"));
+    }
+
+    #[test]
+    fn a_signature_seen_before_collapses_with_the_quote() {
+        let signature = "<div class=\"gmail_signature\">Ada Lovelace<br>Engines</div>";
+        let first = html_message(&format!("<div>Hello</div>{signature}"));
+        let mut second = html_message(&format!(
+            "<div>Again</div>{signature}<div class=\"gmail_quote\"><blockquote>Hello</blockquote></div>"
+        ));
+        second.id = MessageId::new("m5");
+        let mut third = html_message(&format!("<div>Last</div>{signature}"));
+        third.id = MessageId::new("m6");
+        let doc = conversation_document(
+            &conversation(vec![first, second, third]),
+            &ShellPalette::light(),
+            dates,
+        );
+        // The first shows its signature; later ones fold it away, with the
+        // quote when it sits beside it.
+        assert!(doc.contains("<div>Hello</div><div class=\"gmail_signature\">"));
+        assert!(doc.contains(&format!(
+            "<div>Again</div><details class=\"om-quote\" id=\"q-b-m5\">{TRIMMED_TOGGLE}\
+             <div class=\"gmail_signature\">"
+        )));
+        assert!(doc.contains(&format!(
+            "<div>Last</div><details class=\"om-quote\" id=\"q-b-m6\">{TRIMMED_TOGGLE}\
+             <div class=\"gmail_signature\">"
+        )));
+        assert_eq!(doc.matches("<details class=\"om-quote\"").count(), 2);
+    }
+
+    #[test]
+    fn plain_text_replies_collapse_their_quotes() {
+        let doc = conversation_document(
+            &conversation(vec![
+                text_message(
+                    "m1",
+                    "Hi all,\n\nNotes attached.\n\n-- \nCarol\nMission control\n",
+                ),
+                text_message(
+                    "m2",
+                    "Looks good.\n\nOn Tue, Carol <c@example.com> wrote:\n> Hi all,\n>\n> Notes attached.\n",
+                ),
+                text_message(
+                    "m3",
+                    "Thursday works.\n\n-- \nCarol\nMission control\n\nOn Wed, Dan wrote:\n> Looks good.\n",
+                ),
+                text_message("m4", "> only a quote\n> of something"),
+            ]),
+            &ShellPalette::light(),
+            dates,
+        );
+        insta::assert_snapshot!(thread(&doc));
     }
 
     #[test]
@@ -364,7 +793,7 @@ mod tests {
         let loaded = |text: &str, html: Option<&str>| {
             BodyState::Loaded(LoadedBody {
                 text: text.to_owned(),
-                html: html.map(clean),
+                html: html.map(|html| Box::new(clean(html))),
                 source: None,
             })
         };
@@ -383,6 +812,7 @@ mod tests {
                     loaded("Hi", Some("<p style=\"color:red\">Hi</p>")),
                 ),
             ]),
+            &ShellPalette::light(),
             dates,
         );
         insta::assert_snapshot!(doc);
@@ -395,6 +825,7 @@ mod tests {
                 item("m1", false, BodyState::NotLoaded),
                 item("m2", true, BodyState::NotLoaded),
             ]),
+            &ShellPalette::light(),
             dates,
         );
         assert!(doc.contains("<details class=\"om-message\" id=\"m-m1\">"));
@@ -415,7 +846,8 @@ mod tests {
             }),
         );
         message.sender = "<img src=x>".to_owned();
-        let doc = conversation_document(&conversation(vec![message]), dates);
+        let doc =
+            conversation_document(&conversation(vec![message]), &ShellPalette::light(), dates);
         assert!(!doc.contains("<script"));
         assert!(!doc.contains("<img"));
         assert!(!doc.contains("<h1>"));
@@ -452,7 +884,7 @@ mod tests {
         let cleaned = clean(SAMPLE_NEWSLETTER).html;
         assert!(cleaned.contains("<table"));
         assert!(cleaned.contains("cellpadding=\"0\""));
-        assert!(cleaned.contains("style=\"background:#f2f2f7\""));
+        assert!(cleaned.contains("style=\"background:var(--om-c0,#f2f2f7)\""));
         assert!(cleaned.contains("<img src=\"data:image/"));
         assert!(cleaned.contains("href=\"https://"));
         assert!(!cleaned.contains("<!--"), "comments are dropped");

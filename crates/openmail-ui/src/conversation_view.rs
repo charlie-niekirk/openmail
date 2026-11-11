@@ -26,12 +26,12 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::spinner::Spinner;
 use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Theme, h_flex, v_flex};
 use openmail_core::{Label, LabelColor, MessageId, ThreadId};
 use openmail_store::ThreadDetail;
 use time::OffsetDateTime;
 
-use crate::body_document::conversation_document;
+use crate::body_document::{ShellPalette, conversation_document};
 use crate::bridge::{AppEvent, AppModel};
 use crate::conversation::{BodyState, Conversation, LabelChip, MessageItem, ReadingPane};
 use crate::message_body::{LinkClicked, MessageBodyView};
@@ -41,6 +41,34 @@ use crate::state::Session;
 use crate::thread_list::format_date;
 use crate::time_format::{full_date, local};
 use crate::typography::{TextRole, TypographyExt as _};
+
+/// The document shell's colors from the app's theme.
+fn shell_palette(theme: &Theme) -> ShellPalette {
+    ShellPalette {
+        dark: theme.is_dark(),
+        background: hex(theme.background),
+        foreground: hex(theme.foreground),
+        border: hex(theme.border),
+        muted: hex(theme.muted_foreground),
+        muted_background: hex(theme.muted),
+        hover: hex(theme.list_hover),
+        link: hex(theme.link),
+        focus: hex(theme.ring),
+    }
+}
+
+/// `color` as `#rrggbb`, rounded. Alpha is dropped: Openmail's themes name
+/// opaque colors.
+fn hex(color: Hsla) -> String {
+    let rgba = color.to_rgb();
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        channel(rgba.r),
+        channel(rgba.g),
+        channel(rgba.b)
+    )
+}
 
 /// Widest a conversation's text runs, for readable lines on wide windows.
 const MAX_WIDTH: gpui::Pixels = px(860.);
@@ -85,7 +113,7 @@ pub struct ConversationView {
     link: Option<LinkNotice>,
     /// Takes the link notice down after a while.
     link_timeout: Option<Task<()>>,
-    _subscriptions: [Subscription; 3],
+    _subscriptions: [Subscription; 4],
 }
 
 impl ConversationView {
@@ -100,6 +128,8 @@ impl ConversationView {
         let links = cx.subscribe(&body, |this, _, event: &LinkClicked, cx| {
             this.link_clicked(&event.0, cx);
         });
+        // Light and dark: the document takes the theme's colors.
+        let theme = cx.observe_global::<Theme>(Self::sync_body);
         let mut view = Self {
             model,
             pane: ReadingPane::Empty,
@@ -110,7 +140,7 @@ impl ConversationView {
             shown: None,
             link: None,
             link_timeout: None,
-            _subscriptions: [events, status, links],
+            _subscriptions: [events, status, links, theme],
         };
         view.status_changed(cx);
         view
@@ -242,12 +272,15 @@ impl ConversationView {
         match &self.pane {
             ReadingPane::Open(conversation) if conversation.bodies_settled() => {
                 let now = local(OffsetDateTime::now_utc());
-                let document = conversation_document(conversation, |date| {
+                let palette = shell_palette(cx.theme());
+                let document = conversation_document(conversation, &palette, |date| {
                     let date = local(date);
                     (format_date(date, now), full_date(date))
                 });
+                let key = conversation.thread_id.as_str().to_owned();
                 self.shown = Some(conversation.thread_id.clone());
-                self.body.update(cx, |body, cx| body.show(document, cx));
+                self.body
+                    .update(cx, |body, cx| body.show(document, &key, cx));
             }
             ReadingPane::Open(conversation)
                 if self.shown.as_ref() == Some(&conversation.thread_id) => {}

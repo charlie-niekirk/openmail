@@ -16,7 +16,11 @@
 //! - keeps links to `http(s):` and `mailto:` only (opened outside the
 //!   webview) and in-message anchors (renamed with the IDs), and notes the
 //!   links whose text names another site than they go to
-//!   ([`CleanHtml::misleading_links`]).
+//!   ([`CleanHtml::misleading_links`]);
+//! - decides how the message is shown in dark mode ([`dark`]), rewriting
+//!   its colors for it if it is to be adapted;
+//! - finds its quoted history and signature ([`quotes`]), which the
+//!   document collapses.
 //!
 //! The document's CSP is the backstop: it allows no network loads except
 //! the remote images of messages whose images are shown
@@ -30,7 +34,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use openmail_store::InlinePart;
 
+pub mod color;
 pub mod css;
+pub mod dark;
+pub mod quotes;
+
+use dark::{DarkStyle, Probe};
 
 /// The image types a `data:` URL may carry. An SVG loaded as an image runs
 /// no script and loads nothing else.
@@ -67,8 +76,10 @@ const GENERIC_ATTRIBUTES: [&str; 12] = [
 ];
 
 /// Element-specific attributes on top of `ammonia`'s defaults.
-const TAG_ATTRIBUTES: [(&str, &[&str]); 10] = [
+const TAG_ATTRIBUTES: [(&str, &[&str]); 11] = [
     ("a", &["name"]),
+    // `type="cite"` marks quoted replies (Apple Mail, Thunderbird).
+    ("blockquote", &["type"]),
     ("table", &["cellpadding", "cellspacing", "frame", "rules"]),
     ("td", &["abbr", "scope"]),
     ("font", &["color", "face", "size"]),
@@ -109,6 +120,10 @@ pub struct CleanHtml {
     /// one they go to: the link (as [`link_key`] writes it) and the site
     /// its text names.
     pub misleading_links: BTreeMap<String, String>,
+    /// How it is shown in dark mode.
+    pub dark: DarkStyle,
+    /// Its quoted history and signature, which the document collapses.
+    pub trimmed: quotes::Trimmed,
 }
 
 /// The `id` of the element wrapping a message's HTML, which its CSS is
@@ -131,13 +146,29 @@ pub fn scope_id(message_id: &str) -> String {
 /// Re-serializing it also balances its tags, so it can't close its section
 /// and spill into the shell.
 pub fn clean_html(html: &str, options: &CleanOptions<'_>) -> CleanHtml {
+    let (mut cleaned, probe) = clean_pass(html, options, Probe::default());
+    if probe.needs_rewrite() {
+        // Again, with its colors as custom properties for dark mode.
+        (cleaned, _) = clean_pass(html, options, Probe::rewriting(&probe));
+    }
+    cleaned.dark = probe.style();
+    cleaned.trimmed = quotes::find(&cleaned.html, &format!("{}-", scope_id(options.message_id)));
+    cleaned
+}
+
+/// One cleaning of `html`, with `probe` learning (or rewriting) its
+/// colors.
+fn clean_pass(html: &str, options: &CleanOptions<'_>, probe: Probe) -> (CleanHtml, Probe) {
     let scope = scope_id(options.message_id);
     let id_prefix = format!("{scope}-");
-    let images = Arc::new(Mutex::new(Images {
-        remote: options.remote_images,
-        inline: data_urls(options.inline),
-        blocked: false,
-        urls: BTreeSet::new(),
+    let state = Arc::new(Mutex::new(State {
+        images: Images {
+            remote: options.remote_images,
+            inline: data_urls(options.inline),
+            blocked: false,
+            urls: BTreeSet::new(),
+        },
+        probe,
     }));
 
     let mut builder = ammonia::Builder::default();
@@ -150,15 +181,15 @@ pub fn clean_html(html: &str, options: &CleanOptions<'_>) -> CleanHtml {
     for (tag, attributes) in TAG_ATTRIBUTES {
         builder.add_tag_attributes(tag, attributes);
     }
-    let filter_images = images.clone();
+    let filter_state = state.clone();
     let filter_prefix = id_prefix.clone();
     builder.attribute_filter(move |element, attribute, value| {
-        let mut images = filter_images.lock().unwrap_or_else(PoisonError::into_inner);
-        filter_attribute(element, attribute, value, &filter_prefix, &mut images)
+        let mut state = filter_state.lock().unwrap_or_else(PoisonError::into_inner);
+        filter_attribute(element, attribute, value, &filter_prefix, &mut state)
     });
     let cleaned = builder.clean(html).to_string();
 
-    let mut images = images.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
     let scope_selector = format!("#{scope}");
     let mut misleading_links = BTreeMap::new();
     let html = post_process(
@@ -170,7 +201,7 @@ pub fn clean_html(html: &str, options: &CleanOptions<'_>) -> CleanHtml {
                     selector: &scope_selector,
                     id_prefix: &id_prefix,
                 },
-                &mut |url| images.resolve(url),
+                &mut *state,
             )
         },
         |href, text| {
@@ -181,11 +212,42 @@ pub fn clean_html(html: &str, options: &CleanOptions<'_>) -> CleanHtml {
             }
         },
     );
-    CleanHtml {
+    let cleaned = CleanHtml {
         html,
-        blocked_images: images.blocked,
-        image_urls: std::mem::take(&mut images.urls),
+        blocked_images: state.images.blocked,
+        image_urls: std::mem::take(&mut state.images.urls),
         misleading_links,
+        dark: DarkStyle::Card,
+        trimmed: quotes::Trimmed::default(),
+    };
+    (cleaned, std::mem::take(&mut state.probe))
+}
+
+/// What cleaning keeps track of: images, and colors for dark mode.
+struct State {
+    images: Images,
+    probe: Probe,
+}
+
+impl css::Visitor for State {
+    fn url(&mut self, url: &str) -> Option<String> {
+        self.images.resolve(url)
+    }
+
+    fn color(&mut self, role: color::Role, color: color::Rgba) -> Option<String> {
+        self.probe.color(role, color)
+    }
+
+    fn unknown_color(&mut self, _role: color::Role) {
+        self.probe.unknown_color();
+    }
+
+    fn background_image(&mut self) {
+        self.probe.background_image();
+    }
+
+    fn dark_scheme(&mut self) {
+        self.probe.dark_scheme();
     }
 }
 
@@ -257,16 +319,24 @@ fn filter_attribute<'a>(
     attribute: &str,
     value: &'a str,
     id_prefix: &str,
-    images: &mut Images,
+    state: &mut State,
 ) -> Option<Cow<'a, str>> {
     match (element, attribute) {
         // A `<style>` element's attributes (`media`, `type`) aren't needed.
         ("style", _) => None,
         (_, "style") => {
-            let css = css::filter_declarations(value, &mut |url| images.resolve(url));
+            let css = css::filter_declarations(value, state);
             (!css.is_empty()).then_some(Cow::Owned(css))
         }
-        ("img", "src") | (_, "background") => images.resolve(value).map(Cow::Owned),
+        ("img", "src") => state.images.resolve(value).map(Cow::Owned),
+        (_, "background") => {
+            state.probe.background_image();
+            state.images.resolve(value).map(Cow::Owned)
+        }
+        (_, "bgcolor" | "color") => {
+            state.probe.attribute(element, attribute, value);
+            Some(Cow::Borrowed(value))
+        }
         ("a", "href") => link(value, id_prefix),
         (_, "id") | ("a", "name") => Some(Cow::Owned(format!("{id_prefix}{value}"))),
         (_, "class") => {
@@ -431,7 +501,7 @@ fn post_process(
 }
 
 /// The value of attribute `name` in serialized `tag`, unescaped.
-fn attribute(tag: &str, name: &str) -> Option<String> {
+pub(crate) fn attribute(tag: &str, name: &str) -> Option<String> {
     let marker = format!(" {name}=\"");
     let start = tag.find(&marker)? + marker.len();
     let len = tag[start..].find('"')?;
@@ -439,7 +509,7 @@ fn attribute(tag: &str, name: &str) -> Option<String> {
 }
 
 /// The text of serialized `html`, tags dropped and unescaped.
-fn text_content(html: &str) -> String {
+pub(crate) fn text_content(html: &str) -> String {
     let mut text = String::new();
     let mut rest = html;
     while let Some(start) = rest.find('<') {
@@ -462,7 +532,7 @@ fn unescape(text: &str) -> String {
 
 /// The length of the tag `html` starts with, up to and including its `>`
 /// (skipping `>` inside quoted attribute values).
-fn tag_end(html: &str) -> Option<usize> {
+pub(crate) fn tag_end(html: &str) -> Option<usize> {
     let mut quoted = false;
     for (i, byte) in html.bytes().enumerate() {
         match byte {
@@ -475,7 +545,7 @@ fn tag_end(html: &str) -> Option<usize> {
 }
 
 /// The name of `tag` (`<name …>`), as in `p` or `/p`.
-fn tag_name(tag: &str) -> &str {
+pub(crate) fn tag_name(tag: &str) -> &str {
     let name = tag.get(1..).unwrap_or_default();
     let len = name
         .find(|c: char| c.is_ascii_whitespace() || c == '>')

@@ -16,6 +16,7 @@ mod main_window;
 mod message_body;
 mod onboarding;
 mod onboarding_view;
+mod page_state;
 mod pane_sizes;
 mod panes;
 mod placeholder;
@@ -42,6 +43,7 @@ pub use conversation_view::ConversationView;
 pub use main_window::{Content, MainWindow, main_window_options};
 pub use message_body::{LinkClicked, MessageBodyView, allows_navigation, link_target};
 pub use onboarding::{Notice, Setup, SignIn, SignInError, inbox_ready};
+pub use page_state::{PAGE_SCRIPT, PageState, with_page_state};
 pub use pane_sizes::{
     CONVERSATION_MIN_WIDTH, Divider, LAYOUT_FILE, PaneSizes, SIDEBAR_WIDTH, THREAD_LIST_WIDTH,
     WidthRange, layout_path,

@@ -19,8 +19,45 @@
 //!
 //! Working on tokens rather than text means CSS escapes (`\70 osition`) are
 //! compared decoded and written back escaped.
+//!
+//! A [`Visitor`] decides what each `url()` becomes and hears what dark mode
+//! needs to know (see [`color`](super::color)): the colors declarations use
+//! and the role they play, which it may replace, background images, and
+//! whether the message has styles of its own for a dark page.
 
 use cssparser::{CowRcStr, ParseError, ParseErrorKind, Parser, ToCss as _, Token};
+
+use super::color::{self, Parsed, Rgba, Role};
+
+/// What the CSS filter asks and tells about a message's CSS.
+pub trait Visitor {
+    /// What a `url()` becomes: `Some` URL to keep, or `None` for `none`.
+    fn url(&mut self, url: &str) -> Option<String>;
+
+    /// A color a declaration uses as `role`. `Some(name)` replaces it with
+    /// `var(name, color)`: `name` must be a custom property name.
+    fn color(&mut self, _role: Role, _color: Rgba) -> Option<String> {
+        None
+    }
+
+    /// Something in a color's place that isn't one it can read, such as
+    /// `var()`.
+    fn unknown_color(&mut self, _role: Role) {}
+
+    /// A background image or gradient.
+    fn background_image(&mut self) {}
+
+    /// An `@media (prefers-color-scheme: dark)` rule: the message styles
+    /// itself for a dark page.
+    fn dark_scheme(&mut self) {}
+}
+
+/// A plain function decides only URLs.
+impl<F: FnMut(&str) -> Option<String>> Visitor for F {
+    fn url(&mut self, url: &str) -> Option<String> {
+        self(url)
+    }
+}
 
 /// How deeply blocks may nest before a stylesheet or declaration is dropped.
 const MAX_DEPTH: usize = 32;
@@ -65,22 +102,20 @@ enum Node<'i> {
     Token(Token<'i>),
     /// A function, `(…)`, `[…]` or `{…}` block.
     Block(Token<'i>, Vec<Node<'i>>),
+    /// CSS written as it is (a [`Visitor`]'s replacement color).
+    Raw(String),
 }
 
 /// A `style` attribute's declarations, filtered. `urls` decides what each
-/// `url()` becomes: `Some` URL to keep, or `None` for `none`.
-pub fn filter_declarations(css: &str, urls: &mut dyn FnMut(&str) -> Option<String>) -> String {
+/// `url()` becomes (see [`Visitor`]).
+pub fn filter_declarations(css: &str, urls: &mut dyn Visitor) -> String {
     parse(css)
         .map(|nodes| declarations(&nodes, urls))
         .unwrap_or_default()
 }
 
 /// A `<style>` element's stylesheet, filtered and scoped to `scope`.
-pub fn scope_stylesheet(
-    css: &str,
-    scope: Scope<'_>,
-    urls: &mut dyn FnMut(&str) -> Option<String>,
-) -> String {
+pub fn scope_stylesheet(css: &str, scope: Scope<'_>, urls: &mut dyn Visitor) -> String {
     let css = parse(css)
         .map(|nodes| rules(&nodes, scope, urls, 0))
         .unwrap_or_default();
@@ -131,6 +166,7 @@ fn write(nodes: &[Node<'_>], out: &mut String) {
             Node::Token(token) => {
                 let _ = token.to_css(out);
             }
+            Node::Raw(css) => out.push_str(css),
             Node::Block(open, children) => {
                 let _ = open.to_css(out);
                 write(children, out);
@@ -176,7 +212,7 @@ fn is_token(node: &Node<'_>, wanted: &Token<'_>) -> bool {
 
 // Declarations.
 
-fn declarations(nodes: &[Node<'_>], urls: &mut dyn FnMut(&str) -> Option<String>) -> String {
+fn declarations(nodes: &[Node<'_>], urls: &mut dyn Visitor) -> String {
     nodes
         .split(|node| is_token(node, &Token::Semicolon))
         .filter_map(|declaration| self::declaration(declaration, urls))
@@ -185,7 +221,7 @@ fn declarations(nodes: &[Node<'_>], urls: &mut dyn FnMut(&str) -> Option<String>
 }
 
 /// One `name: value` declaration, filtered, or `None` to drop it.
-fn declaration(nodes: &[Node<'_>], urls: &mut dyn FnMut(&str) -> Option<String>) -> Option<String> {
+fn declaration(nodes: &[Node<'_>], urls: &mut dyn Visitor) -> Option<String> {
     let (Node::Token(Token::Ident(name)), rest) = trim(nodes).split_first()? else {
         return None;
     };
@@ -202,7 +238,14 @@ fn declaration(nodes: &[Node<'_>], urls: &mut dyn FnMut(&str) -> Option<String>)
     {
         return None;
     }
+    if is_background(&property) && has_image(value) {
+        urls.background_image();
+    }
     let value = rewrite_urls(value, urls);
+    let value = match color_role(&property) {
+        Some(role) => rewrite_colors(&value, role, urls),
+        None => value,
+    };
     let mut out = String::new();
     let _ = Token::Ident(name.clone()).to_css(&mut out);
     out.push(':');
@@ -228,6 +271,7 @@ fn safe_value(nodes: &[Node<'_>]) -> bool {
             !BLOCKED_FUNCTIONS.contains(&name.to_ascii_lowercase().as_str()) && safe_value(children)
         }
         Node::Block(_, children) => safe_value(children),
+        Node::Raw(_) => true,
     })
 }
 
@@ -247,12 +291,90 @@ fn allowed_position(value: &[Node<'_>]) -> bool {
     ALLOWED_POSITIONS.contains(&keyword.to_ascii_lowercase().as_str())
 }
 
+/// The role colors play in `property`, if it is one dark mode adapts.
+fn color_role(property: &str) -> Option<Role> {
+    match property {
+        "color"
+        | "-webkit-text-fill-color"
+        | "-webkit-text-stroke-color"
+        | "text-decoration"
+        | "text-decoration-color"
+        | "text-emphasis-color"
+        | "caret-color" => Some(Role::Text),
+        "background" | "background-color" => Some(Role::Background),
+        "outline" | "outline-color" | "box-shadow" | "text-shadow" | "column-rule"
+        | "column-rule-color" => Some(Role::Border),
+        border
+            if border.starts_with("border")
+                && !["radius", "width", "style", "collapse", "spacing", "image"]
+                    .iter()
+                    .any(|part| border.contains(part)) =>
+        {
+            Some(Role::Border)
+        }
+        _ => None,
+    }
+}
+
+fn is_background(property: &str) -> bool {
+    matches!(
+        property,
+        "background" | "background-image" | "-webkit-background-image"
+    )
+}
+
+/// Whether a background value paints an image: a `url()` or a gradient.
+fn has_image(nodes: &[Node<'_>]) -> bool {
+    has_url(nodes)
+        || nodes.iter().any(|node| match node {
+            Node::Block(Token::Function(name), children) => {
+                name.to_ascii_lowercase().ends_with("gradient") || has_image(children)
+            }
+            _ => false,
+        })
+}
+
+/// `nodes`, a value whose colors play `role`, with the colors `visitor`
+/// replaces replaced. Only the value's own colors count, not those inside
+/// other functions (gradients count as images).
+fn rewrite_colors<'i>(nodes: &[Node<'i>], role: Role, visitor: &mut dyn Visitor) -> Vec<Node<'i>> {
+    nodes
+        .iter()
+        .map(|node| {
+            let parsed = match node {
+                Node::Token(token) => color::parse(token),
+                Node::Block(Token::Function(name), _) => {
+                    let name = name.to_ascii_lowercase();
+                    if matches!(name.as_str(), "var" | "env" | "attr") {
+                        visitor.unknown_color(role);
+                    }
+                    if matches!(name.as_str(), "rgb" | "rgba" | "hsl" | "hsla") {
+                        color::parse_value(&to_string(std::slice::from_ref(node)))
+                    } else {
+                        Parsed::None
+                    }
+                }
+                _ => Parsed::None,
+            };
+            match parsed {
+                Parsed::Color(color) => visitor.color(role, color).map_or_else(
+                    || node.clone(),
+                    |css| {
+                        Node::Raw(format!(
+                            "var({css},{})",
+                            to_string(std::slice::from_ref(node))
+                        ))
+                    },
+                ),
+                _ => node.clone(),
+            }
+        })
+        .collect()
+}
+
 /// `nodes` with each `url()` replaced by what `urls` makes of it.
-fn rewrite_urls<'i>(
-    nodes: &[Node<'i>],
-    urls: &mut dyn FnMut(&str) -> Option<String>,
-) -> Vec<Node<'i>> {
-    let replace = |url: &str, urls: &mut dyn FnMut(&str) -> Option<String>| match urls(url) {
+fn rewrite_urls<'i>(nodes: &[Node<'i>], urls: &mut dyn Visitor) -> Vec<Node<'i>> {
+    let replace = |url: &str, urls: &mut dyn Visitor| match urls.url(url) {
         Some(url) => Node::Token(Token::UnquotedUrl(CowRcStr::from(url))),
         None => Node::Token(Token::Ident(CowRcStr::from("none"))),
     };
@@ -279,17 +401,13 @@ fn has_url(nodes: &[Node<'_>]) -> bool {
         Node::Token(token) => matches!(token, Token::UnquotedUrl(_) | Token::BadUrl(_)),
         Node::Block(Token::Function(name), _) if name.eq_ignore_ascii_case("url") => true,
         Node::Block(_, children) => has_url(children),
+        Node::Raw(_) => false,
     })
 }
 
 // Rules.
 
-fn rules(
-    nodes: &[Node<'_>],
-    scope: Scope<'_>,
-    urls: &mut dyn FnMut(&str) -> Option<String>,
-    depth: usize,
-) -> String {
+fn rules(nodes: &[Node<'_>], scope: Scope<'_>, urls: &mut dyn Visitor, depth: usize) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i < nodes.len() {
@@ -310,6 +428,9 @@ fn rules(
                 && safe_value(prelude)
                 && !has_url(prelude);
             if keep && let Some(Node::Block(Token::CurlyBracketBlock, body)) = nodes.get(end) {
+                if prefers_dark(prelude) {
+                    urls.dark_scheme();
+                }
                 let inner = rules(body, scope, urls, depth + 1);
                 if !inner.is_empty() {
                     let _ = Token::AtKeyword(name.clone()).to_css(&mut out);
@@ -341,6 +462,25 @@ fn rules(
         i = block + 1;
     }
     out
+}
+
+/// Whether a media query asks for `prefers-color-scheme: dark`.
+fn prefers_dark(prelude: &[Node<'_>]) -> bool {
+    prelude.iter().any(|node| match node {
+        Node::Block(Token::ParenthesisBlock, children) => {
+            let words: Vec<String> = children
+                .iter()
+                .filter_map(|node| match node {
+                    Node::Token(Token::Ident(word)) => Some(word.to_ascii_lowercase()),
+                    _ => None,
+                })
+                .collect();
+            (words.first().map(String::as_str) == Some("prefers-color-scheme")
+                && words.get(1).map(String::as_str) == Some("dark"))
+                || prefers_dark(children)
+        }
+        _ => false,
+    })
 }
 
 /// A rule's selector list scoped to `scope`, or `None` to drop the rule.
@@ -486,7 +626,7 @@ mod tests {
         let out = filter_declarations(
             "background: #fff url(https://t.example/a.png) no-repeat; \
              background-image: url( 'cid:logo@x' ); list-style: u\\72 l(\"x.png\")",
-            &mut |url| {
+            &mut |url: &str| {
                 seen.push(url.to_owned());
                 url.starts_with("cid:")
                     .then(|| "data:image/png;base64,AA==".to_owned())

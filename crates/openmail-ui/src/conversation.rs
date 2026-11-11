@@ -426,7 +426,7 @@ pub struct LoadedBody {
     /// view is unavailable.
     pub text: String,
     /// Its HTML part, sanitized ([`clean_html`]), if it has one with content.
-    pub html: Option<CleanHtml>,
+    pub html: Option<Box<CleanHtml>>,
     /// The body as stored, to clean again once its images are shown.
     pub source: Option<Arc<MessageBody>>,
 }
@@ -459,7 +459,8 @@ impl LoadedBody {
             .as_deref()
             .filter(|html| !html.trim().is_empty())
             .map(|html| clean_html(html, &options))
-            .filter(|cleaned| !cleaned.html.trim().is_empty());
+            .filter(|cleaned| !cleaned.html.trim().is_empty())
+            .map(Box::new);
     }
 }
 

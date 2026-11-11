@@ -1,5 +1,6 @@
 //! The sanitizer over a small fixture corpus: a newsletter, hostile HTML,
-//! and a MIME message with `cid:` images.
+//! personal mail, mail with its own dark styles, light text, and a MIME
+//! message with `cid:` images.
 
 use openmail_mime::ParsedMessage;
 use openmail_store::InlinePart;
@@ -8,6 +9,9 @@ use super::*;
 
 const NEWSLETTER: &str = include_str!("fixtures/newsletter.html");
 const HOSTILE: &str = include_str!("fixtures/hostile.html");
+const PERSONAL: &str = include_str!("fixtures/personal.html");
+const DARK_AWARE: &str = include_str!("fixtures/dark-aware.html");
+const LIGHT_TEXT: &str = include_str!("fixtures/light-text.html");
 const CID_MESSAGE: &[u8] =
     include_bytes!("../../../openmail-mime/tests/fixtures/newsletter-cid.eml");
 
@@ -193,7 +197,7 @@ fn quoted_markup_is_not_a_stylesheet() {
     );
     assert_eq!(
         cleaned.html,
-        "<p title=\"&lt;style&gt;a{}&lt;/style&gt;\">x</p><style>#b-m1 p{color:red}</style>"
+        "<p title=\"&lt;style&gt;a{}&lt;/style&gt;\">x</p><style>#b-m1 p{color:var(--om-c0,red)}</style>"
     );
 }
 
@@ -305,4 +309,193 @@ fn links_naming_another_site_are_noted() {
         link_key("HTTPS://Evil.Example/login").as_deref(),
         Some("https://evil.example/login")
     );
+}
+
+#[test]
+fn each_message_gets_a_dark_mode_treatment() {
+    let kind = |html: &str| match clean(html, false).dark {
+        DarkStyle::Card => "card",
+        DarkStyle::Native => "native",
+        DarkStyle::Adapt { .. } => "adapt",
+    };
+    // Personal mail of light grays and dark text is adapted.
+    assert_eq!(kind(PERSONAL), "adapt");
+    assert_eq!(kind("<p>Hi</p>"), "adapt");
+    // Mail with its own dark styles keeps them.
+    assert_eq!(kind(DARK_AWARE), "native");
+    // Designed mail stays light: colored panels, light text, images.
+    assert_eq!(kind(NEWSLETTER), "card");
+    assert_eq!(kind(LIGHT_TEXT), "card");
+    assert_eq!(kind("<div style=\"background:#0b3d91\">Hi</div>"), "card");
+    assert_eq!(
+        kind("<div style=\"background:#fff linear-gradient(red, blue)\">Hi</div>"),
+        "card"
+    );
+    assert_eq!(
+        kind("<table><tr><td background=\"https://t.example/bg.png\">Hi</td></tr></table>"),
+        "card"
+    );
+    assert_eq!(
+        kind("<div style=\"background:url(cid:x)\">Hi</div>"),
+        "card"
+    );
+    // Colors it can't read rule adapting out.
+    assert_eq!(kind("<p style=\"color:var(--brand)\">Hi</p>"), "card");
+    assert_eq!(
+        kind("<table bgcolor=\"chucknorris\"><tr><td>Hi</td></tr></table>"),
+        "card"
+    );
+    // Showing images doesn't change it.
+    assert_eq!(clean(NEWSLETTER, true).dark, clean(NEWSLETTER, false).dark);
+}
+
+#[test]
+fn adapted_mail_writes_its_colors_as_custom_properties() {
+    let cleaned = clean(PERSONAL, false);
+    let DarkStyle::Adapt { colors, attributes } = &cleaned.dark else {
+        panic!("{:?}", cleaned.dark);
+    };
+    // One custom property per color and role, in order of appearance.
+    assert_eq!(
+        colors
+            .iter()
+            .map(|(role, css)| format!("{role:?} {css}"))
+            .collect::<Vec<_>>(),
+        [
+            "Text #222222",
+            "Text #d93025",
+            "Border #dddddd",
+            "Background #f3f3f3",
+            "Border #cccccc",
+            "Text #1155cc",
+            "Text rgba(0,0,0,0.54)",
+        ]
+    );
+    assert!(
+        cleaned
+            .html
+            .contains("style=\"color:var(--om-c0,#222222);font-family:Arial,sans-serif\"")
+    );
+    assert!(
+        cleaned
+            .html
+            .contains("border-bottom:1px solid var(--om-c4,rgb(204,204,204))")
+    );
+    // Attributes keep their colors, matched in dark mode by selectors.
+    assert!(cleaned.html.contains("<table bgcolor=\"#ffffff\""));
+    assert_eq!(
+        attributes
+            .iter()
+            .map(|a| format!("{:?} {} {} {:?}", a.element, a.attribute, a.value, a.role))
+            .collect::<Vec<_>>(),
+        [
+            "None bgcolor #ffffff Background",
+            "None bgcolor #f3f3f3 Background",
+            "Some(\"font\") color #666666 Text",
+            "Some(\"hr\") color #cccccc Border",
+        ]
+    );
+    insta::assert_snapshot!(cleaned.html);
+}
+
+#[test]
+fn mail_that_is_not_adapted_keeps_its_colors_as_written() {
+    for html in [NEWSLETTER, DARK_AWARE, LIGHT_TEXT, HOSTILE] {
+        assert!(!clean(html, false).html.contains("--om-c"));
+    }
+    // Its dark rules are kept, scoped.
+    assert!(
+        clean(DARK_AWARE, false)
+            .html
+            .contains("@media (prefers-color-scheme: dark) {#b-m1{background:#121212 !important;")
+    );
+}
+
+/// `cleaned`'s HTML with its quoted history in `[QUOTE[…]]` and its
+/// signature in `[SIGNATURE[…]]` (`+` if it joins the quote).
+fn marked(cleaned: &CleanHtml) -> String {
+    let mut marks = Vec::new();
+    if let Some(quote) = &cleaned.trimmed.quote {
+        marks.push((quote.start, "[QUOTE["));
+        marks.push((quote.end, "]]"));
+    }
+    if let Some(signature) = &cleaned.trimmed.signature {
+        let open = if signature.joins_quote {
+            "[SIGNATURE+["
+        } else {
+            "[SIGNATURE["
+        };
+        marks.push((signature.range.start, open));
+        marks.push((signature.range.end, "]]"));
+    }
+    marks.sort_by_key(|&(at, mark)| (at, mark != "]]"));
+    let mut html = cleaned.html.clone();
+    for (at, mark) in marks.into_iter().rev() {
+        html.insert_str(at, mark);
+    }
+    html
+}
+
+#[test]
+fn quoted_history_is_found_across_mail_clients() {
+    for (name, html) in [
+        ("gmail", include_str!("fixtures/quotes/gmail.html")),
+        ("gmail-old", include_str!("fixtures/quotes/gmail-old.html")),
+        ("apple", include_str!("fixtures/quotes/apple.html")),
+        (
+            "thunderbird",
+            include_str!("fixtures/quotes/thunderbird.html"),
+        ),
+        ("outlook", include_str!("fixtures/quotes/outlook.html")),
+        (
+            "outlook-desktop",
+            include_str!("fixtures/quotes/outlook-desktop.html"),
+        ),
+    ] {
+        let cleaned = clean(html, false);
+        let quote = cleaned
+            .trimmed
+            .quote
+            .clone()
+            .unwrap_or_else(|| panic!("{name}"));
+        // The quote is the end of the message, after text of its own.
+        let after = text_content(&cleaned.html[quote.end..]);
+        assert!(after.trim().is_empty(), "{name}: {after}");
+        insta::assert_snapshot!(format!("quotes-{name}"), marked(&cleaned));
+    }
+    // The signature beside Gmail's quote is found too.
+    let gmail = clean(include_str!("fixtures/quotes/gmail.html"), false);
+    let signature = gmail.trimmed.signature.unwrap();
+    assert_eq!(signature.text, "Ada Lovelace Analytical Engines");
+    assert!(!signature.joins_quote, "it sits inside the reply's div");
+}
+
+#[test]
+fn inline_replies_forwards_and_bare_quotes_stay_shown() {
+    for (name, html) in [
+        (
+            "inline-reply",
+            include_str!("fixtures/quotes/inline-reply.html"),
+        ),
+        ("forward", include_str!("fixtures/quotes/forward.html")),
+        (
+            "quote-only",
+            include_str!("fixtures/quotes/quote-only.html"),
+        ),
+        ("personal", PERSONAL),
+        ("newsletter", NEWSLETTER),
+    ] {
+        assert_eq!(clean(html, false).trimmed.quote, None, "{name}");
+    }
+}
+
+#[test]
+fn quote_ranges_point_into_the_final_html() {
+    // Adapted mail is cleaned twice; the ranges are of the second.
+    let html = "<div style=\"color:#333\">Yes.</div>\
+                <div class=\"gmail_quote\"><blockquote class=\"gmail_quote\">Q</blockquote></div>";
+    let cleaned = clean(html, false);
+    assert!(cleaned.html.contains("var(--om-c0,#333)"));
+    let quote = cleaned.trimmed.quote.clone().unwrap();
+    assert!(cleaned.html[quote].starts_with("<div class=\"gmail_quote\">"));
 }

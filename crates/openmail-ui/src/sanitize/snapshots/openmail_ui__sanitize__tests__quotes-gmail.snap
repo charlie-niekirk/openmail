@@ -1,0 +1,5 @@
+---
+source: crates/openmail-ui/src/sanitize/tests.rs
+expression: marked(&cleaned)
+---
+<div dir="ltr"><div>Friday works for me.</div><div><br></div>[SIGNATURE[<span class="gmail_signature_prefix">-- </span><br><div dir="ltr" class="gmail_signature"><div dir="ltr">Ada Lovelace<br>Analytical Engines</div></div>]]</div><br>[QUOTE[<div class="gmail_quote gmail_quote_container"><div dir="ltr" class="gmail_attr">On Tue, Nov 10, 2026 at 9:00 AM Bob Smith &lt;<a href="mailto:bob@example.com" rel="noopener noreferrer">bob@example.com</a>&gt; wrote:<br></div><blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid var(--om-c0,rgb(204,204,204));padding-left:1ex"><div dir="ltr">Can we meet on Friday?</div></blockquote></div>]]

@@ -98,13 +98,18 @@ app chrome.
 - HTML is sanitized with an email-specific `ammonia` allowlist before it reaches the
   webview.
 - A strict CSP is applied and email JavaScript is disabled. The only script is a
-  trusted, app-injected one used for auto-height.
+  trusted one the app injects, which keeps open sections and the scroll
+  position across reloads (one document grows with its content, so no
+  auto-height is needed).
 - Remote images are blocked by default, behind a per-message or per-sender
   "show images" choice. `cid:` references are rewritten to local content.
 - Message CSS is scoped to its message by selector prefixing.
 - Link clicks are intercepted and opened in the system browser, showing the real URL.
+- The document follows the app's light or dark theme, adapting message colors
+  where it safely can, and collapses quoted history behind a "•••" toggle.
 
-The details are under [Sanitization and privacy](#sanitization-and-privacy).
+The details are under [Sanitization and privacy](#sanitization-and-privacy)
+and [Reloads, dark mode and quoted text](#reloads-dark-mode-and-quoted-text).
 
 Spike 0.5 proved the embedding on macOS; the findings, the approach and the
 per-platform constraints are under [Webview embedding](#webview-embedding).
@@ -267,6 +272,8 @@ constraints above require.
   content's min-content width) rather than overflowing its message, so the
   document itself scrolls sideways, from anywhere in it. (Since 4.2; before,
   each message clipped its content and scrolled it sideways at its bottom.)
+  A collapsed message's snippet line takes no width of its own, so a long
+  one is cut off with an ellipsis rather than widening the thread (4.3).
 - **Resizing** needs nothing more than the spike: the element pushes its rect
   every frame, so the dividers and window resizes keep it aligned.
 - **Overlays.** The webview hides while a `gpui-component` dialog or sheet is
@@ -280,11 +287,6 @@ constraints above require.
 
 Left for later, without blocking it:
 
-- **4.3.** One document grows with its content, so per-message auto-height is
-  not needed. A trusted injected script could keep open sections and the
-  scroll position across reloads (today a reload, as when a new message
-  arrives, resets both), collapse quoted text, and adapt the shell to dark mode
-  (its colours are in one CSS block, `SHELL_CSS`).
 - **Large threads on Windows**: `NavigateToString` caps a document at 2 MB, so a
   long thread of newsletters needs a custom protocol to serve it.
 
@@ -350,8 +352,8 @@ is ever allowed. Limits: a CSP source ending in `/` matches its whole path
 prefix; after a redirect CSP only checks the host; images load directly from
 the sender's servers (there is no proxy as in Gmail), so showing them reveals
 the reader's IP address; `From` can be forged, so "always" trusts a claim;
-and showing images reloads the document, which resets scroll and open
-sections (4.3 keeps them).
+and showing images reloads the document (since 4.3 the page keeps its open
+sections and place: see below).
 
 **`cid:` images.** Bodies are fetched as raw MIME. `parse_body` keeps the
 parts the HTML mentions by `Content-ID` whose type (declared, or sniffed for
@@ -373,6 +375,98 @@ and subdomains of the named site don't): clicking one shows "This link says
 and opens nothing until confirmed. Other schemes never reach the handler (the
 sanitizer drops them) and are ignored if they do.
 
+### Reloads, dark mode and quoted text
+
+PR 4.3. The code is `page_state.rs` and `page_script.js` (reloads),
+`sanitize/color.rs` and `sanitize/dark.rs` (dark mode),
+`sanitize/quotes.rs` (quoted text) and `body_document.rs`, which puts
+them together. Tests run over the fixture corpus in `sanitize/fixtures/`.
+
+**One trusted script.** The document is loaded again whenever its content
+changes: images shown, a new message in the open thread, light or dark.
+A new page would open the default sections and start at the top, and
+which sections the reader opened is the engine's own business (JavaScript
+is off), out of the app's sight. So the webview runs one script of the
+app's own, `PAGE_SCRIPT`, as a wry initialization script (a `WKUserScript`
+on macOS). Email JavaScript stays off: `allowsContentJavaScript = NO`
+covers only scripts that come with the content, and a user script isn't
+subject to the page's CSP, which still allows no script at all (stricter
+than allowing one by hash, which would need content JavaScript on). The
+script reports, through wry's IPC handler, which sections (messages and
+their quoted text) are open, the first message in view and how far into
+it the viewport starts, and the scroll position. `MessageBodyView` keeps
+the latest report of the page it last loaded (each load has a generation
+number, so a late report from the previous page is ignored) and, when it
+loads another document for the same conversation, hands the state back in
+a `<meta name="om-state">`. The script applies it at `DOMContentLoaded`,
+before the first paint, and keeps the place anchored to that message while
+images load and the layout settles (until the reader scrolls, clicks or
+types, or 10 s pass). Reports are parsed strictly and bounded
+(`PageState::parse`). Without the script (WebKitGTK's
+`enable-javascript = false` probably stops user scripts too; untested), a
+reload falls back to the defaults. **No auto-height:** the conversation is
+one document that grows with its content in one webview (4.1), so nothing
+needs a message's height.
+
+**The shell follows the theme.** `ShellPalette` takes the shell's colors
+from the GPUI theme (background, text, borders, secondary text, hover,
+links, focus ring) and declares them as custom properties, with
+`color-scheme: dark` and an `om-dark` class in the dark theme. The reading
+pane rebuilds the document when the theme changes (switching the system
+appearance with a thread open), keeping its place as above. The webview's
+own `prefers-color-scheme` follows the window's appearance, which the
+theme follows too.
+
+**Message content in dark mode.** Mail is written for a white page. Each
+HTML message gets one of three treatments, decided when it is cleaned
+(`DarkStyle`):
+
+- *Its own dark styles*: mail with `@media (prefers-color-scheme: dark)`
+  rules is shown on the dark page and its rules apply. A `color-scheme`
+  meta tag alone isn't enough: much mail declares it without any dark
+  styles.
+- *Adapted*: mail whose backgrounds are all light grays or none, whose text
+  isn't light, and that paints no background image (personal mail,
+  plain replies). Its colors are written as `var(--om-cN, color)` (a second
+  cleaning pass, only for such mail), so the light page shows them
+  unchanged, and the dark document defines each `--om-cN` as the color
+  adapted to the theme's background and text: white becomes the page,
+  black the theme's text, grays keep their rank, and colorful text and
+  borders keep their hue and saturation and are lightened just enough for
+  WCAG contrast (4.5 for text, 3 for borders), so brand colors stay
+  recognizable. `bgcolor` and `<font color>` are matched with attribute
+  selectors (in `:where()`, so they add no specificity). Images are left
+  as they are; a logo drawn in dark ink on a transparent background can
+  be hard to see on the dark page.
+- *A light card*: anything else (colored panels, light text, background
+  images or gradients, colors it can't read such as `var()`) keeps its
+  light colors on a light card in the dark page (`.om-card`, which brings
+  back the light palette inside it), as Apple Mail does with designed
+  mail.
+
+Plain-text bodies take the shell's colors.
+
+**Quoted text.** Cleaning finds a message's quoted history: Gmail's
+`div.gmail_quote` (or `blockquote.gmail_quote` after `div.gmail_attr`),
+`blockquote[type=cite]` with its attribution (Apple Mail, Thunderbird),
+Outlook's `#appendonsend`, `#divRplyFwdMsg` or
+`#mail-editor-reference-message-container` up to the end of its parent,
+and Yahoo's `div.yahoo_quoted`. It counts only at the end of a message,
+after text of the message's own, and not when the reply is written between
+the quotes or the quote is a forwarded message. Plain text gets the same
+for an "On … wrote:" line (in a few languages, maybe wrapped) followed by
+`>` lines, and for Outlook's "-----Original Message-----". The document
+puts the quote in a `<details class="om-quote">` whose summary is a small
+"•••" pill, as in Gmail, so it opens with JavaScript off and its state is
+kept across reloads like a message's. Its look is `!important`: it sits
+inside the message, so a message's own CSS resets would otherwise reach
+it. A **signature** (Gmail's `div.gmail_signature` with its `-- `, or a
+plain `-- ` line and up to 10 lines) is folded in too when an earlier
+message in the thread ended with the same one; it joins the quote's
+toggle when it sits beside it, and is left shown when the quote is
+elsewhere (Gmail puts the signature inside the reply's `div` and the
+quote after it).
+
 ### Windows (WebView2): not tested
 
 The spike compiles and passes tests on Windows in CI, but it has not been run on
@@ -390,6 +484,9 @@ Windows. Known constraints, from the WebView2 and wry documentation:
   composition does not cover Windows.
 - The navigation handler's allowance for the initial `data:text/html` URL is
   untested on WebView2.
+- 4.3's injected script and IPC are untested on WebView2. Its
+  documentation says `IsScriptEnabled = false` doesn't stop scripts the
+  host injects.
 
 ### Linux (WebKitGTK): not tested
 
@@ -406,6 +503,10 @@ and `libgtk-3-dev`), but it has not been run on Linux.
   `gpui_platform::application()` picks Wayland whenever a compositor is available,
   so on most current desktops the spike shows its "can't be displayed" notice.
 - Runtime packages: `libwebkit2gtk-4.1-0` and GTK 3 (for packaging in 9.x).
+- wry turns JavaScript off with `enable-javascript = false`, which probably
+  stops 4.3's injected script as well (`enable-javascript-markup` would
+  stop only the content's). Reloads then open the default sections at the
+  top; dark mode and quoted text don't need the script.
 
 ### Fallback plan
 
