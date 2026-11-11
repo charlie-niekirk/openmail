@@ -8,6 +8,8 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    // Before any thread starts: `time` reads the local offset only then.
+    openmail_ui::capture_local_offset();
     init_logging();
     gpui_platform::application().run(|cx| {
         openmail_ui::init(cx);
