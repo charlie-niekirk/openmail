@@ -352,6 +352,21 @@ impl MailHandle {
         answer.await.map_err(|_| Error::ServiceStopped)?
     }
 
+    /// The senders whose remote images are always shown, lowercased.
+    pub async fn image_senders(&self) -> Result<Vec<String>> {
+        self.call(|local| Ok(local.store.image_senders()?)).await
+    }
+
+    /// Always shows remote images from `address` from now on.
+    pub async fn allow_images_from(&self, address: String) -> Result<()> {
+        self.call(move |local| {
+            Ok(local
+                .store
+                .allow_images_from(&address, time::OffsetDateTime::now_utc())?)
+        })
+        .await
+    }
+
     /// Applies `op` to the store and queues it for sending (see
     /// [`OpsQueue::enqueue`]). Queries reflect it when this returns, and a
     /// [`MailEvent::ThreadsChanged`] (and, for label ops,
