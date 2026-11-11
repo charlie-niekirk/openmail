@@ -109,7 +109,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
   - Light and dark themes that follow the system, typography, the window frame.
 - [x] **3.2 Onboarding** — `feat/3.2-onboarding`
   - "Sign in with Google" screen and initial-sync progress.
-- [ ] **3.3 Sidebar** ∥ — `feat/3.3-sidebar`
+- [x] **3.3 Sidebar** ∥ — `feat/3.3-sidebar`
   - System labels, nested user-label tree (split on `/`), label colors, unread counts,
     collapse state.
 - [x] **3.4 Thread list** ∥ — `feat/3.4-thread-list`
