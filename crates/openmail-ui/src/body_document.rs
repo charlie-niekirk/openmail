@@ -80,13 +80,24 @@ pub const LOADING_BODY: &str = "Loading message…";
 /// a message can't restyle the shell or take on its styles. `.om-body`
 /// contains its message's painting (`contain: paint`): whatever the message
 /// positions or moves stays inside its box.
+///
+/// Wide mail fits the pane where it can, as in Gmail: images shrink to the
+/// message's width, and never pass the pane's (`100vw` less the shell's 82px
+/// of padding and borders; WebKit doesn't let a percentage alone shrink a
+/// sized image's min-content width), keeping their aspect ratio; long words
+/// and URLs break. What can't shrink (a fixed-width table) widens the thread instead
+/// of overflowing its box (`.om-thread` is at least its content's
+/// min-content width), so the document itself scrolls sideways, from
+/// anywhere in it, rather than a scroller at the bottom of the message.
+/// Message CSS outranks these defaults (its selectors start with an ID).
 const SHELL_CSS: &str = "\
 :root{color-scheme:light}\
 html,body{margin:0;padding:0;background:#ffffff;color:#1f1f23}\
 body{font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;\
 overflow-wrap:break-word}\
 img{max-width:100%}\
-.om-thread{max-width:860px;margin:0 auto;padding:4px 24px 24px;box-sizing:border-box}\
+.om-thread{max-width:860px;min-width:min-content;margin:0 auto;padding:4px 24px 24px;\
+box-sizing:border-box}\
 .om-message{border:1px solid #e4e4e9;border-radius:8px;margin:0 0 12px;overflow:hidden}\
 .om-header{display:block;list-style:none;cursor:pointer;padding:8px 16px}\
 .om-header::-webkit-details-marker{display:none}\
@@ -105,7 +116,9 @@ white-space:nowrap}\
 .om-participants th{font-weight:normal;text-align:left;vertical-align:top;\
 padding:0 8px 0 0;width:36px}\
 .om-participants td{padding:0;color:#1f1f23}\
-.om-body{padding:12px 16px 16px;border-top:1px solid #e4e4e9;overflow-x:auto;contain:paint}\
+.om-body{padding:12px 16px 16px;border-top:1px solid #e4e4e9;contain:paint}\
+.om-mail{overflow-wrap:anywhere}\
+.om-mail img{max-width:min(100%,calc(100vw - 82px));height:auto}\
 .om-text{white-space:pre-wrap}\
 .om-notice{margin:0;color:#6b6b75}";
 
@@ -313,6 +326,21 @@ mod tests {
         assert_eq!(document_csp(&BTreeSet::new()), BODY_CSP);
         let doc = body_document("", &urls);
         assert!(doc.contains("img-src data: http://cdn.example:8080/a%3Bb%2Cc%27d.gif"));
+    }
+
+    #[test]
+    fn wide_mail_fits_or_scrolls_the_document() {
+        let doc = body_document("", &BTreeSet::new());
+        // Images shrink to the message and long words break…
+        assert!(doc.contains(".om-mail{overflow-wrap:anywhere}"));
+        assert!(doc.contains(".om-mail img{max-width:min(100%,calc(100vw - 82px));height:auto}"));
+        // …and what can't shrink widens the thread, so the document scrolls
+        // sideways rather than a scroller inside the message.
+        assert!(doc.contains("min-width:min-content"));
+        assert!(!doc.contains("overflow-x"));
+        assert!(doc.contains(
+            ".om-body{padding:12px 16px 16px;border-top:1px solid #e4e4e9;contain:paint}"
+        ));
     }
 
     #[test]
