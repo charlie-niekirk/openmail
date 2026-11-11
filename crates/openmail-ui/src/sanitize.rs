@@ -14,14 +14,16 @@
 //! - **rewrites `cid:` images** to `data:` URLs from the message's inline
 //!   parts;
 //! - keeps links to `http(s):` and `mailto:` only (opened outside the
-//!   webview) and in-message anchors (renamed with the IDs).
+//!   webview) and in-message anchors (renamed with the IDs), and notes the
+//!   links whose text names another site than they go to
+//!   ([`CleanHtml::misleading_links`]).
 //!
 //! The document's CSP is the backstop: it allows no network loads except
 //! the remote images of messages whose images are shown
 //! ([`CleanHtml::image_urls`]).
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use base64::Engine as _;
@@ -103,6 +105,10 @@ pub struct CleanHtml {
     pub blocked_images: bool,
     /// The remote images kept (they are to be shown), for the CSP.
     pub image_urls: BTreeSet<String>,
+    /// Links whose text reads as a web address on another site than the
+    /// one they go to: the link (as [`link_key`] writes it) and the site
+    /// its text names.
+    pub misleading_links: BTreeMap<String, String>,
 }
 
 /// The `id` of the element wrapping a message's HTML, which its CSS is
@@ -154,21 +160,95 @@ pub fn clean_html(html: &str, options: &CleanOptions<'_>) -> CleanHtml {
 
     let mut images = images.lock().unwrap_or_else(PoisonError::into_inner);
     let scope_selector = format!("#{scope}");
-    let html = rewrite_styles(&cleaned, |stylesheet| {
-        css::scope_stylesheet(
-            stylesheet,
-            css::Scope {
-                selector: &scope_selector,
-                id_prefix: &id_prefix,
-            },
-            &mut |url| images.resolve(url),
-        )
-    });
+    let mut misleading_links = BTreeMap::new();
+    let html = post_process(
+        &cleaned,
+        |stylesheet| {
+            css::scope_stylesheet(
+                stylesheet,
+                css::Scope {
+                    selector: &scope_selector,
+                    id_prefix: &id_prefix,
+                },
+                &mut |url| images.resolve(url),
+            )
+        },
+        |href, text| {
+            if let Some(claimed) = misleading_link(href, text)
+                && let Some(key) = link_key(href)
+            {
+                misleading_links.insert(key, claimed);
+            }
+        },
+    );
     CleanHtml {
         html,
         blocked_images: images.blocked,
         image_urls: std::mem::take(&mut images.urls),
+        misleading_links,
     }
+}
+
+/// How a link is compared with the URL the webview reports when it is
+/// clicked: parsed and written back, so both are normalized the same way.
+/// `None` if it isn't an absolute URL.
+pub fn link_key(url: &str) -> Option<String> {
+    url::Url::parse(url.trim()).ok().map(String::from)
+}
+
+/// The site a link's visible `text` names, if it names one other than the
+/// `http(s):` link `href` goes to (or a subdomain of it).
+fn misleading_link(href: &str, text: &str) -> Option<String> {
+    let target = url::Url::parse(href.trim()).ok()?;
+    if !matches!(target.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = target.host_str()?.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let claimed = claimed_host(text)?;
+    let same = host == claimed || host.ends_with(&format!(".{claimed}"));
+    (!same).then_some(claimed)
+}
+
+/// The host `text` reads as, if it is a web address on its own:
+/// `https://example.com/x`, `www.example.com` or `example.com/x`, without a
+/// leading `www.`. Hosts are compared in their ASCII (punycode) form, so a
+/// look-alike Unicode name doesn't match the site it imitates.
+fn claimed_host(text: &str) -> Option<String> {
+    let text = text
+        .trim()
+        .trim_start_matches(['(', '<', '['])
+        .trim_end_matches(['.', ',', ')', '>', ']']);
+    if text.is_empty() || text.contains(char::is_whitespace) || text.contains('@') {
+        return None;
+    }
+    let host = match text.split_once("://") {
+        Some((scheme, _)) if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") => {
+            return None;
+        }
+        Some(_) => url::Url::parse(text).ok()?.host_str()?.to_owned(),
+        None => {
+            let host = text.split(['/', '?', '#']).next()?;
+            let name = host.split(':').next()?;
+            let labels: Vec<&str> = name.split('.').collect();
+            let tld = labels.last()?;
+            let looks_like_a_domain = labels.len() >= 2
+                && labels.iter().all(|label| {
+                    !label.is_empty() && label.chars().all(|c| c.is_alphanumeric() || c == '-')
+                })
+                && tld.chars().count() >= 2
+                && tld.chars().all(char::is_alphabetic);
+            if !looks_like_a_domain {
+                return None;
+            }
+            url::Url::parse(&format!("http://{name}"))
+                .ok()?
+                .host_str()?
+                .to_owned()
+        }
+    };
+    let host = host.to_ascii_lowercase();
+    Some(host.strip_prefix("www.").unwrap_or(&host).to_owned())
 }
 
 /// What an allowed attribute becomes: `None` drops it.
@@ -313,20 +393,34 @@ fn percent_decode(text: &str) -> String {
 }
 
 /// `html` (`ammonia`'s serialized output) with each `<style>` element's
-/// stylesheet replaced by `rewrite`'s.
+/// stylesheet replaced by `rewrite`'s; `link` hears each link's `href` and
+/// visible text.
 ///
 /// The serializer's output is regular: text escapes `<`, attribute values
-/// are double-quoted, and a `<style>` element's text runs to the first
-/// `</style>`, which the parser made sure can't appear inside it.
-fn rewrite_styles(html: &str, mut rewrite: impl FnMut(&str) -> String) -> String {
+/// are double-quoted (with `"` escaped), a `<style>` element's text runs to
+/// the first `</style>`, which the parser made sure can't appear inside it,
+/// and links don't nest.
+fn post_process(
+    html: &str,
+    mut rewrite: impl FnMut(&str) -> String,
+    mut link: impl FnMut(&str, &str),
+) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
     while let Some(start) = rest.find('<') {
         let end = tag_end(&rest[start..]).map_or(rest.len(), |len| start + len);
-        let is_style = tag_name(&rest[start..end]) == "style";
+        let tag = &rest[start..end];
+        let name = tag_name(tag);
+        if name == "a"
+            && let Some(href) = attribute(tag, "href")
+        {
+            let after = &rest[end..];
+            let close = after.find("</a>").unwrap_or(after.len());
+            link(&href, &text_content(&after[..close]));
+        }
         out.push_str(&rest[..end]);
         rest = &rest[end..];
-        if is_style {
+        if name == "style" {
             let close = rest.find("</style>").unwrap_or(rest.len());
             out.push_str(&rewrite(&rest[..close]));
             rest = &rest[close..];
@@ -334,6 +428,36 @@ fn rewrite_styles(html: &str, mut rewrite: impl FnMut(&str) -> String) -> String
     }
     out.push_str(rest);
     out
+}
+
+/// The value of attribute `name` in serialized `tag`, unescaped.
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let marker = format!(" {name}=\"");
+    let start = tag.find(&marker)? + marker.len();
+    let len = tag[start..].find('"')?;
+    Some(unescape(&tag[start..start + len]))
+}
+
+/// The text of serialized `html`, tags dropped and unescaped.
+fn text_content(html: &str) -> String {
+    let mut text = String::new();
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        text.push_str(&rest[..start]);
+        let end = tag_end(&rest[start..]).map_or(rest.len(), |len| start + len);
+        rest = &rest[end..];
+    }
+    text.push_str(rest);
+    unescape(&text)
+}
+
+/// Undoes the serializer's escapes.
+fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&nbsp;", "\u{a0}")
+        .replace("&amp;", "&")
 }
 
 /// The length of the tag `html` starts with, up to and including its `>`

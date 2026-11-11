@@ -273,3 +273,36 @@ fn inline_parts_of_other_types_are_not_shown() {
     );
     assert_eq!(cleaned.html, "<img>");
 }
+
+#[test]
+fn links_naming_another_site_are_noted() {
+    let cleaned = clean(
+        "<a href=\"https://evil.example/login\">https://www.paypal.com/signin</a>\
+         <a href=\"https://evil.example/x\"><b>paypal</b>.com</a>\
+         <a href=\"https://links.news.example/r?u=1&amp;v=2\">news.example</a>\
+         <a href=\"https://www.example.com/\">example.com</a>\
+         <a href=\"https://example.com/a\">Read more</a>\
+         <a href=\"https://xn--pple-43d.com/\">apple.com</a>\
+         <a href=\"https://evil.example/\">see paypal.com now</a>\
+         <a href=\"mailto:a@evil.example\">help@paypal.com</a>\
+         <a href=\"https://evil.example/y\">(bank.example.co.uk)</a>",
+        false,
+    );
+    assert_eq!(
+        cleaned
+            .misleading_links
+            .iter()
+            .map(|(link, claimed)| (link.as_str(), claimed.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("https://evil.example/login", "paypal.com"),
+            ("https://evil.example/x", "paypal.com"),
+            ("https://evil.example/y", "bank.example.co.uk"),
+            ("https://xn--pple-43d.com/", "apple.com"),
+        ]
+    );
+    assert_eq!(
+        link_key("HTTPS://Evil.Example/login").as_deref(),
+        Some("https://evil.example/login")
+    );
+}

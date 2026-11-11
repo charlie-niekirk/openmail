@@ -8,8 +8,14 @@
 //! Where no webview can be created (a native Wayland window, for example)
 //! they are drawn in GPUI as text instead, collapsed to a line or expanded to
 //! participants and body.
+//!
+//! Above the document, strips offer to show hidden remote images and say
+//! where a clicked link went: links open in the system browser (or mail
+//! app), and one whose text names another site is shown first and opened
+//! only on a second click.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, Hsla, InteractiveElement as _,
@@ -28,7 +34,7 @@ use time::OffsetDateTime;
 use crate::body_document::conversation_document;
 use crate::bridge::{AppEvent, AppModel};
 use crate::conversation::{BodyState, Conversation, LabelChip, MessageItem, ReadingPane};
-use crate::message_body::MessageBodyView;
+use crate::message_body::{LinkClicked, MessageBodyView};
 use crate::placeholder::{banner, loading, placeholder};
 use crate::sidebar::parse_hex_color;
 use crate::state::Session;
@@ -42,6 +48,24 @@ const MAX_WIDTH: gpui::Pixels = px(860.);
 /// The most messages with hidden images listed one by one above the
 /// conversation; past it, one line offers to show them all.
 const MAX_IMAGE_ROWS: usize = 3;
+
+/// How long the strip saying where a link went stays up.
+const LINK_NOTICE: Duration = Duration::from_secs(6);
+
+/// The longest URL a strip shows in full; longer ones are cut at the end.
+const MAX_URL_CHARS: usize = 160;
+
+/// What the reading pane says about a clicked link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LinkNotice {
+    /// It was opened outside the app.
+    Opened(String),
+    /// Its text names `claimed`, another site than the one it goes to: it
+    /// opens only once confirmed.
+    Confirm { url: String, claimed: String },
+    /// Opening it failed.
+    Failed { url: String, error: String },
+}
 
 /// The conversation view. Open a thread with [`ConversationView::open_thread`].
 pub struct ConversationView {
@@ -57,7 +81,11 @@ pub struct ConversationView {
     body: Entity<MessageBodyView>,
     /// The thread whose document the webview was last given.
     shown: Option<ThreadId>,
-    _subscriptions: [Subscription; 2],
+    /// What the pane says about the last link clicked, if anything.
+    link: Option<LinkNotice>,
+    /// Takes the link notice down after a while.
+    link_timeout: Option<Task<()>>,
+    _subscriptions: [Subscription; 3],
 }
 
 impl ConversationView {
@@ -68,15 +96,21 @@ impl ConversationView {
             AppEvent::BodyFetched(id) => this.body_fetched(id, cx),
         });
         let status = cx.observe(&model, |this, _, cx| this.status_changed(cx));
+        let body = cx.new(MessageBodyView::new);
+        let links = cx.subscribe(&body, |this, _, event: &LinkClicked, cx| {
+            this.link_clicked(&event.0, cx);
+        });
         let mut view = Self {
             model,
             pane: ReadingPane::Empty,
             account: None,
             online: true,
             load: None,
-            body: cx.new(MessageBodyView::new),
+            body,
             shown: None,
-            _subscriptions: [events, status],
+            link: None,
+            link_timeout: None,
+            _subscriptions: [events, status, links],
         };
         view.status_changed(cx);
         view
@@ -85,6 +119,7 @@ impl ConversationView {
     /// Opens `id`, replacing the open thread.
     pub fn open_thread(&mut self, id: ThreadId, cx: &mut Context<'_, Self>) {
         if self.pane.open(id) {
+            self.dismiss_link(cx);
             self.reload(cx);
             self.sync_body(cx);
             cx.notify();
@@ -94,6 +129,7 @@ impl ConversationView {
     /// Closes the open thread, if any.
     pub fn close(&mut self, cx: &mut Context<'_, Self>) {
         if self.pane.close() {
+            self.dismiss_link(cx);
             self.load = None;
             self.sync_body(cx);
             cx.notify();
@@ -265,6 +301,99 @@ impl ConversationView {
             self.sync_body(cx);
             cx.notify();
         }
+    }
+
+    /// Opens a link clicked in the document, unless its text names another
+    /// site: then it waits for the user to confirm.
+    fn link_clicked(&mut self, url: &str, cx: &mut Context<'_, Self>) {
+        let claimed = match &self.pane {
+            ReadingPane::Open(conversation) => conversation.misleading_link(url).map(str::to_owned),
+            _ => None,
+        };
+        match claimed {
+            Some(claimed) => {
+                self.link_timeout = None;
+                self.link = Some(LinkNotice::Confirm {
+                    url: url.to_owned(),
+                    claimed,
+                });
+                cx.notify();
+            }
+            None => self.open_link(url.to_owned(), cx),
+        }
+    }
+
+    /// Opens `url` (an `http(s):` or `mailto:` URL) in the system's browser
+    /// or mail app, and says so for a while.
+    fn open_link(&mut self, url: String, cx: &mut Context<'_, Self>) {
+        self.link = Some(match open::that_detached(&url) {
+            Ok(()) => LinkNotice::Opened(url),
+            Err(err) => {
+                tracing::warn!(%err, "could not open a link");
+                LinkNotice::Failed {
+                    url,
+                    error: err.to_string(),
+                }
+            }
+        });
+        self.link_timeout = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LINK_NOTICE).await;
+            this.update(cx, Self::dismiss_link).ok();
+        }));
+        cx.notify();
+    }
+
+    fn dismiss_link(&mut self, cx: &mut Context<'_, Self>) {
+        self.link_timeout = None;
+        if self.link.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The strip saying where the last link clicked went, if any.
+    fn link_bar(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+        let bar = match self.link.as_ref()? {
+            LinkNotice::Opened(url) => {
+                let app = if url.starts_with("mailto:") {
+                    "mail app"
+                } else {
+                    "browser"
+                };
+                banner(format!("Opened in your {app}: {}", shorten(url)), cx)
+            }
+            LinkNotice::Failed { url, error } => {
+                banner(format!("Couldn't open {}: {error}", shorten(url)), cx)
+            }
+            LinkNotice::Confirm { url, claimed } => {
+                let host = url::Url::parse(url)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_owned))
+                    .unwrap_or_default();
+                let text = format!(
+                    "This link says \u{201c}{claimed}\u{201d} but goes to {host}: {}",
+                    shorten(url)
+                );
+                let open_url = url.clone();
+                banner(text, cx)
+                    .child(
+                        Button::new("open-link")
+                            .outline()
+                            .small()
+                            .label("Open link")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_link(open_url.clone(), cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("cancel-link")
+                            .ghost()
+                            .small()
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| this.dismiss_link(cx))),
+                    )
+            }
+        };
+        Some(bar.into_any_element())
     }
 
     /// Shows the remote images of message `id`.
@@ -464,6 +593,7 @@ impl ConversationView {
             v_flex()
                 .flex_1()
                 .min_h_0()
+                .children(self.link_bar(cx))
                 .children(self.images_bar(conversation, cx))
                 .child(div().flex_1().min_h_0().child(self.body.clone()))
                 .into_any_element()
@@ -594,6 +724,16 @@ impl ConversationView {
     }
 }
 
+/// `url` cut to [`MAX_URL_CHARS`], keeping its start (scheme and host).
+fn shorten(url: &str) -> String {
+    if url.chars().count() <= MAX_URL_CHARS {
+        url.to_owned()
+    } else {
+        let cut: String = url.chars().take(MAX_URL_CHARS).collect();
+        format!("{cut}\u{2026}")
+    }
+}
+
 /// Bold for unread messages, as Gmail shows them.
 trait UnreadExt: gpui::Styled + Sized {
     fn when_unread(self, unread: bool) -> Self {
@@ -693,6 +833,16 @@ impl Render for ConversationView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_urls_keep_their_start() {
+        assert_eq!(shorten("https://example.com/"), "https://example.com/");
+        let long = format!("https://example.com/{}", "a".repeat(300));
+        let short = shorten(&long);
+        assert!(short.starts_with("https://example.com/aaa"));
+        assert!(short.ends_with('\u{2026}'));
+        assert_eq!(short.chars().count(), MAX_URL_CHARS + 1);
+    }
 
     #[test]
     fn label_colors_parse_from_gmail_hex() {

@@ -22,6 +22,7 @@ openmail-core = { path = "../openmail-core" }
 openmail-mime = { path = "../openmail-mime" }
 openmail-store = { path = "../openmail-store" }
 openmail-sync = { path = "../openmail-sync" }
+open.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true

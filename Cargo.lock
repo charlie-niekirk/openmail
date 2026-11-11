@@ -5816,6 +5816,7 @@ dependencies = [
  "gpui-webview",
  "insta",
  "lb-wry",
+ "open",
  "openmail-core",
  "openmail-gmail",
  "openmail-mime",

@@ -39,14 +39,14 @@ pub use conversation::{
 };
 pub use conversation_view::ConversationView;
 pub use main_window::{Content, MainWindow, main_window_options};
-pub use message_body::{MessageBodyView, allows_navigation};
+pub use message_body::{LinkClicked, MessageBodyView, allows_navigation, link_target};
 pub use onboarding::{Notice, Setup, SignIn, SignInError, inbox_ready};
 pub use pane_sizes::{
     CONVERSATION_MIN_WIDTH, Divider, LAYOUT_FILE, PaneSizes, SIDEBAR_WIDTH, THREAD_LIST_WIDTH,
     WidthRange, layout_path,
 };
 pub use panes::{PaneCommand, on_sidebar, on_thread_list, thread_view};
-pub use sanitize::{CleanHtml, CleanOptions, clean_html, scope_id};
+pub use sanitize::{CleanHtml, CleanOptions, clean_html, link_key, scope_id};
 pub use sidebar::{
     Counts, Group, LabelsState, Mailbox, MailboxRow, Row, SNOOZED, Sidebar, parse_hex_color,
 };

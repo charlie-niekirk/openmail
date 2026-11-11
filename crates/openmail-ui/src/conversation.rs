@@ -13,7 +13,7 @@ use openmail_core::{Address, Label, LabelId, MessageId, SystemLabel, ThreadId};
 use openmail_store::{MessageBody, ThreadDetail};
 use time::OffsetDateTime;
 
-use crate::sanitize::{CleanHtml, CleanOptions, clean_html};
+use crate::sanitize::{CleanHtml, CleanOptions, clean_html, link_key};
 pub use crate::thread_list::LabelChip;
 
 /// What a thread with no subject is called.
@@ -338,6 +338,21 @@ impl Conversation {
             }
         }
         changed
+    }
+
+    /// The site the text of a link to `url` in this conversation names, if
+    /// it names another site than `url` is on (see
+    /// [`CleanHtml::misleading_links`]).
+    pub fn misleading_link(&self, url: &str) -> Option<&str> {
+        let key = link_key(url)?;
+        self.messages
+            .iter()
+            .find_map(|message| match &message.body {
+                BodyState::Loaded(LoadedBody {
+                    html: Some(html), ..
+                }) => html.misleading_links.get(&key).map(String::as_str),
+                _ => None,
+            })
     }
 
     /// The messages whose remote images are hidden, oldest first.
@@ -1056,5 +1071,21 @@ mod tests {
             .collect();
         assert_eq!(hidden, ["m1"]);
         assert!(html(&conversation.messages[1]).html.contains("t.example"));
+    }
+
+    #[test]
+    fn misleading_links_are_found_by_their_url() {
+        let mut conversation = Conversation::new(detail(ids(1)), &[], ME);
+        let id = MessageId::new("m1");
+        conversation.take_bodies_to_load();
+        let html = "<a href=\"https://evil.example/login\">paypal.com</a>\
+                    <a href=\"https://example.com/\">Read more</a>";
+        conversation.body_loaded(&id, Some(&body(None, Some(html))));
+        assert_eq!(
+            conversation.misleading_link("https://EVIL.example/login"),
+            Some("paypal.com")
+        );
+        assert_eq!(conversation.misleading_link("https://example.com/"), None);
+        assert_eq!(conversation.misleading_link("not a url"), None);
     }
 }
