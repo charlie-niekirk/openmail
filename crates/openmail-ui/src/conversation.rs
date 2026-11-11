@@ -1,6 +1,6 @@
 //! The conversation view-model: an open thread's header and its messages,
-//! collapsed or expanded the way Gmail shows them, with each expanded
-//! message's body loaded lazily.
+//! collapsed or expanded the way Gmail shows them, with every message's body
+//! loaded when the thread opens.
 //!
 //! [`ReadingPane`] is what the pane shows: nothing, a thread loading or
 //! failing to, or the open [`Conversation`]. Neither has GPUI types;
@@ -12,6 +12,7 @@ use openmail_core::{Address, Label, LabelId, MessageId, SystemLabel, ThreadId};
 use openmail_store::{MessageBody, ThreadDetail};
 use time::OffsetDateTime;
 
+use crate::body_document::clean_html;
 pub use crate::thread_list::LabelChip;
 
 /// What a thread with no subject is called.
@@ -149,8 +150,8 @@ pub enum BodyState {
     NotLoaded,
     /// Requested from the mail service.
     Loading,
-    /// The text to show.
-    Loaded(String),
+    /// The body, ready to show.
+    Loaded(LoadedBody),
     /// The message is gone, or its body could not be read or fetched.
     Unavailable(String),
 }
@@ -162,6 +163,17 @@ impl Conversation {
     /// Unread messages and the latest one start expanded; the rest are
     /// collapsed to a line.
     pub fn new(detail: ThreadDetail, labels: &[Label], me: Option<&str>) -> Self {
+        Self::build(detail, labels, me, HashMap::new())
+    }
+
+    /// [`Conversation::new`], carrying over from `previous` what the user
+    /// expanded or collapsed and the bodies already loaded or being loaded.
+    fn build(
+        detail: ThreadDetail,
+        labels: &[Label],
+        me: Option<&str>,
+        mut previous: HashMap<MessageId, MessageItem>,
+    ) -> Self {
         let last = detail.messages.len().saturating_sub(1);
         let subject = detail
             .thread
@@ -183,6 +195,15 @@ impl Conversation {
                 let message = detail.message;
                 let headers = &message.headers;
                 let unread = message.is_unread();
+                let before = previous.remove(&message.id);
+                // A body loaded before is kept rather than cleaned again.
+                let body = match before.as_ref().map(|before| &before.body) {
+                    Some(body @ BodyState::Loaded(_)) => body.clone(),
+                    before_body => detail.body.as_ref().map_or_else(
+                        || before_body.cloned().unwrap_or(BodyState::NotLoaded),
+                        |body| BodyState::Loaded(LoadedBody::new(body)),
+                    ),
+                };
                 MessageItem {
                     sender: headers.from.first().map_or_else(
                         || "(unknown sender)".to_owned(),
@@ -197,10 +218,8 @@ impl Conversation {
                         .trim()
                         .to_owned(),
                     unread,
-                    expanded: unread || index == last,
-                    body: detail.body.as_ref().map_or(BodyState::NotLoaded, |body| {
-                        BodyState::Loaded(body_text(body))
-                    }),
+                    expanded: before.map_or(unread || index == last, |before| before.expanded),
+                    body,
                     id: message.id,
                 }
             })
@@ -217,22 +236,12 @@ impl Conversation {
     /// keeping what the user expanded or collapsed and the bodies already
     /// loaded or being loaded. Messages new to the thread get the defaults.
     pub fn refresh(&mut self, detail: ThreadDetail, labels: &[Label], me: Option<&str>) {
-        let mut fresh = Self::new(detail, labels, me);
-        let mut old: HashMap<MessageId, MessageItem> = self
+        let previous = self
             .messages
             .drain(..)
             .map(|message| (message.id.clone(), message))
             .collect();
-        for message in &mut fresh.messages {
-            let Some(previous) = old.remove(&message.id) else {
-                continue;
-            };
-            message.expanded = previous.expanded;
-            if message.body == BodyState::NotLoaded {
-                message.body = previous.body;
-            }
-        }
-        *self = fresh;
+        *self = Self::build(detail, labels, me, previous);
     }
 
     /// Expands a collapsed message or collapses an expanded one. Returns
@@ -245,12 +254,16 @@ impl Conversation {
         message.expanded
     }
 
-    /// The expanded messages whose bodies have not been requested, now
-    /// marked as loading. The caller requests each of them.
+    /// The messages whose bodies have not been requested, now marked as
+    /// loading. The caller requests each of them (the mail service fetches
+    /// requests that arrive together in one batch).
+    ///
+    /// Every message's body loads, collapsed or not: the webview opens and
+    /// closes messages itself (`<details>`), out of the view-model's sight.
     pub fn take_bodies_to_load(&mut self) -> Vec<MessageId> {
         self.messages
             .iter_mut()
-            .filter(|message| message.expanded && message.body == BodyState::NotLoaded)
+            .filter(|message| message.body == BodyState::NotLoaded)
             .map(|message| {
                 message.body = BodyState::Loading;
                 message.id.clone()
@@ -264,7 +277,7 @@ impl Conversation {
         if let Some(message) = self.message_mut(id) {
             message.body = body.map_or_else(
                 || BodyState::Unavailable("This message is no longer available.".to_owned()),
-                |body| BodyState::Loaded(body_text(body)),
+                |body| BodyState::Loaded(LoadedBody::new(body)),
             );
         }
     }
@@ -284,12 +297,23 @@ impl Conversation {
         }
     }
 
-    /// Asks again for the expanded messages' bodies that were unavailable,
-    /// as after reconnecting. Returns whether any need loading.
+    /// Whether every body has loaded or failed to, so the conversation can
+    /// be shown whole.
+    pub fn bodies_settled(&self) -> bool {
+        self.messages.iter().all(|message| {
+            matches!(
+                message.body,
+                BodyState::Loaded(_) | BodyState::Unavailable(_)
+            )
+        })
+    }
+
+    /// Asks again for the bodies that were unavailable, as after
+    /// reconnecting. Returns whether any need loading.
     pub fn retry_unavailable(&mut self) -> bool {
         let mut any = false;
         for message in &mut self.messages {
-            if message.expanded && matches!(message.body, BodyState::Unavailable(_)) {
+            if matches!(message.body, BodyState::Unavailable(_)) {
                 message.body = BodyState::NotLoaded;
                 any = true;
             }
@@ -297,14 +321,12 @@ impl Conversation {
         any
     }
 
-    /// Handles a body the mail service fetched and stored: an expanded
-    /// message that has no body yet (its request failed earlier) asks again.
-    /// Returns whether a body needs loading.
+    /// Handles a body the mail service fetched and stored: a message that
+    /// has no body yet (its request failed earlier) asks again. Returns
+    /// whether a body needs loading.
     pub fn body_fetched(&mut self, id: &MessageId) -> bool {
         match self.message_mut(id) {
-            Some(message)
-                if message.expanded && matches!(message.body, BodyState::Unavailable(_)) =>
-            {
+            Some(message) if matches!(message.body, BodyState::Unavailable(_)) => {
                 message.body = BodyState::NotLoaded;
                 true
             }
@@ -317,8 +339,32 @@ impl Conversation {
     }
 }
 
+/// A body as the reading pane shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedBody {
+    /// Its text ([`body_text`]), shown when it has no HTML or when the HTML
+    /// view is unavailable.
+    pub text: String,
+    /// Its HTML part, sanitized ([`clean_html`]), if it has one with content.
+    pub html: Option<String>,
+}
+
+impl LoadedBody {
+    pub fn new(body: &MessageBody) -> Self {
+        Self {
+            text: body_text(body),
+            html: body
+                .html
+                .as_deref()
+                .filter(|html| !html.trim().is_empty())
+                .map(clean_html)
+                .filter(|html| !html.trim().is_empty()),
+        }
+    }
+}
+
 /// The text to show for a body: its plain text, or text converted from its
-/// HTML when the plain text is missing or blank (the HTML view is Phase 4).
+/// HTML when the plain text is missing or blank.
 pub fn body_text(body: &MessageBody) -> String {
     let text = body
         .text
@@ -511,6 +557,13 @@ mod tests {
         }
     }
 
+    fn loaded_text(message: &MessageItem) -> Option<&str> {
+        match &message.body {
+            BodyState::Loaded(body) => Some(&body.text),
+            _ => None,
+        }
+    }
+
     fn label(id: &str, name: &str, label_type: LabelType) -> Label {
         Label {
             id: LabelId::new(id),
@@ -554,14 +607,29 @@ mod tests {
     }
 
     #[test]
-    fn only_expanded_messages_load_bodies_once() {
+    fn every_body_loads_once() {
         let mut conversation = Conversation::new(detail(ids(3)), &[], ME);
-        assert_eq!(conversation.take_bodies_to_load(), [MessageId::new("m3")]);
-        assert_eq!(conversation.messages[2].body, BodyState::Loading);
+        assert_eq!(
+            conversation.take_bodies_to_load(),
+            ["m1", "m2", "m3"].map(MessageId::new)
+        );
+        assert_eq!(conversation.messages[0].body, BodyState::Loading);
         assert!(conversation.take_bodies_to_load().is_empty());
 
         conversation.toggle(&MessageId::new("m1"));
-        assert_eq!(conversation.take_bodies_to_load(), [MessageId::new("m1")]);
+        assert!(conversation.take_bodies_to_load().is_empty());
+    }
+
+    #[test]
+    fn bodies_settle_once_each_has_loaded_or_failed() {
+        let mut conversation = Conversation::new(detail(ids(2)), &[], ME);
+        assert!(!conversation.bodies_settled());
+        conversation.take_bodies_to_load();
+        assert!(!conversation.bodies_settled());
+        conversation.body_loaded(&MessageId::new("m1"), Some(&body(Some("Hi"), None)));
+        assert!(!conversation.bodies_settled());
+        conversation.body_offline(&MessageId::new("m2"));
+        assert!(conversation.bodies_settled());
     }
 
     #[test]
@@ -569,10 +637,7 @@ mod tests {
         let mut messages = ids(1);
         messages[0].body = Some(body(Some("Hello\n"), None));
         let mut conversation = Conversation::new(detail(messages), &[], ME);
-        assert_eq!(
-            conversation.messages[0].body,
-            BodyState::Loaded("Hello".to_owned())
-        );
+        assert_eq!(loaded_text(&conversation.messages[0]), Some("Hello"));
         assert!(conversation.take_bodies_to_load().is_empty());
     }
 
@@ -581,10 +646,7 @@ mod tests {
         let mut conversation = Conversation::new(detail(ids(2)), &[], ME);
         conversation.take_bodies_to_load();
         conversation.body_loaded(&MessageId::new("m2"), Some(&body(Some("Hi"), None)));
-        assert_eq!(
-            conversation.messages[1].body,
-            BodyState::Loaded("Hi".to_owned())
-        );
+        assert_eq!(loaded_text(&conversation.messages[1]), Some("Hi"));
         conversation.body_loaded(&MessageId::new("m2"), None);
         assert!(matches!(
             conversation.messages[1].body,
@@ -603,7 +665,7 @@ mod tests {
         };
         assert!(reason.contains("offline"));
 
-        // A collapsed message, or one already loading, doesn't ask again.
+        // A message whose body is loading doesn't ask again.
         assert!(!conversation.body_fetched(&MessageId::new("m1")));
         assert!(conversation.body_fetched(&latest));
         assert_eq!(conversation.take_bodies_to_load(), [latest]);
@@ -619,11 +681,23 @@ mod tests {
 
         conversation.refresh(detail(ids(3)), &[], ME);
         assert_eq!(expanded(&conversation), [true, false, true]);
-        assert_eq!(
-            conversation.messages[0].body,
-            BodyState::Loaded("One".to_owned())
-        );
+        assert_eq!(loaded_text(&conversation.messages[0]), Some("One"));
         assert_eq!(conversation.messages[2].body, BodyState::NotLoaded);
+    }
+
+    #[test]
+    fn refresh_keeps_loaded_bodies_and_takes_newly_stored_ones() {
+        let mut conversation = Conversation::new(detail(ids(2)), &[], ME);
+        conversation.take_bodies_to_load();
+        conversation.body_loaded(&MessageId::new("m1"), Some(&body(Some("One"), None)));
+        conversation.body_offline(&MessageId::new("m2"));
+
+        let mut messages = ids(2);
+        messages[0].body = Some(body(Some("Stored"), None));
+        messages[1].body = Some(body(Some("Two"), None));
+        conversation.refresh(detail(messages), &[], ME);
+        assert_eq!(loaded_text(&conversation.messages[0]), Some("One"));
+        assert_eq!(loaded_text(&conversation.messages[1]), Some("Two"));
     }
 
     #[test]
@@ -697,6 +771,25 @@ mod tests {
         );
         assert_eq!(body_text(&body(None, Some("<b>Bold</b>"))), "Bold");
         assert_eq!(body_text(&body(None, None)), EMPTY_BODY);
+    }
+
+    #[test]
+    fn html_parts_are_cleaned_and_blank_ones_dropped() {
+        let loaded = LoadedBody::new(&body(
+            Some("Hi"),
+            Some("<p onclick=\"x()\">Hi</p><script>x()</script>"),
+        ));
+        assert_eq!(loaded.text, "Hi");
+        assert_eq!(loaded.html.as_deref(), Some("<p>Hi</p>"));
+
+        assert_eq!(LoadedBody::new(&body(Some("Hi"), Some(" \n"))).html, None);
+        assert_eq!(
+            LoadedBody::new(&body(Some("Hi"), Some("<script>x()</script>"))).html,
+            None
+        );
+        let text_only = LoadedBody::new(&body(None, Some("<b>Bold</b>")));
+        assert_eq!(text_only.text, "Bold");
+        assert_eq!(text_only.html.as_deref(), Some("<b>Bold</b>"));
     }
 
     #[test]
@@ -797,16 +890,14 @@ mod tests {
     fn offline_bodies_retry_on_reconnect() {
         let mut conversation = Conversation::new(detail(ids(2)), &[], ME);
         let latest = MessageId::new("m2");
-        assert_eq!(
-            conversation.take_bodies_to_load(),
-            std::slice::from_ref(&latest)
-        );
+        assert_eq!(conversation.take_bodies_to_load().len(), 2);
+        conversation.body_loaded(&MessageId::new("m1"), Some(&body(Some("Hi"), None)));
         conversation.body_offline(&latest);
         assert_eq!(
             conversation.messages[1].body,
             BodyState::Unavailable(OFFLINE_BODY.to_owned())
         );
-        // The collapsed message never asked, so it isn't retried.
+        // Only the body that couldn't be fetched is asked for again.
         assert!(conversation.retry_unavailable());
         assert_eq!(conversation.take_bodies_to_load(), [latest]);
         assert!(!conversation.retry_unavailable(), "nothing left to retry");

@@ -125,7 +125,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## Phase 4 — Message rendering
 
-- [ ] **4.1 Webview component** — `feat/4.1-webview`
+- [x] **4.1 Webview component** — `feat/4.1-webview`
   - Production version of the 0.5 spike: lifecycle, resizing, scroll integration with
     the conversation, focus handling.
 - [ ] **4.2 Sanitization and privacy** — `feat/4.2-sanitize-privacy`

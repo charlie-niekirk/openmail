@@ -132,9 +132,10 @@ one-shot loopback redirect server on `127.0.0.1:<random port>` that validates
 
 ## Webview embedding
 
-Findings from spike 0.5. The code is `MessageBodyView` in
-`crates/openmail-ui/src/message_body.rs`; PR 4.1 turns it into the production
-component.
+Findings from spike 0.5, then how PR 4.1 built the production component on
+them ([The conversation document](#the-conversation-document)). The code is
+`MessageBodyView` in `crates/openmail-ui/src/message_body.rs` and the document
+builder in `crates/openmail-ui/src/body_document.rs`.
 
 ### Approach
 
@@ -158,8 +159,9 @@ workspace depends on it as `wry` at the same exact version.
   WebKitGTK), incognito storage, no devtools, autoplay, clipboard access, zoom
   hotkeys or swipe navigation, new windows denied, and a navigation handler that
   allows only the initial document (`about:blank` on WebKit, a `data:text/html`
-  URL on WebView2). The HTML is a sanitized fragment wrapped in a trusted shell
-  with a CSP of `default-src 'none'; img-src data:; style-src 'unsafe-inline'; …`.
+  URL on WebView2; since 4.1, only while the view is loading one). The HTML is a
+  sanitized fragment wrapped in a trusted shell with a CSP of
+  `default-src 'none'; img-src data:; style-src 'unsafe-inline'; …`.
 - If the webview cannot be created (a native Wayland window), the view shows a
   notice instead of failing.
 
@@ -177,9 +179,9 @@ with synthetic input:
   the system overlay scrollbar. Arrow keys and Page Down scroll once it has focus.
 - **Focus.** On launch GPUI's view is first responder and keys do not reach the
   page. Clicking the page makes WKWebView first responder; clicking GPUI content
-  hands focus back, and keys then no longer scroll the page. One quirk: after a
-  (blocked) link click, Space did not scroll the page, though arrows and Page Down
-  did. 4.1 should check keyboard handling properly.
+  hands focus back, and keys then no longer scroll the page. The spike saw Space
+  stop scrolling after a (blocked) link click; with 4.1's document Space, Page
+  Down and the arrows all scroll after a link click.
 - **Privacy.** Link clicks reach the navigation handler and are cancelled; nothing
   navigates away. JavaScript is off and the CSP blocks every network load.
 - **Occlusion.** WebKit does not paint while the window is fully covered by other
@@ -206,6 +208,66 @@ its messages in one document**, rather than one webview per message inside a GPU
 scroll list. Keep overlays (label picker, menus, toasts) out of the body rect, or
 hide the webview while an overlay that overlaps it is open.
 
+### The conversation document
+
+PR 4.1 renders an open conversation as **one document in one webview**, as the
+constraints above require.
+
+- **GPUI keeps the subject header** (subject, label chips, message count); the
+  webview fills the rest of the reading pane and scrolls natively.
+- **Each message is a `<details>` section** in a trusted shell
+  (`conversation_document`): the `<summary>` is its header (sender, then the
+  recipients when open or the snippet when closed, and the date), followed by
+  the From/To/Cc/date lines and the body. Opening and closing messages is the
+  engine's own `<details>` behaviour, so it works with JavaScript off. Unread
+  messages and the latest start open, as in 3.5. Shell classes start with
+  `om-`; message HTML loses `class` and `id`, so neither side styles the other.
+- **Every body loads when the thread opens**, not when a message is first
+  expanded: toggles happen inside the webview, out of GPUI's sight. The mail
+  service fetches requests that arrive together in one batch, and the document
+  is shown once every body has loaded or failed (a spinner until then).
+- **Message HTML goes through an interim `ammonia` allowlist** (`clean_html`):
+  `ammonia`'s defaults plus inline `style`, presentational attributes
+  (`align`, `bgcolor`, `width`, `cellpadding`, …), `<center>`/`<font>` and
+  `data:` images. Re-serializing balances the fragment's tags, so it can't close
+  its section and spill into the shell. Plain-text bodies are escaped into a
+  `white-space: pre-wrap` block.
+- **Lifecycle.** One webview per window, created on the first frame that has a
+  document (`MessageBodyView::prepare`) and reused: a new thread is loaded into
+  it with `load_html`, and an unchanged document isn't reloaded (so sync
+  refreshes don't reset it). While the next thread's document is prepared the
+  previous one stays up for up to 200 ms (`hold`), so switching threads
+  doesn't flash; past that it is hidden. A hidden (or new) webview stays hidden
+  until its new page reports finished loading (or 400 ms pass), so it never
+  shows the previous page or a blank one first. An empty, missing or failed
+  pane hides it at once, and a change of account (or signing out) drops it
+  (`tear_down`); dropping hides the native view and returns focus to GPUI.
+- **Resizing** needs nothing more than the spike: the element pushes its rect
+  every frame, so the dividers and window resizes keep it aligned.
+- **Overlays.** The webview hides while a `gpui-component` dialog or sheet is
+  open. Later popovers, menus and toasts (5.x) must stay out of the reading
+  pane's body rect or hide the webview the same way.
+- **Focus.** Clicking the page gives it the keyboard (arrows, Space, Page Down
+  scroll it); clicking GPUI content hands it back. A focused `<summary>`
+  toggles on Space or Return, as in any browser.
+- **No webview** (native Wayland, a build error): the reading pane draws the
+  messages in GPUI as text, as 3.5 did, under a note saying why.
+
+Left for later, without blocking it:
+
+- **4.2** replaces `clean_html`'s allowlist. Email `<style>` elements are
+  dropped for now; keeping them needs scoping to the message (selector
+  prefixing, or a declarative shadow root per message). Remote images, `cid:`
+  rewriting and opening links slot into `clean_html` and the navigation
+  handler.
+- **4.3.** One document grows with its content, so per-message auto-height is
+  not needed. A trusted injected script could keep open sections and the
+  scroll position across reloads (today a reload, as when a new message
+  arrives, resets both), collapse quoted text, and adapt the shell to dark mode
+  (its colours are in one CSS block, `SHELL_CSS`).
+- **Large threads on Windows**: `NavigateToString` caps a document at 2 MB, so a
+  long thread of newsletters needs a custom protocol to serve it.
+
 ### Windows (WebView2): not tested
 
 The spike compiles and passes tests on Windows in CI, but it has not been run on
@@ -215,8 +277,8 @@ Windows. Known constraints, from the WebView2 and wry documentation:
   installer (PR 9.x) should bundle the Evergreen bootstrapper.
 - WebView2 needs a writable **user data folder**, even with incognito (InPrivate).
   By default it is created next to the executable, which fails under
-  `Program Files`. 4.1 should point it at the app's data directory through a wry
-  `WebContext` data directory.
+  `Program Files`. Since 4.1 it is `webview/` in the app's data directory,
+  through a wry `WebContext`.
 - `with_html` uses `NavigateToString`, which is limited to **2 MB** of HTML. Large
   messages need a custom protocol (`with_custom_protocol`) that serves the body.
 - The webview is a child HWND, so the overlay limits above apply, and `gpui-fast`
@@ -246,11 +308,12 @@ and `libgtk-3-dev`), but it has not been run on Linux.
    `gpui_platform::linux(WindowingModes::X11)`, which runs under XWayland on
    Wayland desktops, and offer an opt-out for users who prefer native Wayland. The
    cost is XWayland's weaker fractional scaling. This is a one-line change in
-   `apps/openmail`, left to 4.1 so it can be tested on real hardware.
+   `apps/openmail`, still to be made and tested on real hardware.
 2. **No child webview at all** (native Wayland opt-out, missing WebView2 Runtime,
    or a build failure): render text-first. Show the `text/plain` part, or text
    converted from the sanitized HTML, natively in GPUI, with an "Open in browser"
-   action. `MessageBodyView` already has the failure branch where this goes.
+   action. Since 4.1 the reading pane does this (text, without the action yet)
+   whenever the webview can't be created.
 3. **If `gpui-webview` or `lb-wry` stalls** (the fork currently trails upstream wry
    0.57): replace it with a small element of our own over upstream `wry` using the
    same pattern (`build_as_child`, then `set_bounds` in `prepaint`).
@@ -485,10 +548,11 @@ message count, and the messages oldest first, the way Gmail does:
 - Unread messages and the latest one start expanded; the rest collapse to
   sender, snippet and date. Clicking a message toggles it.
 - An expanded message shows the sender, a short "to me, Bob" line, the full
-  From, To, Cc and date, and its body. Bodies load lazily through
-  `MailHandle::body` when a message is first expanded, with a loading state.
-  Until the HTML view (Phase 4), the body is its plain text, or text
-  converted from the HTML when there is none (`openmail_mime::html_to_text`).
+  From, To, Cc and date, and its body. Since 4.1 the messages are one HTML
+  document in a webview ([The conversation document](#the-conversation-document)),
+  so every body loads through `MailHandle::body` when the thread opens. Without
+  a webview they are drawn in GPUI as text: the plain text, or text converted
+  from the HTML when there is none (`openmail_mime::html_to_text`).
 - `ThreadsChanged` and `LabelsChanged` re-query the open thread, keeping what
   the user expanded and the bodies already loaded; new messages get the
   defaults. `BodyFetched` retries a body whose fetch had failed.
