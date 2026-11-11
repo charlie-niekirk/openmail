@@ -384,6 +384,55 @@ another writes):
   joins the thread; unsent ops stay queued. Calls on a handle then fail with
   `Error::ServiceStopped`, and the event stream ends.
 
+### UI state and the bridge
+
+`openmail-ui` keeps what the window shows about the account in `AppState`, a
+plain view-model with no GPUI types: the session (`Starting`, `SignedOut`,
+`Ready`, `Failed`), the sync state, connectivity, and whether sending stopped.
+`AppState::apply_all` takes a batch of `MailEvent`s and returns a `Changed`
+(status, threads, labels, bodies fetched), and `status_text` gives the title
+bar's line. Tests drive it with events directly.
+
+`AppModel` is the GPUI entity around it, registered as a global
+(`AppModel::global(cx)`):
+
+- **Start-up.** `AppModel::init(cx, connect)` runs the app's `connect` on GPUI's
+  background executor, since opening the store and reading the keychain block.
+  It returns a `Connection`: `Started` (a `MailService`, its `MailEvents` and the
+  account), `SignedOut` (why there is no account) or `Failed`.
+- **Events.** A task started with `cx.spawn` awaits `MailEvents::recv` on GPUI's
+  executor. For each event it also takes every event already waiting, applies
+  the batch to `AppState`, then notifies observers if the status changed and
+  emits `AppEvent::ThreadsChanged`, `LabelsChanged` or `BodyFetched(id)`. A
+  busy initial sync therefore costs one re-render and one re-query per batch.
+- **Queries.** Views subscribe to the `AppEvent`s they care about and query
+  through `AppModel::mail()`, a cloned `MailHandle` awaited in a view's own
+  `cx.spawn` task. Nothing on the main thread waits for the store or Gmail.
+- **Shutdown.** On quit, `AppModel` shuts the service down on the background
+  executor; unsent ops stay queued.
+
+Until onboarding (PR 3.2), `apps/openmail` opens the account the dev CLI
+signed in and synced: `OPENMAIL_ACCOUNT`, or else the only account with a
+database in the data directory. With none, or without a client ID or a
+refresh token, the window shows a signed-out notice instead of the panes.
+
+### Theme, typography and window frame
+
+The light and dark themes are a `gpui-component` theme set embedded from
+`crates/openmail-ui/themes/openmail.json`; colors it does not name fall back to
+`gpui-component`'s defaults. `theme::init` installs them and picks the one
+matching the system appearance, and each window keeps following it with
+`follow_system_appearance` (an `observe_window_appearance` subscription).
+
+Text uses the system UI font. Views pick a `TextRole` (`Title`, `Heading`,
+`Body`, `Secondary`, `Caption`) through `TypographyExt::text_role` rather than raw
+sizes; `Body` is the themes' 14 px base size.
+
+The main window has a transparent title bar with the macOS traffic lights
+(`gpui-component`'s `TitleBar`), showing the account and the sync status. Below
+it are the three panes, which are placeholders until PRs 3.3–3.5, or a notice
+when there is no mailbox.
+
 ## Sync model
 
 1. **Initial sync.** Fetch labels, then thread metadata: Inbox first, then everything
