@@ -112,7 +112,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 - [ ] **3.3 Sidebar** ∥ — `feat/3.3-sidebar`
   - System labels, nested user-label tree (split on `/`), label colors, unread counts,
     collapse state.
-- [ ] **3.4 Thread list** ∥ — `feat/3.4-thread-list`
+- [x] **3.4 Thread list** ∥ — `feat/3.4-thread-list`
   - Virtualized `uniform_list` with infinite scroll.
   - Rows: senders, subject, snippet, date, label chips, star and importance markers,
     unread styling, attachment icon.
