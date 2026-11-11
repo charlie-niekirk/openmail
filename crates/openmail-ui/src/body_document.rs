@@ -256,6 +256,7 @@ mod tests {
         MessageItem {
             id: MessageId::new(id),
             sender: "Ada <Lovelace>".to_owned(),
+            sender_address: Some("ada@example.com".to_owned()),
             from: "Ada <ada@example.com>".to_owned(),
             to: "me@example.com".to_owned(),
             cc: String::new(),
@@ -264,6 +265,7 @@ mod tests {
             snippet: "Tea & cake?".to_owned(),
             unread: false,
             expanded,
+            show_images: false,
             body,
         }
     }
@@ -335,6 +337,7 @@ mod tests {
             BodyState::Loaded(LoadedBody {
                 text: text.to_owned(),
                 html: html.map(clean),
+                source: None,
             })
         };
         let doc = conversation_document(
@@ -380,6 +383,7 @@ mod tests {
             BodyState::Loaded(LoadedBody {
                 text: "</div></details><h1>Fake header</h1>".to_owned(),
                 html: None,
+                source: None,
             }),
         );
         message.sender = "<img src=x>".to_owned();

@@ -9,12 +9,14 @@
 //! they are drawn in GPUI as text instead, collapsed to a line or expanded to
 //! participants and body.
 
+use std::collections::BTreeSet;
+
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
     Styled as _, Subscription, Task, Window, div, px, rgb,
 };
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::spinner::Spinner;
 use gpui_component::tag::Tag;
@@ -36,6 +38,10 @@ use crate::typography::{TextRole, TypographyExt as _};
 
 /// Widest a conversation's text runs, for readable lines on wide windows.
 const MAX_WIDTH: gpui::Pixels = px(860.);
+
+/// The most messages with hidden images listed one by one above the
+/// conversation; past it, one line offers to show them all.
+const MAX_IMAGE_ROWS: usize = 3;
 
 /// The conversation view. Open a thread with [`ConversationView::open_thread`].
 pub struct ConversationView {
@@ -158,8 +164,16 @@ impl ConversationView {
         self.load = Some(cx.spawn(async move |this, cx| {
             let detail = mail.thread(id.clone()).await;
             let labels = mail.labels().await.unwrap_or_default();
-            this.update(cx, |this, cx| this.loaded(&id, detail, &labels, cx))
-                .ok();
+            let image_senders: BTreeSet<String> = mail
+                .image_senders()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            this.update(cx, |this, cx| {
+                this.loaded(&id, detail, &labels, &image_senders, cx);
+            })
+            .ok();
         }));
     }
 
@@ -168,11 +182,15 @@ impl ConversationView {
         id: &ThreadId,
         detail: openmail_sync::Result<Option<ThreadDetail>>,
         labels: &[Label],
+        image_senders: &BTreeSet<String>,
         cx: &mut Context<'_, Self>,
     ) {
         let me = self.account.as_deref();
         let detail = detail.map_err(|err| err.to_string());
         if self.pane.loaded(id, detail, labels, me) {
+            if let Some(conversation) = self.pane.conversation_mut() {
+                conversation.show_images_from(image_senders);
+            }
             self.load_bodies(cx);
             self.sync_body(cx);
             cx.notify();
@@ -247,6 +265,114 @@ impl ConversationView {
             self.sync_body(cx);
             cx.notify();
         }
+    }
+
+    /// Shows the remote images of message `id`.
+    fn show_images(&mut self, id: &MessageId, cx: &mut Context<'_, Self>) {
+        if let Some(conversation) = self.pane.conversation_mut()
+            && conversation.show_images(id)
+        {
+            self.sync_body(cx);
+            cx.notify();
+        }
+    }
+
+    /// Shows the remote images of every message in the conversation.
+    fn show_all_images(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(conversation) = self.pane.conversation_mut() else {
+            return;
+        };
+        let hidden: Vec<MessageId> = conversation.hidden_images().map(|m| m.id.clone()).collect();
+        for id in &hidden {
+            conversation.show_images(id);
+        }
+        if !hidden.is_empty() {
+            self.sync_body(cx);
+            cx.notify();
+        }
+    }
+
+    /// Shows remote images from `address` now and from now on, saved for
+    /// the account.
+    fn always_show_images(&mut self, address: String, cx: &mut Context<'_, Self>) {
+        if let Some(conversation) = self.pane.conversation_mut()
+            && conversation.show_images_from(&BTreeSet::from([address.clone()]))
+        {
+            self.sync_body(cx);
+            cx.notify();
+        }
+        if let Some(mail) = self.model.read(cx).mail().cloned() {
+            cx.background_spawn(async move {
+                if let Err(err) = mail.allow_images_from(address).await {
+                    tracing::warn!(%err, "could not save the sender whose images to show");
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// The strip offering to show the remote images hidden in the open
+    /// conversation, if any are.
+    fn images_bar(
+        &self,
+        conversation: &Conversation,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<AnyElement> {
+        let hidden: Vec<&MessageItem> = conversation.hidden_images().collect();
+        if hidden.is_empty() {
+            return None;
+        }
+        if hidden.len() > MAX_IMAGE_ROWS {
+            let text = format!("Images are hidden in {} messages.", hidden.len());
+            return Some(
+                banner(text, cx)
+                    .child(
+                        Button::new("show-all-images")
+                            .outline()
+                            .small()
+                            .label("Show all images")
+                            .on_click(cx.listener(|this, _, _, cx| this.show_all_images(cx))),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        let now = local(OffsetDateTime::now_utc());
+        let single = conversation.messages.len() == 1;
+        let rows = hidden.into_iter().map(|message| {
+            let text = if single {
+                "Images in this message are hidden to protect your privacy.".to_owned()
+            } else {
+                format!(
+                    "Images in the message from {} ({}) are hidden.",
+                    message.sender,
+                    format_date(local(message.date), now)
+                )
+            };
+            let id = message.id.clone();
+            let show = Button::new(SharedString::from(format!("show-images-{}", message.id)))
+                .outline()
+                .small()
+                .label("Show images")
+                .on_click(cx.listener(move |this, _, _, cx| this.show_images(&id, cx)));
+            let always = message.sender_address.clone().map(|address| {
+                Button::new(SharedString::from(format!("always-images-{}", message.id)))
+                    .ghost()
+                    .small()
+                    .label(format!("Always show from {address}"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.always_show_images(address.clone(), cx);
+                    }))
+            });
+            banner(text, cx).child(show).children(always)
+        });
+        Some(
+            v_flex()
+                .flex_none()
+                .w_full()
+                .children(rows)
+                .into_any_element(),
+        )
     }
 
     /// Expands or collapses a message drawn in GPUI (without a webview).
@@ -335,10 +461,11 @@ impl ConversationView {
         } else if conversation.bodies_settled() || has_document {
             // While the next document is prepared, the webview keeps the
             // previous one in place (see `sync_body`).
-            div()
+            v_flex()
                 .flex_1()
                 .min_h_0()
-                .child(self.body.clone())
+                .children(self.images_bar(conversation, cx))
+                .child(div().flex_1().min_h_0().child(self.body.clone()))
                 .into_any_element()
         } else {
             loading().flex_1().min_h_0().into_any_element()

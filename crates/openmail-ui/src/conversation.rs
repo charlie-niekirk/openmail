@@ -6,7 +6,8 @@
 //! failing to, or the open [`Conversation`]. Neither has GPUI types;
 //! `conversation_view` renders them and drives their loading.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use openmail_core::{Address, Label, LabelId, MessageId, SystemLabel, ThreadId};
 use openmail_store::{MessageBody, ThreadDetail};
@@ -127,6 +128,8 @@ pub struct MessageItem {
     pub id: MessageId,
     /// Who sent it, as short as possible: the display name, or "me".
     pub sender: String,
+    /// The sender's address, lowercased, for "always show images from".
+    pub sender_address: Option<String>,
     /// The full `From`, as in `Ada Lovelace <ada@example.com>`.
     pub from: String,
     /// The full `To` and `Cc` lists (empty if there are none).
@@ -140,7 +143,32 @@ pub struct MessageItem {
     pub unread: bool,
     /// Whether the message shows its participants and body, or only a line.
     pub expanded: bool,
+    /// Whether its remote images load (the user chose to show them, for
+    /// this message or its sender).
+    pub show_images: bool,
     pub body: BodyState,
+}
+
+impl MessageItem {
+    /// Whether its body has remote images that are hidden.
+    pub fn images_hidden(&self) -> bool {
+        !self.show_images
+            && matches!(&self.body, BodyState::Loaded(LoadedBody { html: Some(html), .. })
+                if html.blocked_images)
+    }
+
+    /// Shows its remote images, cleaning its body again to let them in.
+    /// Returns whether anything changed.
+    fn show_images(&mut self) -> bool {
+        if self.show_images {
+            return false;
+        }
+        self.show_images = true;
+        if let BodyState::Loaded(body) = &mut self.body {
+            body.clean(&self.id, true);
+        }
+        true
+    }
 }
 
 /// Where an expanded message's body is.
@@ -196,12 +224,13 @@ impl Conversation {
                 let headers = &message.headers;
                 let unread = message.is_unread();
                 let before = previous.remove(&message.id);
+                let show_images = before.as_ref().is_some_and(|before| before.show_images);
                 // A body loaded before is kept rather than cleaned again.
                 let body = match before.as_ref().map(|before| &before.body) {
                     Some(body @ BodyState::Loaded(_)) => body.clone(),
                     before_body => detail.body.as_ref().map_or_else(
                         || before_body.cloned().unwrap_or(BodyState::NotLoaded),
-                        |body| BodyState::Loaded(LoadedBody::new(&message.id, body)),
+                        |body| BodyState::Loaded(LoadedBody::new(&message.id, body, show_images)),
                     ),
                 };
                 MessageItem {
@@ -209,6 +238,10 @@ impl Conversation {
                         || "(unknown sender)".to_owned(),
                         |from| short_name(from, me),
                     ),
+                    sender_address: headers
+                        .from
+                        .first()
+                        .map(|from| from.email.trim().to_lowercase()),
                     from: format_addresses(&headers.from),
                     to: format_addresses(&headers.to),
                     cc: format_addresses(&headers.cc),
@@ -219,6 +252,7 @@ impl Conversation {
                         .to_owned(),
                     unread,
                     expanded: before.map_or(unread || index == last, |before| before.expanded),
+                    show_images,
                     body,
                     id: message.id,
                 }
@@ -275,11 +309,42 @@ impl Conversation {
     /// message no longer exists.
     pub fn body_loaded(&mut self, id: &MessageId, body: Option<&MessageBody>) {
         if let Some(message) = self.message_mut(id) {
+            let show_images = message.show_images;
             message.body = body.map_or_else(
                 || BodyState::Unavailable("This message is no longer available.".to_owned()),
-                |body| BodyState::Loaded(LoadedBody::new(id, body)),
+                |body| BodyState::Loaded(LoadedBody::new(id, body, show_images)),
             );
         }
+    }
+
+    /// Shows the remote images of message `id`. Returns whether anything
+    /// changed.
+    pub fn show_images(&mut self, id: &MessageId) -> bool {
+        self.message_mut(id).is_some_and(MessageItem::show_images)
+    }
+
+    /// Shows the remote images of every message from one of `senders`
+    /// (lowercased addresses): those whose images are always shown. Returns
+    /// whether anything changed.
+    pub fn show_images_from(&mut self, senders: &BTreeSet<String>) -> bool {
+        let mut changed = false;
+        for message in &mut self.messages {
+            if message
+                .sender_address
+                .as_ref()
+                .is_some_and(|address| senders.contains(address))
+            {
+                changed |= message.show_images();
+            }
+        }
+        changed
+    }
+
+    /// The messages whose remote images are hidden, oldest first.
+    pub fn hidden_images(&self) -> impl Iterator<Item = &MessageItem> {
+        self.messages
+            .iter()
+            .filter(|message| message.images_hidden())
     }
 
     /// Records that a body request failed.
@@ -347,26 +412,39 @@ pub struct LoadedBody {
     pub text: String,
     /// Its HTML part, sanitized ([`clean_html`]), if it has one with content.
     pub html: Option<CleanHtml>,
+    /// The body as stored, to clean again once its images are shown.
+    pub source: Option<Arc<MessageBody>>,
 }
 
 impl LoadedBody {
-    /// `body`, the body of message `id`, ready to show with remote images
-    /// blocked.
-    pub fn new(id: &MessageId, body: &MessageBody) -> Self {
+    /// `body`, the body of message `id`, ready to show, with its remote
+    /// images if `remote_images`.
+    pub fn new(id: &MessageId, body: &MessageBody, remote_images: bool) -> Self {
+        let mut loaded = Self {
+            text: body_text(body),
+            html: None,
+            source: Some(Arc::new(body.clone())),
+        };
+        loaded.clean(id, remote_images);
+        loaded
+    }
+
+    /// Cleans its HTML part (again), with remote images or without.
+    fn clean(&mut self, id: &MessageId, remote_images: bool) {
+        let Some(source) = &self.source else {
+            return;
+        };
         let options = CleanOptions {
             message_id: id.as_str(),
-            remote_images: false,
-            inline: &body.inline,
+            remote_images,
+            inline: &source.inline,
         };
-        Self {
-            text: body_text(body),
-            html: body
-                .html
-                .as_deref()
-                .filter(|html| !html.trim().is_empty())
-                .map(|html| clean_html(html, &options))
-                .filter(|cleaned| !cleaned.html.trim().is_empty()),
-        }
+        self.html = source
+            .html
+            .as_deref()
+            .filter(|html| !html.trim().is_empty())
+            .map(|html| clean_html(html, &options))
+            .filter(|cleaned| !cleaned.html.trim().is_empty());
     }
 }
 
@@ -563,6 +641,10 @@ mod tests {
             fetched_at: datetime!(2026-11-10 10:00 UTC),
             inline: Vec::new(),
         }
+    }
+
+    fn loaded_body(body: &MessageBody) -> LoadedBody {
+        LoadedBody::new(&MessageId::new("m1"), body, false)
     }
 
     fn loaded_text(message: &MessageItem) -> Option<&str> {
@@ -783,32 +865,22 @@ mod tests {
 
     #[test]
     fn html_parts_are_cleaned_and_blank_ones_dropped() {
-        let loaded = LoadedBody::new(
-            &MessageId::new("m1"),
-            &body(
-                Some("Hi"),
-                Some("<p onclick=\"x()\">Hi</p><script>x()</script>"),
-            ),
-        );
+        let loaded = loaded_body(&body(
+            Some("Hi"),
+            Some("<p onclick=\"x()\">Hi</p><script>x()</script>"),
+        ));
         assert_eq!(loaded.text, "Hi");
         assert_eq!(
             loaded.html.map(|cleaned| cleaned.html).as_deref(),
             Some("<p>Hi</p>")
         );
 
+        assert_eq!(loaded_body(&body(Some("Hi"), Some(" \n"))).html, None);
         assert_eq!(
-            LoadedBody::new(&MessageId::new("m1"), &body(Some("Hi"), Some(" \n"))).html,
+            loaded_body(&body(Some("Hi"), Some("<script>x()</script>"))).html,
             None
         );
-        assert_eq!(
-            LoadedBody::new(
-                &MessageId::new("m1"),
-                &body(Some("Hi"), Some("<script>x()</script>"))
-            )
-            .html,
-            None
-        );
-        let text_only = LoadedBody::new(&MessageId::new("m1"), &body(None, Some("<b>Bold</b>")));
+        let text_only = loaded_body(&body(None, Some("<b>Bold</b>")));
         assert_eq!(text_only.text, "Bold");
         assert_eq!(
             text_only.html.map(|cleaned| cleaned.html).as_deref(),
@@ -925,5 +997,64 @@ mod tests {
         assert!(conversation.retry_unavailable());
         assert_eq!(conversation.take_bodies_to_load(), [latest]);
         assert!(!conversation.retry_unavailable(), "nothing left to retry");
+    }
+
+    fn html(message: &MessageItem) -> &CleanHtml {
+        match &message.body {
+            BodyState::Loaded(LoadedBody {
+                html: Some(html), ..
+            }) => html,
+            body => panic!("no HTML: {body:?}"),
+        }
+    }
+
+    const PIXEL: &str = "<p>Hi</p><img src=\"https://t.example/open.gif\">";
+
+    #[test]
+    fn remote_images_stay_hidden_until_shown() {
+        let mut conversation = Conversation::new(detail(ids(2)), &[], ME);
+        let (m1, m2) = (MessageId::new("m1"), MessageId::new("m2"));
+        conversation.take_bodies_to_load();
+        conversation.body_loaded(&m1, Some(&body(Some("Hi"), Some(PIXEL))));
+        conversation.body_loaded(&m2, Some(&body(Some("Hi"), Some("<p>Hi</p>"))));
+        let hidden: Vec<&MessageId> = conversation.hidden_images().map(|m| &m.id).collect();
+        assert_eq!(hidden, [&m1]);
+        assert!(!html(&conversation.messages[0]).html.contains("t.example"));
+
+        assert!(conversation.show_images(&m1));
+        assert!(!conversation.show_images(&m1), "already shown");
+        assert_eq!(conversation.hidden_images().count(), 0);
+        let shown = html(&conversation.messages[0]);
+        assert!(shown.html.contains("src=\"https://t.example/open.gif\""));
+        assert_eq!(
+            shown.image_urls.iter().collect::<Vec<_>>(),
+            ["https://t.example/open.gif"]
+        );
+
+        // A refresh keeps the choice.
+        conversation.refresh(detail(ids(2)), &[], ME);
+        assert!(conversation.messages[0].show_images);
+        assert_eq!(conversation.hidden_images().count(), 0);
+    }
+
+    #[test]
+    fn senders_whose_images_are_always_shown() {
+        let mut messages = ids(2);
+        messages[1].message.headers.from = vec![Address::new("News@Example.com")];
+        let mut conversation = Conversation::new(detail(messages), &[], ME);
+        let senders: BTreeSet<String> = ["news@example.com".to_owned()].into();
+        // Before its body loads: the body loads with its images.
+        assert!(conversation.show_images_from(&senders));
+        assert!(!conversation.show_images_from(&senders));
+        conversation.take_bodies_to_load();
+        for id in ["m1", "m2"] {
+            conversation.body_loaded(&MessageId::new(id), Some(&body(None, Some(PIXEL))));
+        }
+        let hidden: Vec<&str> = conversation
+            .hidden_images()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(hidden, ["m1"]);
+        assert!(html(&conversation.messages[1]).html.contains("t.example"));
     }
 }
