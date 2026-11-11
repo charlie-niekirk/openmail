@@ -17,8 +17,10 @@ use time::OffsetDateTime;
 
 use crate::bridge::{AppEvent, AppModel};
 use crate::conversation::{BodyState, Conversation, LabelChip, MessageItem};
+use crate::sidebar::parse_hex_color;
 use crate::state::Session;
-use crate::time_format::{full_date, local_offset, short_date};
+use crate::thread_list::format_date;
+use crate::time_format::{full_date, local};
 use crate::typography::{TextRole, TypographyExt as _};
 
 /// Widest a conversation's text runs, for readable lines on wide windows.
@@ -241,7 +243,7 @@ impl ConversationView {
         conversation: &Conversation,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let now = OffsetDateTime::now_utc();
+        let now = local(OffsetDateTime::now_utc());
         let count = conversation.messages.len();
         let header = v_flex()
             .gap_2()
@@ -301,7 +303,7 @@ impl ConversationView {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let offset = local_offset();
+        let date = local(message.date);
         let id = message.id.clone();
         let toggle = cx.listener(move |this, _, _, cx| this.toggle(&id, cx));
         let card = v_flex()
@@ -337,7 +339,7 @@ impl ConversationView {
                                 .text_color(theme.muted_foreground)
                                 .child(message.snippet.clone()),
                         )
-                        .child(date_text(short_date(message.date, now, offset), cx)),
+                        .child(date_text(format_date(date, now), cx)),
                 )
                 .into_any_element();
         }
@@ -364,7 +366,7 @@ impl ConversationView {
                             .child(message.recipients.clone()),
                     ),
             )
-            .child(date_text(short_date(message.date, now, offset), cx));
+            .child(date_text(format_date(date, now), cx));
 
         let participants = v_flex()
             .px_4()
@@ -374,7 +376,7 @@ impl ConversationView {
             .child(participant("from", &message.from, cx))
             .children((!message.to.is_empty()).then(|| participant("to", &message.to, cx)))
             .children((!message.cc.is_empty()).then(|| participant("cc", &message.cc, cx)))
-            .child(participant("date", &full_date(message.date, offset), cx));
+            .child(participant("date", &full_date(date), cx));
 
         let body = match &message.body {
             BodyState::NotLoaded | BodyState::Loading => h_flex()
@@ -463,13 +465,7 @@ fn chip_colors(color: &LabelColor) -> Option<(Hsla, Hsla)> {
 }
 
 fn hex_color(hex: &str) -> Option<Hsla> {
-    let digits = hex.strip_prefix('#')?;
-    if digits.len() != 6 {
-        return None;
-    }
-    u32::from_str_radix(digits, 16)
-        .ok()
-        .map(|value| rgb(value).into())
+    parse_hex_color(hex).map(|value| rgb(value).into())
 }
 
 impl Render for ConversationView {
@@ -520,8 +516,12 @@ mod tests {
         let (background, foreground) = colors.expect("valid colors");
         assert_eq!(foreground, Hsla::from(rgb(0xffffff)));
         assert_eq!(background, Hsla::from(rgb(0x16a765)));
-        assert!(hex_color("16a765").is_none());
-        assert!(hex_color("#fff").is_none());
-        assert!(hex_color("#zzzzzz").is_none());
+        assert!(
+            chip_colors(&LabelColor {
+                text_color: "#fff".to_owned(),
+                background_color: "#16a765".to_owned(),
+            })
+            .is_none()
+        );
     }
 }

@@ -27,6 +27,9 @@ gpui-platform = { package = "gpui-pre-platform", version = "=0.3.12", features =
   "x11",
 ] }
 gpui-component = "=0.9.1"
+# Icons for gpui-component (its default set) and the Lucide icons the app adds.
+# Released in lockstep with gpui-component: pin it to the same version.
+gpui-kit-assets = "=0.9.1"
 # Message-body webview. gpui-component's webview moved into its own crate,
 # `gpui-webview`, released in lockstep with it and built on Longbridge's wry fork
 # (`lb-wry`), which it does not re-export. Pin both exactly, alongside gpui-component.
@@ -35,6 +38,9 @@ wry = { package = "lb-wry", version = "=0.53.3" }
 
 anyhow = "1.0.104"
 base64 = "0.23.1"
+# Local time zone lookups (the `time` crate cannot read the zone safely once
+# threads are running).
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 clap = { version = "4.6.7", features = ["derive"] }
 # Benchmarks only: without plotting and rayon, which the reports do not need.
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }

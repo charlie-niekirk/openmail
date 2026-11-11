@@ -1,62 +1,41 @@
-//! Dates as the mailbox shows them, in the user's local time.
-//!
-//! `time` can only read the local UTC offset while the process has a single
-//! thread, so the app captures it at start-up with [`capture_local_offset`]
-//! and views read it with [`local_offset`].
-
-use std::sync::OnceLock;
+//! Dates in the user's local time. Compact list dates are
+//! [`format_date`](crate::thread_list::format_date).
 
 use time::{OffsetDateTime, UtcOffset};
 
-static LOCAL_OFFSET: OnceLock<UtcOffset> = OnceLock::new();
+/// `date` in the local time zone at that date (so dates across a daylight
+/// saving change are right), or unchanged if the zone can't be read.
+pub fn local(date: OffsetDateTime) -> OffsetDateTime {
+    use chrono::{Offset as _, TimeZone as _};
 
-/// Records the local UTC offset. Call at the top of `main`, before any other
-/// thread starts; later calls do nothing.
-pub fn capture_local_offset() {
-    LOCAL_OFFSET.get_or_init(read_local_offset);
+    chrono::Local
+        .timestamp_opt(date.unix_timestamp(), 0)
+        .single()
+        .and_then(|local| {
+            UtcOffset::from_whole_seconds(local.offset().fix().local_minus_utc()).ok()
+        })
+        .map_or(date, |offset| date.to_offset(offset))
 }
 
-/// The local UTC offset recorded by [`capture_local_offset`], or UTC if it
-/// could not be read.
-pub fn local_offset() -> UtcOffset {
-    *LOCAL_OFFSET.get_or_init(read_local_offset)
-}
-
-fn read_local_offset() -> UtcOffset {
-    UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC)
-}
-
-/// A compact date for lists and collapsed messages: `15:07` today, `3 Nov`
-/// earlier this year, `3 Nov 2024` before that.
-pub fn short_date(date: OffsetDateTime, now: OffsetDateTime, offset: UtcOffset) -> String {
-    let (date, now) = (date.to_offset(offset), now.to_offset(offset));
-    if date.date() == now.date() {
-        format!("{:02}:{:02}", date.hour(), date.minute())
-    } else if date.year() == now.year() {
-        format!("{} {}", date.day(), month(date))
-    } else {
-        format!("{} {} {}", date.day(), month(date), date.year())
-    }
-}
-
-/// A full date for an expanded message: `Tue, 3 Nov 2026, 15:07`.
-pub fn full_date(date: OffsetDateTime, offset: UtcOffset) -> String {
-    let date = date.to_offset(offset);
+/// A full date for an expanded message, as Gmail shows it:
+/// `Tue, Nov 3, 2026, 3:07 PM`. `date` is already in local time.
+pub fn full_date(date: OffsetDateTime) -> String {
+    let (hour, period) = match date.hour() {
+        0 => (12, "AM"),
+        h @ 1..=11 => (h, "AM"),
+        12 => (12, "PM"),
+        h => (h - 12, "PM"),
+    };
     let weekday = date.weekday().to_string();
+    let month = date.month().to_string();
     format!(
-        "{}, {} {} {}, {:02}:{:02}",
+        "{}, {} {}, {}, {hour}:{:02} {period}",
         &weekday[..3],
+        &month[..3],
         date.day(),
-        month(date),
         date.year(),
-        date.hour(),
         date.minute()
     )
-}
-
-/// The month's three-letter English abbreviation.
-fn month(date: OffsetDateTime) -> String {
-    date.month().to_string()[..3].to_owned()
 }
 
 #[cfg(test)]
@@ -65,38 +44,25 @@ mod tests {
 
     use super::*;
 
-    const NOW: OffsetDateTime = datetime!(2026-11-11 09:30 UTC);
-
-    #[test]
-    fn today_shows_the_time() {
-        let date = datetime!(2026-11-11 08:05 UTC);
-        assert_eq!(short_date(date, NOW, UtcOffset::UTC), "08:05");
-    }
-
-    #[test]
-    fn this_year_shows_day_and_month() {
-        let date = datetime!(2026-03-02 23:00 UTC);
-        assert_eq!(short_date(date, NOW, UtcOffset::UTC), "2 Mar");
-    }
-
-    #[test]
-    fn earlier_years_show_the_year() {
-        let date = datetime!(2024-12-31 12:00 UTC);
-        assert_eq!(short_date(date, NOW, UtcOffset::UTC), "31 Dec 2024");
-    }
-
-    #[test]
-    fn days_are_compared_in_local_time() {
-        // 23:30 UTC on the 10th is already the 11th in UTC+1.
-        let date = datetime!(2026-11-10 23:30 UTC);
-        assert_eq!(short_date(date, NOW, offset!(+1)), "00:30");
-        assert_eq!(short_date(date, NOW, UtcOffset::UTC), "10 Nov");
-    }
-
     #[test]
     fn full_dates_name_the_weekday() {
+        assert_eq!(
+            full_date(datetime!(2026-11-03 15:07 UTC)),
+            "Tue, Nov 3, 2026, 3:07 PM"
+        );
+        assert_eq!(
+            full_date(datetime!(2026-01-01 00:05 -8)),
+            "Thu, Jan 1, 2026, 12:05 AM"
+        );
+        assert_eq!(
+            full_date(datetime!(2026-06-30 12:00 UTC).to_offset(offset!(+1))),
+            "Tue, Jun 30, 2026, 1:00 PM"
+        );
+    }
+
+    #[test]
+    fn local_keeps_the_instant() {
         let date = datetime!(2026-11-03 15:07 UTC);
-        assert_eq!(full_date(date, UtcOffset::UTC), "Tue, 3 Nov 2026, 15:07");
-        assert_eq!(full_date(date, offset!(-8)), "Tue, 3 Nov 2026, 07:07");
+        assert_eq!(local(date), date);
     }
 }

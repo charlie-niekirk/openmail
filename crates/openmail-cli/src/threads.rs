@@ -2,12 +2,12 @@
 
 use anyhow::Context as _;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
-use openmail_core::{Label, LabelId, Thread, ThreadId};
+use openmail_core::{Label, LabelId, Thread, ThreadId, decode_entities};
 use openmail_gmail::GmailClient;
 use openmail_gmail::api::{self, ApiLabel, ListRequest, ThreadFormat};
 use time::UtcOffset;
 
-use crate::text::{collapse_whitespace, decode_entities, format_date, truncate};
+use crate::text::{collapse_whitespace, format_date, truncate};
 
 /// How many thread requests run at once.
 const CONCURRENCY: usize = 8;

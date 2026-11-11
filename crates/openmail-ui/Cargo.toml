@@ -10,15 +10,17 @@ homepage.workspace = true
 publish.workspace = true
 
 [dependencies]
+chrono.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
+gpui-kit-assets.workspace = true
 gpui-webview.workspace = true
 openmail-core = { path = "../openmail-core" }
 openmail-mime = { path = "../openmail-mime" }
 openmail-store = { path = "../openmail-store" }
 openmail-sync = { path = "../openmail-sync" }
 serde_json.workspace = true
-time = { workspace = true, features = ["local-offset"] }
+time.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 wry.workspace = true

@@ -7,9 +7,11 @@
 
 use std::collections::HashMap;
 
-use openmail_core::{Address, Label, LabelColor, LabelId, MessageId, SystemLabel, ThreadId};
+use openmail_core::{Address, Label, LabelId, MessageId, SystemLabel, ThreadId};
 use openmail_store::{MessageBody, ThreadDetail};
 use time::OffsetDateTime;
+
+pub use crate::thread_list::LabelChip;
 
 /// What a thread with no subject is called.
 pub const NO_SUBJECT: &str = "(no subject)";
@@ -26,17 +28,6 @@ pub struct Conversation {
     pub labels: Vec<LabelChip>,
     /// The messages, oldest first.
     pub messages: Vec<MessageItem>,
-}
-
-/// A label chip in the conversation header.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LabelChip {
-    pub id: LabelId,
-    /// The name Gmail shows: "Inbox" for system labels, the full path (such
-    /// as "Work/Projects") for user labels.
-    pub name: String,
-    /// The label's colors, if the user set any.
-    pub color: Option<LabelColor>,
 }
 
 /// One message in a [`Conversation`].
@@ -112,7 +103,7 @@ impl Conversation {
                     cc: format_addresses(&headers.cc),
                     recipients: recipients_summary(&headers.to, &headers.cc, me),
                     date: message.internal_date,
-                    snippet: openmail_mime::html_to_text(&message.snippet)
+                    snippet: openmail_core::decode_entities(&message.snippet)
                         .trim()
                         .to_owned(),
                     unread,
@@ -245,7 +236,6 @@ pub fn label_chips(label_ids: &[LabelId], labels: &[Label]) -> Vec<LabelChip> {
     for label in labels.iter().filter(|label| label_ids.contains(&label.id)) {
         if label.is_user() {
             user.push(LabelChip {
-                id: label.id.clone(),
                 name: label.name.clone(),
                 color: label.color.clone(),
             });
@@ -256,7 +246,6 @@ pub fn label_chips(label_ids: &[LabelId], labels: &[Label]) -> Vec<LabelChip> {
             system.push((
                 rank,
                 LabelChip {
-                    id: label.id.clone(),
                     name: SHOWN[rank].display_name().to_owned(),
                     color: None,
                 },

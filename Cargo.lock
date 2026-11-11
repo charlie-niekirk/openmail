@@ -5743,7 +5743,9 @@ dependencies = [
 name = "openmail-ui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "gpui-webview",
  "lb-wry",
