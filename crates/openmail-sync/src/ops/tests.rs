@@ -172,3 +172,13 @@ fn label_edits_are_reapplied_after_a_label_sync() {
     assert!(queue.undo(&store, rename).unwrap());
     assert_eq!(store.label(&label.id).unwrap().unwrap().name, "Work");
 }
+
+#[test]
+fn the_worker_can_run_on_a_multi_threaded_runtime() {
+    fn assert_send<T: Send>(_: &T) {}
+    let queue = queue();
+    let mut store = Store::open_in_memory().unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let run = queue.run(&mut store, &cancel, |_| {});
+    assert_send(&run);
+}

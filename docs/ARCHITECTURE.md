@@ -58,7 +58,7 @@ openmail/
   bridge from `MailService` events to GPUI entities. Hosts the webview bridge for
   message bodies.
 - **`openmail-cli`** — A developer tool (`login`, `labels`, `threads`, `show`,
-  `sync`) for exercising the lower crates against a real account without the UI.
+  `sync`, `watch`, …) for exercising the lower crates against a real account without the UI.
 - **`apps/openmail`** — The desktop binary. Starts `MailService`, opens the GPUI
   window, and connects the two.
 
@@ -343,12 +343,54 @@ thread detail never sort), and
   entities, which re-render.
 - The UI never blocks on I/O.
 
+### `MailService`
+
+`MailService::start(client, MailServiceConfig)` opens the account's database and
+starts a thread that runs a multi-threaded tokio runtime (two workers) with
+four tasks, each with its own SQLite connection (WAL lets them read while
+another writes):
+
+| Task | Does |
+| --- | --- |
+| local | Answers `MailHandle` calls one at a time: thread pages, label counts, labels, thread detail, the queued ops; enqueues and undoes ops. |
+| sync | Runs the `Scheduler`: the initial sync until it is complete, then history polls. |
+| ops | Runs the `OpsQueue` replay worker. |
+| bodies | Fetches message bodies on request and prefetches recent ones. |
+
+- **Commands.** `MailHandle` is a cheap, cloneable handle. Each call sends a
+  command over an unbounded channel and awaits a `oneshot` answer, so its
+  futures, like the event stream, can be awaited on any executor, GPUI's
+  included. `poll_now` and `set_activity` go straight to the scheduler.
+- **Events.** `MailEvents` yields `MailEvent`s: `SyncStatus` (`Initial`
+  progress, `UpToDate` after each poll, `Retrying`, `Stopped`),
+  `Connectivity`, `ThreadsChanged` and `LabelsChanged`, `BodyFetched`, `Op`
+  (the ops queue's events) and `OpsStopped`. Store changes are reported as
+  invalidations without detail: the UI queries again what it shows, which
+  the store answers in milliseconds. They come from initial-sync progress
+  (labels or threads stored), polls that changed something, ops enqueued,
+  undone or rolled back, and label creations Gmail confirmed.
+- **Bodies.** `MailHandle::body` answers from the store, or else fetches the
+  message (`format=raw`, parsed by `openmail-mime`) and stores it. Requests
+  that arrive together go in one batch, and several callers waiting for the
+  same body share one fetch. After each poll the task prefetches the bodies
+  of the newest Inbox messages that have none (50 by default), ten at a
+  time, fetching any requested body before the next ten. A prefetch that
+  fails stops quietly until the next poll; everything goes through the
+  client's quota budget.
+- **Failure.** The scheduler stopping (sign-in, daily quota, store) is
+  `SyncStatus::Stopped`; the ops worker stopping is `OpsStopped`. Queries keep
+  working. Restarting the service resumes from the store's checkpoints.
+- **Shutdown.** Dropping the service, or `shutdown`, cancels every task and
+  joins the thread; unsent ops stay queued. Calls on a handle then fail with
+  `Error::ServiceStopped`, and the event stream ends.
+
 ## Sync model
 
 1. **Initial sync.** Fetch labels, then thread metadata: Inbox first, then everything
    else back to a configurable date, using batched metadata requests. Progress and
    the starting `historyId` are checkpointed so the sync can resume. Bodies load
-   lazily, with background prefetch of recent mail.
+   lazily, with background prefetch of recent mail (see
+   [`MailService`](#mailservice)).
 
    `InitialSync` in `openmail-sync` records the profile's `historyId` before
    anything else, then syncs labels, Inbox threads, and a backfill of the rest,

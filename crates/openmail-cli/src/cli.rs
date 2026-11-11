@@ -103,8 +103,9 @@ pub enum Command {
         )]
         rate: Option<u32>,
     },
-    /// Keep the local store in sync until Ctrl-C: finish the initial sync if
-    /// needed, then poll Gmail's history, printing a line per poll.
+    /// Run the mail service until Ctrl-C: finish the initial sync if needed,
+    /// then poll Gmail's history, send queued ops and prefetch recent
+    /// bodies, printing a line for each.
     Watch {
         /// Seconds between polls.
         #[arg(

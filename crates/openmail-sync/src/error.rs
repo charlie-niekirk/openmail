@@ -29,6 +29,20 @@ pub enum Error {
     /// Incremental sync needs the initial sync to have finished first.
     #[error("the initial sync has not finished")]
     InitialSyncIncomplete,
+
+    /// The [`MailService`](crate::MailService) could not start its runtime.
+    #[error("could not start the mail service")]
+    Runtime(#[source] std::io::Error),
+
+    /// The [`MailService`](crate::MailService) has shut down, so it cannot
+    /// answer.
+    #[error("the mail service has stopped")]
+    ServiceStopped,
+
+    /// An error shared by several callers, such as a failed request that
+    /// several waiting calls depended on.
+    #[error(transparent)]
+    Shared(std::sync::Arc<Error>),
 }
 
 impl Error {
@@ -41,6 +55,7 @@ impl Error {
                 retry_after,
                 ..
             }) => Some(*retry_after),
+            Self::Shared(err) => err.rate_limit_retry_after(),
             _ => None,
         }
     }
@@ -57,7 +72,12 @@ impl Error {
                 api::Error::Api { status, .. } => status.is_server_error(),
                 _ => false,
             },
-            Self::Store(_) | Self::Cancelled | Self::InitialSyncIncomplete => false,
+            Self::Shared(err) => err.is_transient(),
+            Self::Store(_)
+            | Self::Cancelled
+            | Self::InitialSyncIncomplete
+            | Self::Runtime(_)
+            | Self::ServiceStopped => false,
         }
     }
 }
