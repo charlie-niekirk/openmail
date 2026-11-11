@@ -338,7 +338,7 @@ impl ThreadList {
                 thread.message_count,
             ),
             subject: subject_text(thread.subject.as_deref()),
-            snippet: collapse_whitespace(&decode_entities(&thread.snippet)),
+            snippet: snippet_text(&thread.snippet),
             date: format_date(local(thread.last_message_date), now),
             labels,
             more_labels,
@@ -447,6 +447,38 @@ fn subject_text(subject: Option<&str>) -> String {
         Some(subject) if !subject.is_empty() => subject,
         _ => "(no subject)".to_owned(),
     }
+}
+
+/// A snippet with its entities decoded and its whitespace collapsed, without
+/// the runs of invisible characters marketing mail pads its preview with.
+fn snippet_text(snippet: &str) -> String {
+    decode_entities(snippet)
+        .split_whitespace()
+        .filter(|word| !word.chars().all(is_invisible))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Characters that take no space: zero-width spaces and joiners, soft
+/// hyphens, the combining grapheme joiner, direction marks, byte order marks.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{34f}'
+            | '\u{61c}'
+            | '\u{115f}'
+            | '\u{1160}'
+            | '\u{17b4}'
+            | '\u{17b5}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
+            | '\u{feff}'
+            | '\u{ffa0}'
+    )
 }
 
 fn collapse_whitespace(s: &str) -> String {

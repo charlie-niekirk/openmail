@@ -479,3 +479,12 @@ fn a_missing_subject_says_so() {
     assert_eq!(subject_text(Some("  ")), "(no subject)");
     assert_eq!(subject_text(Some("Hi")), "Hi");
 }
+
+#[test]
+fn snippets_drop_invisible_padding() {
+    let padded = "Leather you can feel. \u{200c} \u{200c}\u{34f} \u{feff}\u{a0}&nbsp;\u{200c}";
+    assert_eq!(snippet_text(padded), "Leather you can feel.");
+    // Joiners inside words are kept (emoji sequences, scripts that use them).
+    let family = "Family \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} photos";
+    assert_eq!(snippet_text(family), family);
+}
