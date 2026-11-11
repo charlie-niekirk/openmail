@@ -28,6 +28,7 @@ mod thread_list;
 mod thread_list_view;
 mod time_format;
 mod typography;
+mod webview_cursor;
 
 pub use assets::{Assets, IMPORTANCE_ICON};
 pub use body_document::{

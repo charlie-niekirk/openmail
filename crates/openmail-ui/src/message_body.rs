@@ -11,7 +11,8 @@
 //! JavaScript is off, storage is incognito, and the webview may only navigate
 //! to a document this view is loading. A click on an `http(s):` or `mailto:`
 //! link is cancelled and reported as a [`LinkClicked`] event, for the
-//! reading pane to open outside the webview. See "Webview embedding" in
+//! reading pane to open outside the webview. While the pointer is over it,
+//! the webview shows its own cursor ([`WebviewCursor`]). See "Webview embedding" in
 //! `docs/ARCHITECTURE.md` for the platform findings.
 
 use std::cell::Cell;
@@ -26,6 +27,8 @@ use gpui_component::WindowExt as _;
 use gpui_webview::WebView;
 use tokio::sync::mpsc;
 use wry::{NewWindowResponse, PageLoadEvent, WebViewBuilder};
+
+use crate::webview_cursor::WebviewCursor;
 
 /// How long the previous document stays up while the next one is prepared.
 const HOLD: Duration = Duration::from_millis(200);
@@ -89,6 +92,8 @@ pub struct MessageBodyView {
     /// Tells this view which links were clicked.
     links: mpsc::UnboundedSender<String>,
     _links: Task<()>,
+    /// Gives the webview the cursor while the pointer is over it.
+    cursor: WebviewCursor,
     /// WebView2's user data folder, kept alive with the webview.
     #[cfg(windows)]
     _context: Option<wry::WebContext>,
@@ -124,6 +129,7 @@ impl MessageBodyView {
             _page_loads: listen,
             links,
             _links: listen_links,
+            cursor: WebviewCursor::default(),
             #[cfg(windows)]
             _context: None,
         }
@@ -163,6 +169,7 @@ impl MessageBodyView {
         if let Web::Ready(webview) = &self.web {
             let _ = webview.read(cx).set_visible(false);
         }
+        self.cursor.release();
         cx.notify();
     }
 
@@ -346,7 +353,11 @@ impl Render for MessageBodyView {
         if native.visible() != visible {
             let _ = native.set_visible(visible);
         }
-        div().size_full().child(webview)
+        div()
+            .relative()
+            .size_full()
+            .child(webview)
+            .child(self.cursor.tracker(visible))
     }
 }
 
