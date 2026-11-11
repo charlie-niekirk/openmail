@@ -9,6 +9,7 @@
 
 mod bridge;
 mod conversation;
+mod conversation_view;
 mod main_window;
 mod message_body;
 mod onboarding;
@@ -20,6 +21,7 @@ mod typography;
 
 pub use bridge::{AppEvent, AppModel, Backend, Connection};
 pub use conversation::{BodyState, Conversation, LabelChip, MessageItem};
+pub use conversation_view::ConversationView;
 pub use main_window::{Content, MainWindow, main_window_options};
 pub use message_body::{
     BODY_CSP, MessageBodyView, SAMPLE_NEWSLETTER, allows_navigation, body_document,
