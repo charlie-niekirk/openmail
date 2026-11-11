@@ -1,5 +1,6 @@
 //! The sanitizer over a small fixture corpus: a newsletter, hostile HTML,
-//! and a MIME message with `cid:` images.
+//! personal mail, mail with its own dark styles, light text, and a MIME
+//! message with `cid:` images.
 
 use openmail_mime::ParsedMessage;
 use openmail_store::InlinePart;
@@ -8,6 +9,9 @@ use super::*;
 
 const NEWSLETTER: &str = include_str!("fixtures/newsletter.html");
 const HOSTILE: &str = include_str!("fixtures/hostile.html");
+const PERSONAL: &str = include_str!("fixtures/personal.html");
+const DARK_AWARE: &str = include_str!("fixtures/dark-aware.html");
+const LIGHT_TEXT: &str = include_str!("fixtures/light-text.html");
 const CID_MESSAGE: &[u8] =
     include_bytes!("../../../openmail-mime/tests/fixtures/newsletter-cid.eml");
 
@@ -193,7 +197,7 @@ fn quoted_markup_is_not_a_stylesheet() {
     );
     assert_eq!(
         cleaned.html,
-        "<p title=\"&lt;style&gt;a{}&lt;/style&gt;\">x</p><style>#b-m1 p{color:red}</style>"
+        "<p title=\"&lt;style&gt;a{}&lt;/style&gt;\">x</p><style>#b-m1 p{color:var(--om-c0,red)}</style>"
     );
 }
 
@@ -304,5 +308,105 @@ fn links_naming_another_site_are_noted() {
     assert_eq!(
         link_key("HTTPS://Evil.Example/login").as_deref(),
         Some("https://evil.example/login")
+    );
+}
+
+#[test]
+fn each_message_gets_a_dark_mode_treatment() {
+    let kind = |html: &str| match clean(html, false).dark {
+        DarkStyle::Card => "card",
+        DarkStyle::Native => "native",
+        DarkStyle::Adapt { .. } => "adapt",
+    };
+    // Personal mail of light grays and dark text is adapted.
+    assert_eq!(kind(PERSONAL), "adapt");
+    assert_eq!(kind("<p>Hi</p>"), "adapt");
+    // Mail with its own dark styles keeps them.
+    assert_eq!(kind(DARK_AWARE), "native");
+    // Designed mail stays light: colored panels, light text, images.
+    assert_eq!(kind(NEWSLETTER), "card");
+    assert_eq!(kind(LIGHT_TEXT), "card");
+    assert_eq!(kind("<div style=\"background:#0b3d91\">Hi</div>"), "card");
+    assert_eq!(
+        kind("<div style=\"background:#fff linear-gradient(red, blue)\">Hi</div>"),
+        "card"
+    );
+    assert_eq!(
+        kind("<table><tr><td background=\"https://t.example/bg.png\">Hi</td></tr></table>"),
+        "card"
+    );
+    assert_eq!(
+        kind("<div style=\"background:url(cid:x)\">Hi</div>"),
+        "card"
+    );
+    // Colors it can't read rule adapting out.
+    assert_eq!(kind("<p style=\"color:var(--brand)\">Hi</p>"), "card");
+    assert_eq!(
+        kind("<table bgcolor=\"chucknorris\"><tr><td>Hi</td></tr></table>"),
+        "card"
+    );
+    // Showing images doesn't change it.
+    assert_eq!(clean(NEWSLETTER, true).dark, clean(NEWSLETTER, false).dark);
+}
+
+#[test]
+fn adapted_mail_writes_its_colors_as_custom_properties() {
+    let cleaned = clean(PERSONAL, false);
+    let DarkStyle::Adapt { colors, attributes } = &cleaned.dark else {
+        panic!("{:?}", cleaned.dark);
+    };
+    // One custom property per color and role, in order of appearance.
+    assert_eq!(
+        colors
+            .iter()
+            .map(|(role, css)| format!("{role:?} {css}"))
+            .collect::<Vec<_>>(),
+        [
+            "Text #222222",
+            "Text #d93025",
+            "Border #dddddd",
+            "Background #f3f3f3",
+            "Border #cccccc",
+            "Text #1155cc",
+            "Text rgba(0,0,0,0.54)",
+        ]
+    );
+    assert!(
+        cleaned
+            .html
+            .contains("style=\"color:var(--om-c0,#222222);font-family:Arial,sans-serif\"")
+    );
+    assert!(
+        cleaned
+            .html
+            .contains("border-bottom:1px solid var(--om-c4,rgb(204,204,204))")
+    );
+    // Attributes keep their colors, matched in dark mode by selectors.
+    assert!(cleaned.html.contains("<table bgcolor=\"#ffffff\""));
+    assert_eq!(
+        attributes
+            .iter()
+            .map(|a| format!("{:?} {} {} {:?}", a.element, a.attribute, a.value, a.role))
+            .collect::<Vec<_>>(),
+        [
+            "None bgcolor #ffffff Background",
+            "None bgcolor #f3f3f3 Background",
+            "Some(\"font\") color #666666 Text",
+            "Some(\"hr\") color #cccccc Border",
+        ]
+    );
+    insta::assert_snapshot!(cleaned.html);
+}
+
+#[test]
+fn mail_that_is_not_adapted_keeps_its_colors_as_written() {
+    for html in [NEWSLETTER, DARK_AWARE, LIGHT_TEXT, HOSTILE] {
+        assert!(!clean(html, false).html.contains("--om-c"));
+    }
+    // Its dark rules are kept, scoped.
+    assert!(
+        clean(DARK_AWARE, false)
+            .html
+            .contains("@media (prefers-color-scheme: dark) {#b-m1{background:#121212 !important;")
     );
 }

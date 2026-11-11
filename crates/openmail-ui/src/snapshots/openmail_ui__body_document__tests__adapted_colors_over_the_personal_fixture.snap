@@ -1,0 +1,9 @@
+---
+source: crates/openmail-ui/src/body_document.rs
+expression: "css.replace('}', \"}\\n\")"
+---
+#b-m4{--om-c0:#cfcfd0;--om-c1:#e15a51;--om-c2:#363737;--om-c3:#292a2b;--om-c4:#414243;--om-c5:#4684f0;--om-c6:rgba(227,227,227,0.54)}
+#b-m4 :where([bgcolor="#ffffff" i]){background-color:#1e1f20}
+#b-m4 :where([bgcolor="#f3f3f3" i]){background-color:#292a2b}
+#b-m4 :where(font[color="#666666" i]){color:#a8a8a8}
+#b-m4 :where(hr[color="#cccccc" i]){border-color:#414243}

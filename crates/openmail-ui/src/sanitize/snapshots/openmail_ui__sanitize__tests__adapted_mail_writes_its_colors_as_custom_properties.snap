@@ -1,0 +1,16 @@
+---
+source: crates/openmail-ui/src/sanitize/tests.rs
+expression: cleaned.html
+---
+<div dir="ltr">
+<div style="color:var(--om-c0,#222222);font-family:Arial,sans-serif">Hi Bob,</div>
+<div style="color:var(--om-c0,#222222)">The numbers are in the table below. <span style="color:var(--om-c1,#d93025);font-weight:bold">Deadline is Friday.</span></div>
+<table bgcolor="#ffffff" style="border-collapse:collapse;border:1px solid var(--om-c2,#dddddd)">
+  <tbody><tr><td style="background-color:var(--om-c3,#f3f3f3);padding:4px;border-bottom:1px solid var(--om-c4,rgb(204,204,204))">Quarter</td><td bgcolor="#f3f3f3">Total</td></tr>
+  <tr><td><font color="#666666">Q3</font></td><td>1,204</td></tr>
+</tbody></table>
+<p>See <a href="https://example.com/plan" style="color:var(--om-c5,#1155cc)" rel="noopener noreferrer">the plan</a> or <a href="https://example.com/notes" rel="noopener noreferrer">the notes</a>.</p>
+<p style="color:var(--om-c6,rgba(0,0,0,0.54));font-size:12px">Sent from my phone</p>
+<hr color="#cccccc">
+<blockquote style="margin:0 0 0 0.8ex;border-left:1px solid var(--om-c4,rgb(204,204,204));padding-left:1ex">Earlier text</blockquote>
+</div>

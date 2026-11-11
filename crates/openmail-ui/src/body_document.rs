@@ -18,6 +18,8 @@ use std::fmt::Write as _;
 use time::OffsetDateTime;
 
 use crate::conversation::{BodyState, Conversation, MessageItem};
+use crate::sanitize::color::{self, Parsed, Role};
+use crate::sanitize::dark::{AttributeColor, DarkStyle};
 use crate::sanitize::scope_id;
 
 /// Content Security Policy for every body document. Nothing loads from the
@@ -295,17 +297,23 @@ fn message_section(
     match &message.body {
         BodyState::Loaded(body) => match &body.html {
             Some(cleaned) => {
-                // Mail is written for a light page: in dark mode it keeps
-                // its colors on a light card.
-                let class = if palette.dark {
-                    "om-mail om-card"
-                } else {
-                    "om-mail"
-                };
+                let scope = scope_id(message.id.as_str());
+                let mut class = "om-mail";
+                if palette.dark {
+                    match &cleaned.dark {
+                        DarkStyle::Card => class = "om-mail om-card",
+                        DarkStyle::Native => {}
+                        DarkStyle::Adapt { colors, attributes } => {
+                            let css = adapted_css(&scope, colors, attributes, palette);
+                            if !css.is_empty() {
+                                let _ = write!(html, "<style>{css}</style>");
+                            }
+                        }
+                    }
+                }
                 let _ = write!(
                     html,
-                    "<div class=\"{class}\" id=\"{}\">{}</div>",
-                    scope_id(message.id.as_str()),
+                    "<div class=\"{class}\" id=\"{scope}\">{}</div>",
                     cleaned.html
                 );
             }
@@ -325,6 +333,59 @@ fn message_section(
         }
     }
     html.push_str("</div></details>\n");
+}
+
+/// The styles adapting a message's colors to a dark `palette` (see
+/// [`DarkStyle::Adapt`]): its custom properties `--om-cN` as the adapted
+/// colors, and rules for its presentational color attributes. They add no
+/// specificity (`:where`), so the message's own rules still win as they
+/// would over the attributes.
+fn adapted_css(
+    scope: &str,
+    colors: &[(Role, String)],
+    attributes: &[AttributeColor],
+    palette: &ShellPalette,
+) -> String {
+    let rgba = |css: &str| match color::parse_value(css) {
+        Parsed::Color(color) => Some(color),
+        _ => None,
+    };
+    let (Some(page), Some(text)) = (
+        rgba(css_color(&palette.background)),
+        rgba(css_color(&palette.foreground)),
+    ) else {
+        return String::new();
+    };
+    let adapt = |role: Role, css: &str| {
+        rgba(css).map(|color| color::adapt(role, color, page, text).to_css())
+    };
+    let mut out = String::new();
+    let properties: Vec<String> = colors
+        .iter()
+        .enumerate()
+        .filter_map(|(n, (role, css))| Some(format!("--om-c{n}:{}", adapt(*role, css)?)))
+        .collect();
+    if !properties.is_empty() {
+        let _ = write!(out, "#{scope}{{{}}}", properties.join(";"));
+    }
+    for attribute in attributes {
+        let Some(color) = adapt(attribute.role, &attribute.color) else {
+            continue;
+        };
+        let property = match attribute.role {
+            Role::Background => "background-color",
+            Role::Text => "color",
+            Role::Border => "border-color",
+        };
+        let _ = write!(
+            out,
+            "#{scope} :where({}[{}=\"{}\" i]){{{property}:{color}}}",
+            attribute.element.unwrap_or_default(),
+            attribute.attribute,
+            attribute.value,
+        );
+    }
+    out
 }
 
 /// `text` escaped for HTML text and double-quoted attribute values.
@@ -489,22 +550,56 @@ mod tests {
         assert!(doc.contains("--om-link:#000000;--om-focus:#000000}"));
     }
 
-    #[test]
-    fn html_mail_sits_on_a_light_card_in_dark_mode() {
-        let message = item(
+    fn html_message(html: &str) -> MessageItem {
+        item(
             "m4",
             true,
             BodyState::Loaded(LoadedBody {
-                text: "Hi".to_owned(),
-                html: Some(clean("<p>Hi</p>")),
+                text: String::new(),
+                html: Some(clean(html)),
                 source: None,
             }),
+        )
+    }
+
+    #[test]
+    fn each_message_gets_its_dark_treatment() {
+        let doc = |html: &str, palette: &ShellPalette| {
+            conversation_document(&conversation(vec![html_message(html)]), palette, dates)
+        };
+        let designed = "<div style=\"background:#0b3d91;color:#fff\">Sale</div>";
+        let own = "<style>@media (prefers-color-scheme: dark){p{color:#eee}}</style><p>Hi</p>";
+        let personal = "<p style=\"color:#222\">Hi</p>";
+        // Designed mail keeps its light colors on a light card.
+        assert!(doc(designed, &dark()).contains("<div class=\"om-mail om-card\" id=\"b-m4\">"));
+        // Mail with its own dark styles is shown on the dark page.
+        assert!(doc(own, &dark()).contains("<div class=\"om-mail\" id=\"b-m4\">"));
+        // Personal mail has its colors adapted.
+        let adapted = doc(personal, &dark());
+        assert!(
+            adapted.contains(
+                "<style>#b-m4{--om-c0:#cfcfd0}</style><div class=\"om-mail\" id=\"b-m4\">"
+            )
         );
-        let doc = conversation_document(&conversation(vec![message.clone()]), &dark(), dates);
-        assert!(doc.contains("<div class=\"om-mail om-card\" id=\"b-m4\">"));
-        let doc =
-            conversation_document(&conversation(vec![message]), &ShellPalette::light(), dates);
-        assert!(doc.contains("<div class=\"om-mail\" id=\"b-m4\">"));
+        // The light theme shows each as it is.
+        for html in [designed, own, personal] {
+            let light = doc(html, &ShellPalette::light());
+            assert!(
+                light.contains("<div class=\"om-mail\" id=\"b-m4\">"),
+                "{html}"
+            );
+            assert!(!light.contains("--om-c0:"), "{html}");
+        }
+    }
+
+    #[test]
+    fn adapted_colors_over_the_personal_fixture() {
+        let cleaned = clean(include_str!("sanitize/fixtures/personal.html"));
+        let DarkStyle::Adapt { colors, attributes } = &cleaned.dark else {
+            panic!("{:?}", cleaned.dark);
+        };
+        let css = adapted_css("b-m4", colors, attributes, &dark());
+        insta::assert_snapshot!(css.replace('}', "}\n"));
     }
 
     #[test]
@@ -619,7 +714,7 @@ mod tests {
         let cleaned = clean(SAMPLE_NEWSLETTER).html;
         assert!(cleaned.contains("<table"));
         assert!(cleaned.contains("cellpadding=\"0\""));
-        assert!(cleaned.contains("style=\"background:#f2f2f7\""));
+        assert!(cleaned.contains("style=\"background:var(--om-c0,#f2f2f7)\""));
         assert!(cleaned.contains("<img src=\"data:image/"));
         assert!(cleaned.contains("href=\"https://"));
         assert!(!cleaned.contains("<!--"), "comments are dropped");
