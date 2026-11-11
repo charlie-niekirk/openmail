@@ -5737,6 +5737,8 @@ dependencies = [
  "gpui-pre",
  "gpui-webview",
  "lb-wry",
+ "openmail-core",
+ "openmail-sync",
 ]
 
 [[package]]

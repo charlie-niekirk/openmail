@@ -2,11 +2,13 @@
 
 mod main_window;
 mod message_body;
+mod state;
 
 pub use main_window::{MainWindow, main_window_options};
 pub use message_body::{
     BODY_CSP, MessageBodyView, SAMPLE_NEWSLETTER, allows_navigation, body_document,
 };
+pub use state::{AppState, Changed, Session, SyncState};
 
 use gpui::{App, AppContext as _, Bounds, WindowHandle};
 use gpui_component::{Root, Theme};
