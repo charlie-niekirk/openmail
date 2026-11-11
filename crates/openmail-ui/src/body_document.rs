@@ -155,6 +155,9 @@ fn css_color(color: &str) -> &str {
 /// of overflowing its box (`.om-thread` is at least its content's
 /// min-content width), so the document itself scrolls sideways, from
 /// anywhere in it, rather than a scroller at the bottom of the message.
+/// A header's recipients or snippet line takes no width of its own
+/// (`width: 0`, then it grows), so a long one is cut off with an ellipsis
+/// rather than widening the thread.
 /// Message CSS outranks these defaults (its selectors start with an ID).
 ///
 /// In dark mode a message that can't be adapted keeps its light colors on a
@@ -175,8 +178,8 @@ box-sizing:border-box}\
 .om-header-row{display:flex;align-items:baseline;gap:12px}\
 .om-sender{flex:none;max-width:220px;font-weight:600;overflow:hidden;\
 text-overflow:ellipsis;white-space:nowrap}\
-.om-line{flex:1;min-width:0;color:var(--om-muted);overflow:hidden;text-overflow:ellipsis;\
-white-space:nowrap}\
+.om-line{flex:1 1 0;width:0;min-width:0;color:var(--om-muted);overflow:hidden;\
+text-overflow:ellipsis;white-space:nowrap}\
 .om-date{flex:none;color:var(--om-muted);font-size:12px}\
 .om-message:not([open]) .om-recipients,.om-message[open] .om-snippet{display:none}\
 .om-participants{padding:0 16px 12px;color:var(--om-muted);font-size:13px}\
@@ -435,6 +438,8 @@ mod tests {
         // …and what can't shrink widens the thread, so the document scrolls
         // sideways rather than a scroller inside the message.
         assert!(doc.contains("min-width:min-content"));
+        // A long snippet doesn't count towards that width.
+        assert!(doc.contains(".om-line{flex:1 1 0;width:0;min-width:0;"));
         assert!(!doc.contains("overflow-x"));
         assert!(doc.contains(
             ".om-body{padding:12px 16px 16px;border-top:1px solid var(--om-border);contain:paint}"
