@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use openmail_gmail::api::{self, QuotaKind};
+use openmail_gmail::auth::AuthError;
 
 /// A sync result.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -79,5 +80,49 @@ impl Error {
             | Self::Runtime(_)
             | Self::ServiceStopped => false,
         }
+    }
+
+    /// Whether the account has to sign in again before syncing can resume:
+    /// its refresh token is missing, or Google revoked or expired it.
+    pub fn requires_sign_in(&self) -> bool {
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(err) = source {
+            if err
+                .downcast_ref::<AuthError>()
+                .is_some_and(AuthError::requires_sign_in)
+            {
+                return true;
+            }
+            source = err.source();
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn token_error(err: AuthError) -> Error {
+        Error::Gmail(api::Error::Token(Box::new(err)))
+    }
+
+    #[test]
+    fn revoked_or_missing_tokens_require_sign_in() {
+        assert!(token_error(AuthError::InvalidGrant("revoked".to_owned())).requires_sign_in());
+        assert!(
+            token_error(AuthError::NotSignedIn("ada@example.com".to_owned())).requires_sign_in()
+        );
+        let shared = Error::Shared(Arc::new(token_error(AuthError::MissingRefreshToken)));
+        assert!(shared.requires_sign_in());
+    }
+
+    #[test]
+    fn other_errors_do_not_require_sign_in() {
+        assert!(!token_error(AuthError::TokenEndpoint("500".to_owned())).requires_sign_in());
+        assert!(!Error::Cancelled.requires_sign_in());
+        assert!(!Error::ServiceStopped.requires_sign_in());
     }
 }
