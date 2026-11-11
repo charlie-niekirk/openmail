@@ -11,6 +11,7 @@ mod bridge;
 mod main_window;
 mod message_body;
 mod onboarding;
+mod onboarding_view;
 mod state;
 mod theme;
 mod typography;
