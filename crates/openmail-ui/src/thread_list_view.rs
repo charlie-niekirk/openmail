@@ -21,6 +21,7 @@ use time::{OffsetDateTime, UtcOffset};
 
 use crate::assets::IMPORTANCE_ICON;
 use crate::bridge::{AppEvent, AppModel};
+use crate::sidebar::parse_hex_color;
 use crate::state::Session;
 use crate::thread_list::{LabelChip, Query, QueryKind, ThreadList, ThreadRow};
 use crate::typography::{TextRole, TypographyExt as _};
@@ -360,13 +361,9 @@ fn chip(text: String, color: Option<&LabelColor>, cx: &App) -> gpui::Div {
         .child(text)
 }
 
-/// A `#rrggbb` color.
+/// A Gmail label color such as `#16a765`.
 fn hex(color: &str) -> Option<Hsla> {
-    let digits = color.strip_prefix('#')?;
-    if digits.len() != 6 {
-        return None;
-    }
-    u32::from_str_radix(digits, 16).ok().map(|n| rgb(n).into())
+    parse_hex_color(color).map(|n| rgb(n).into())
 }
 
 /// `date` in the local time zone at that date (so dates across a daylight
