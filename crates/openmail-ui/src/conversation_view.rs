@@ -11,8 +11,8 @@ use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::spinner::Spinner;
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
-use openmail_core::{Label, LabelColor, MessageId, SystemLabel, ThreadId};
-use openmail_store::{ThreadDetail, ThreadView};
+use openmail_core::{Label, LabelColor, MessageId, ThreadId};
+use openmail_store::ThreadDetail;
 use time::OffsetDateTime;
 
 use crate::bridge::{AppEvent, AppModel};
@@ -55,9 +55,6 @@ pub struct ConversationView {
     account: Option<String>,
     /// Loading the thread (replacing it cancels the previous load).
     load: Option<Task<()>>,
-    /// Finding a thread to open while there is no thread list (see
-    /// [`Self::open_newest_inbox_thread`]).
-    stopgap: Option<Task<()>>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -74,7 +71,6 @@ impl ConversationView {
             state: State::Empty,
             account: None,
             load: None,
-            stopgap: None,
             _subscriptions: [events, status],
         };
         view.status_changed(cx);
@@ -88,6 +84,16 @@ impl ConversationView {
         }
         self.state = State::Loading(id);
         self.reload(cx);
+        cx.notify();
+    }
+
+    /// Closes the open thread, if any.
+    pub fn close(&mut self, cx: &mut Context<'_, Self>) {
+        if matches!(self.state, State::Empty) {
+            return;
+        }
+        self.state = State::Empty;
+        self.load = None;
         cx.notify();
     }
 
@@ -112,45 +118,16 @@ impl ConversationView {
             self.account = account;
             self.state = State::Empty;
             self.load = None;
-            self.stopgap = None;
             cx.notify();
         }
-        match self.state {
-            State::Empty => self.open_newest_inbox_thread(cx),
-            State::Loading(_) if self.load.is_none() => self.reload(cx),
-            _ => {}
+        if matches!(self.state, State::Loading(_)) && self.load.is_none() {
+            self.reload(cx);
         }
-    }
-
-    /// Stopgap until the thread list (3.4) and the layout (3.6) select
-    /// threads: opens the newest Inbox thread once there is one.
-    fn open_newest_inbox_thread(&mut self, cx: &mut Context<'_, Self>) {
-        if self.stopgap.is_some() {
-            return;
-        }
-        let Some(mail) = self.model.read(cx).mail().cloned() else {
-            return;
-        };
-        self.stopgap = Some(cx.spawn(async move |this, cx| {
-            let page = mail
-                .thread_page(ThreadView::Label(SystemLabel::Inbox.id()), None, 1)
-                .await;
-            this.update(cx, |this, cx| {
-                this.stopgap = None;
-                let newest = page.ok().and_then(|page| page.threads.into_iter().next());
-                if let (State::Empty, Some(newest)) = (&this.state, newest) {
-                    this.open_thread(newest.id, cx);
-                }
-            })
-            .ok();
-        }));
     }
 
     /// Queries the open thread (and the labels, for its chips) again.
     fn reload(&mut self, cx: &mut Context<'_, Self>) {
         let Some(id) = self.state.thread_id().cloned() else {
-            // Nothing open yet: maybe the first Inbox thread just synced.
-            self.open_newest_inbox_thread(cx);
             return;
         };
         let Some(mail) = self.model.read(cx).mail().cloned() else {

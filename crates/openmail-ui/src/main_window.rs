@@ -1,6 +1,6 @@
 //! The main window: the frame (a transparent macOS title bar showing the
 //! account and sync status) around either the mailbox (the sidebar, the
-//! thread list, then the reading pane, still a placeholder), the onboarding
+//! thread list, then the reading pane, wired together by [`panes`]), the onboarding
 //! screens (sign-in, then a new account's first sync), or a notice when the
 //! mailbox could not be opened.
 
@@ -14,9 +14,10 @@ use crate::bridge::AppModel;
 use crate::conversation_view::ConversationView;
 use crate::onboarding::{Setup, SignIn};
 use crate::onboarding_view::{setup_screen, sign_in_screen};
-use crate::sidebar_view::SidebarView;
+use crate::panes::{self, PaneCommand};
+use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::state::{AppState, Session};
-use crate::thread_list_view::ThreadListView;
+use crate::thread_list_view::{ThreadListEvent, ThreadListView};
 use crate::typography::{TextRole, TypographyExt as _};
 
 /// The window title shown by the OS (Window menu, Mission Control, task bar).
@@ -86,22 +87,51 @@ pub struct MainWindow {
     sidebar: Entity<SidebarView>,
     thread_list: Entity<ThreadListView>,
     conversation: Entity<ConversationView>,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 4],
 }
 
 impl MainWindow {
     /// Creates the view. It re-renders when the session or sync status
-    /// changes, and keeps the theme in step with the system appearance.
+    /// changes, keeps the theme in step with the system appearance, and
+    /// passes each pane's selection on to the next.
     pub fn new(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let model = AppModel::global(cx);
         let appearance = crate::theme::follow_system_appearance(window, cx);
         let status = cx.observe(&model, |_, _, cx| cx.notify());
-        Self {
+        let sidebar = cx.new(SidebarView::new);
+        let thread_list = cx.new(ThreadListView::new);
+        let conversation = cx.new(ConversationView::new);
+        let mailbox = cx.subscribe(&sidebar, |this, _, event: &SidebarEvent, cx| {
+            this.apply(panes::on_sidebar(event), cx);
+        });
+        let thread = cx.subscribe(&thread_list, |this, _, event: &ThreadListEvent, cx| {
+            this.apply(panes::on_thread_list(event), cx);
+        });
+        let mut this = Self {
             model,
-            sidebar: cx.new(SidebarView::new),
-            thread_list: cx.new(ThreadListView::new),
-            conversation: cx.new(ConversationView::new),
-            _subscriptions: [appearance, status],
+            sidebar,
+            thread_list,
+            conversation,
+            _subscriptions: [appearance, status, mailbox, thread],
+        };
+        // Start the list on whatever the sidebar selected.
+        let view = panes::thread_view(this.sidebar.read(cx).selected());
+        this.apply(vec![PaneCommand::ShowThreads(view)], cx);
+        this
+    }
+
+    /// Carries out what one pane's selection asks of the others.
+    fn apply(&mut self, commands: Vec<PaneCommand>, cx: &mut Context<'_, Self>) {
+        for command in commands {
+            match command {
+                PaneCommand::ShowThreads(view) => self
+                    .thread_list
+                    .update(cx, |list, cx| list.set_view(view, cx)),
+                PaneCommand::OpenThread(id) => self
+                    .conversation
+                    .update(cx, |conversation, cx| conversation.open_thread(id, cx)),
+                PaneCommand::CloseThread => self.conversation.update(cx, ConversationView::close),
+            }
         }
     }
 
