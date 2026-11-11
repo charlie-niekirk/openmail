@@ -446,6 +446,33 @@ refresh token), `AppState` returns to the sign-in screen with a notice naming
 the account and ignores that service's remaining events, and `AppModel` shuts
 the service down. Signing in again starts a new one.
 
+### Conversation view
+
+The reading pane is `ConversationView` (`conversation_view.rs`) around the
+`Conversation` view-model (`conversation.rs`), which has no GPUI types and is
+tested directly. `ConversationView::open_thread(ThreadId)` loads the thread
+(`MailHandle::thread`) and the labels, then shows the subject, label chips
+(Inbox, Spam and Trash, then user labels with their Gmail colors) and the
+message count, and the messages oldest first, the way Gmail does:
+
+- Unread messages and the latest one start expanded; the rest collapse to
+  sender, snippet and date. Clicking a message toggles it.
+- An expanded message shows the sender, a short "to me, Bob" line, the full
+  From, To, Cc and date, and its body. Bodies load lazily through
+  `MailHandle::body` when a message is first expanded, with a loading state.
+  Until the HTML view (Phase 4), the body is its plain text, or text
+  converted from the HTML when there is none (`openmail_mime::html_to_text`).
+- `ThreadsChanged` and `LabelsChanged` re-query the open thread, keeping what
+  the user expanded and the bodies already loaded; new messages get the
+  defaults. `BodyFetched` retries a body whose fetch had failed.
+
+Dates are shown in local time. `time` reads the local UTC offset only while
+the process has one thread, so the app captures it first thing in `main`
+(`capture_local_offset`).
+
+Until the thread list selects threads, the view opens the newest Inbox
+thread on its own.
+
 ### Theme, typography and window frame
 
 The light and dark themes are a `gpui-component` theme set embedded from
