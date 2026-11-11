@@ -446,6 +446,33 @@ refresh token), `AppState` returns to the sign-in screen with a notice naming
 the account and ignores that service's remaining events, and `AppModel` shuts
 the service down. Signing in again starts a new one.
 
+### Sidebar
+
+The sidebar's view-model, `sidebar::Sidebar`, holds the labels, their thread
+counts, the collapsed groups and the selected `Mailbox` (a label, or All Mail,
+which is not one). `Sidebar::rows` flattens it into what the view draws, in
+Gmail web's order:
+
+- The system mailboxes: Inbox, Starred, Snoozed (only if the account lists
+  `SNOOZED`), Important, Sent, Drafts, All Mail, Spam, Trash. They show the
+  counts Gmail shows: unread threads for Inbox, Important and Spam, every draft
+  for Drafts, nothing for the rest.
+- "Categories", collapsed at first, with Social, Updates, Forums and
+  Promotions (Primary is the rest of the Inbox and is not listed).
+- "Labels": the user labels as a tree split on `/`, sorted by name ignoring
+  case, with their Gmail color and unread count. A label nests under its
+  nearest listed ancestor, or is a root named by its full path if there is
+  none. Gmail's label-list visibility applies (hidden, or shown only while
+  unread), except to the selected label. Any label with nested labels
+  collapses; collapse state lasts while the app runs.
+
+`SidebarView` queries `labels` and `label_counts` through the `MailHandle`
+when the service starts and again on every `LabelsChanged` or
+`ThreadsChanged` (both are quick store reads), and emits
+`SidebarEvent::Selected(Mailbox)` when the selection changes, including the
+fallback to the Inbox when the selected label is deleted. The Inbox is
+selected at start.
+
 ### Theme, typography and window frame
 
 The light and dark themes are a `gpui-component` theme set embedded from
