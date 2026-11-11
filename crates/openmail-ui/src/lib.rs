@@ -41,7 +41,9 @@ pub use pane_sizes::{
     WidthRange, layout_path,
 };
 pub use panes::{PaneCommand, on_sidebar, on_thread_list, thread_view};
-pub use sidebar::{Counts, Group, Mailbox, MailboxRow, Row, SNOOZED, Sidebar, parse_hex_color};
+pub use sidebar::{
+    Counts, Group, LabelsState, Mailbox, MailboxRow, Row, SNOOZED, Sidebar, parse_hex_color,
+};
 pub use sidebar_view::{SidebarEvent, SidebarView};
 pub use state::{AppState, Changed, Session, SyncState};
 pub use theme::{Themes, follow_system_appearance};
