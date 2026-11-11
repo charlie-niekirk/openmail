@@ -86,8 +86,8 @@ insta = "1.49.0"
 ammonia = "4.2.4"
 # Filtering and scoping message CSS. The version ammonia already uses.
 cssparser = "0.38.0"
-# macOS only: letting the message webview set its own cursor (turning off the
-# window's AppKit cursor rects). The versions wry and GPUI already use.
+# macOS only: letting the message webview set its own cursor (dropping GPUI's
+# AppKit cursor rects over it). The versions wry and GPUI already use.
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "std",

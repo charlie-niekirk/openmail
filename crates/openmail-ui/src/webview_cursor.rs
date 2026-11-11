@@ -1,12 +1,15 @@
 //! Letting the reading pane's webview show its own cursor: a pointing hand
 //! over links, an I-beam over text.
 //!
-//! On macOS, GPUI covers its whole view with one AppKit cursor rect in GPUI's
-//! current cursor style (`resetCursorRects`), and AppKit applies it again as
-//! the mouse moves, also over the webview, a subview whose cursor WebKit sets
-//! directly. So while the pointer is over the visible webview, the window's
-//! cursor rects are turned off; once it leaves (or the webview hides or goes
-//! away) they are turned back on and GPUI's cursor comes back.
+//! On macOS, WebKit sets the cursor the page asks for only while no AppKit
+//! cursor rect is in force (`PageClientImpl::setCursor` returns early while
+//! `[NSApp _cursorRectCursor]` is set). GPUI covers its whole view with one
+//! cursor rect in its current style (`resetCursorRects`), and the webview
+//! is a subview of it, so WebKit never got to set a cursor and the arrow
+//! stayed. While the pointer is over the visible webview, GPUI's view drops
+//! its cursor rects, again on every move in case AppKit or GPUI rebuilt
+//! them; once the pointer leaves (or the webview hides or goes away) they
+//! are rebuilt, and GPUI's cursor comes back.
 //!
 //! Elsewhere this does nothing: WebView2 and WebKitGTK set their own cursor
 //! in their child windows.
@@ -19,7 +22,7 @@ use gpui::{AnyElement, IntoElement as _};
 #[derive(Default)]
 pub struct WebviewCursor {
     #[cfg(target_os = "macos")]
-    taken: std::rc::Rc<std::cell::RefCell<Option<mac::CursorRectsOff>>>,
+    held: std::rc::Rc<std::cell::RefCell<Option<mac::CursorRectsDropped>>>,
 }
 
 impl WebviewCursor {
@@ -32,24 +35,25 @@ impl WebviewCursor {
         if !visible {
             self.release();
         }
-        let taken = self.taken.clone();
+        let held = self.held.clone();
         canvas(
             |_, _, _| {},
             move |bounds, (), window, _| {
-                let on_move = taken.clone();
+                let on_move = held.clone();
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, _| {
                     if phase != DispatchPhase::Capture {
                         return;
                     }
-                    let over = visible && bounds.contains(&event.position);
-                    let mut taken = on_move.borrow_mut();
-                    if over && taken.is_none() {
-                        *taken = mac::CursorRectsOff::new(window);
-                    } else if !over {
-                        taken.take();
+                    let mut held = on_move.borrow_mut();
+                    if !visible || !bounds.contains(&event.position) {
+                        held.take();
+                    } else if let Some(held) = held.as_ref() {
+                        held.drop_again();
+                    } else {
+                        *held = mac::CursorRectsDropped::new(window);
                     }
                 });
-                let on_exit = taken.clone();
+                let on_exit = held.clone();
                 window.on_mouse_event(move |_: &MouseExitEvent, _, _, _| {
                     on_exit.borrow_mut().take();
                 });
@@ -71,7 +75,7 @@ impl WebviewCursor {
     /// Gives the cursor back to GPUI (the webview hid or is going away).
     pub fn release(&self) {
         #[cfg(target_os = "macos")]
-        self.taken.borrow_mut().take();
+        self.held.borrow_mut().take();
     }
 }
 
@@ -79,30 +83,37 @@ impl WebviewCursor {
 mod mac {
     use objc2::Message as _;
     use objc2::rc::Retained;
-    use objc2_app_kit::{NSView, NSWindow};
+    use objc2_app_kit::NSView;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    /// A window whose cursor rects are off until this is dropped.
-    pub struct CursorRectsOff {
-        window: Retained<NSWindow>,
-        /// GPUI's view, whose cursor rect comes back.
+    /// GPUI's view without its cursor rects, until this is dropped.
+    pub struct CursorRectsDropped {
         view: Retained<NSView>,
     }
 
-    impl CursorRectsOff {
-        /// Turns `window`'s cursor rects off, if it is an AppKit window.
+    impl CursorRectsDropped {
+        /// Drops the cursor rects of GPUI's view in `window`, if it is an
+        /// AppKit window.
         pub fn new(window: &gpui::Window) -> Option<Self> {
-            let view = gpui_view(window)?;
-            let window = view.window()?;
-            window.disableCursorRects();
-            Some(Self { window, view })
+            let dropped = Self {
+                view: gpui_view(window)?,
+            };
+            dropped.drop_again();
+            Some(dropped)
+        }
+
+        /// Drops them again, in case they were rebuilt.
+        pub fn drop_again(&self) {
+            self.view.discardCursorRects();
         }
     }
 
-    impl Drop for CursorRectsOff {
+    impl Drop for CursorRectsDropped {
         fn drop(&mut self) {
-            self.window.enableCursorRects();
-            self.window.invalidateCursorRectsForView(&self.view);
+            // AppKit asks GPUI's view for its cursor rect again.
+            if let Some(window) = self.view.window() {
+                window.invalidateCursorRectsForView(&self.view);
+            }
         }
     }
 
