@@ -119,7 +119,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 - [x] **3.5 Conversation view** ∥ — `feat/3.5-conversation-view`
   - Native header, collapsed and expanded messages, participants, label chips.
   - Plain-text body for now.
-- [ ] **3.6 Layout** — `feat/3.6-layout`
+- [x] **3.6 Layout** — `feat/3.6-layout`
   - Resizable 3-pane layout with persisted sizes.
   - Empty, loading, error and offline states.
 
