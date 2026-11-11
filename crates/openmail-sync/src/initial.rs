@@ -9,7 +9,7 @@ use openmail_gmail::api::{
     self, ApiThread, LearnedBudget, ListRequest, MAX_BATCH_SIZE, MessageFormat, ThreadFormat,
 };
 use openmail_mime::ParsedMessage;
-use openmail_store::{MessageBody, QuotaBudget, Store, SyncState};
+use openmail_store::{InlinePart, MessageBody, QuotaBudget, Store, SyncState};
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 use tokio_util::sync::CancellationToken;
@@ -781,6 +781,7 @@ pub(crate) fn parse_body(
     match ParsedMessage::parse_base64url(raw) {
         Ok(parsed) => Some(MessageBody {
             text: parsed.plain_text(),
+            inline: inline_images(&parsed),
             html: parsed.html,
             fetched_at,
         }),
@@ -789,6 +790,65 @@ pub(crate) fn parse_body(
             None
         }
     }
+}
+
+/// The most inline image data kept for one body. Past it, the remaining
+/// `cid:` images are left out (they show as missing images).
+const MAX_INLINE_BYTES: usize = 10 * 1024 * 1024;
+
+/// The images `parsed`'s HTML references with `cid:` URLs, to keep with its
+/// body: parts with a `Content-ID` the HTML mentions whose type (declared or,
+/// for a generic type, sniffed) is an image, up to [`MAX_INLINE_BYTES`].
+fn inline_images(parsed: &ParsedMessage) -> Vec<InlinePart> {
+    let Some(html) = parsed.html.as_deref().filter(|html| html.contains("cid:")) else {
+        return Vec::new();
+    };
+    let candidates = parsed.inline.values().chain(&parsed.attachments);
+    let mut seen = HashSet::new();
+    let mut total = 0;
+    let mut images = Vec::new();
+    for part in candidates {
+        let Some(content_id) = part.content_id.as_deref() else {
+            continue;
+        };
+        if !html.contains(content_id) || !seen.insert(content_id) {
+            continue;
+        }
+        let Some(mime_type) = image_type(&part.mime_type, part.bytes()) else {
+            continue;
+        };
+        total += part.size();
+        if total > MAX_INLINE_BYTES {
+            tracing::debug!(content_id, "inline images past the size limit are left out");
+            break;
+        }
+        images.push(InlinePart {
+            content_id: content_id.to_owned(),
+            mime_type,
+            data: part.bytes().to_vec(),
+        });
+    }
+    images
+}
+
+/// The image type of a part declared as `mime_type`: the declared type if it
+/// is an image, or else the type its first bytes show.
+fn image_type(mime_type: &str, data: &[u8]) -> Option<String> {
+    if mime_type.starts_with("image/") {
+        return Some(mime_type.to_owned());
+    }
+    let sniffed = if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        return None;
+    };
+    Some(sniffed.to_owned())
 }
 
 /// Saves `checkpoint` as the place to resume from or, once it is
@@ -925,6 +985,58 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+
+    #[test]
+    fn bodies_keep_the_inline_images_their_html_references() {
+        let raw = include_bytes!("../../openmail-mime/tests/fixtures/newsletter-cid.eml");
+        let raw = openmail_mime::encode_base64url(raw);
+        let fetched_at = datetime!(2026-11-10 12:00 UTC);
+        let body = parse_body(&MessageId::new("m"), Some(&raw), fetched_at).unwrap();
+        let parts: Vec<(&str, &str)> = body
+            .inline
+            .iter()
+            .map(|part| (part.content_id.as_str(), part.mime_type.as_str()))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("chart.gif", "image/gif"),
+                ("logo@news.example.com", "image/gif")
+            ]
+        );
+        assert!(body.inline[1].data.starts_with(b"GIF89a"));
+    }
+
+    #[test]
+    fn unreferenced_and_non_image_parts_are_not_kept() {
+        let raw = "From: a@example.com\r\n\
+            Content-Type: multipart/related; boundary=\"b\"\r\n\r\n\
+            --b\r\nContent-Type: text/html\r\n\r\n\
+            <img src=\"cid:png@x\"><img src=\"cid:doc@x\">\r\n\
+            --b\r\nContent-Type: application/octet-stream\r\n\
+            Content-ID: <png@x>\r\nContent-Transfer-Encoding: base64\r\n\r\n\
+            iVBORw0KGgoAAAA=\r\n\
+            --b\r\nContent-Type: application/pdf\r\n\
+            Content-ID: <doc@x>\r\n\r\n%PDF-1.4\r\n\
+            --b\r\nContent-Type: image/gif\r\n\
+            Content-ID: <unused@x>\r\n\r\nGIF89a\r\n\
+            --b--\r\n";
+        let raw = openmail_mime::encode_base64url(raw.as_bytes());
+        let body = parse_body(
+            &MessageId::new("m"),
+            Some(&raw),
+            datetime!(2026-11-10 12:00 UTC),
+        )
+        .unwrap();
+        // The generic part is sniffed as a PNG; the PDF and the image the HTML
+        // doesn't mention are left out.
+        let parts: Vec<(&str, &str)> = body
+            .inline
+            .iter()
+            .map(|part| (part.content_id.as_str(), part.mime_type.as_str()))
+            .collect();
+        assert_eq!(parts, [("png@x", "image/png")]);
+    }
 
     #[test]
     fn cutoff_resolves_to_unix_seconds() {

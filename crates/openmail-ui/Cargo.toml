@@ -11,7 +11,9 @@ publish.workspace = true
 
 [dependencies]
 ammonia.workspace = true
+base64.workspace = true
 chrono.workspace = true
+cssparser.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 gpui-kit-assets.workspace = true
@@ -20,13 +22,20 @@ openmail-core = { path = "../openmail-core" }
 openmail-mime = { path = "../openmail-mime" }
 openmail-store = { path = "../openmail-store" }
 openmail-sync = { path = "../openmail-sync" }
+open.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 tracing.workspace = true
+url.workspace = true
 wry.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+raw-window-handle.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

@@ -9,7 +9,10 @@
 //! sheet is open (the native view would cover it) and dropped on sign-out.
 //!
 //! JavaScript is off, storage is incognito, and the webview may only navigate
-//! to a document this view is loading. See "Webview embedding" in
+//! to a document this view is loading. A click on an `http(s):` or `mailto:`
+//! link is cancelled and reported as a [`LinkClicked`] event, for the
+//! reading pane to open outside the webview. While the pointer is over it,
+//! the webview shows its own cursor ([`WebviewCursor`]). See "Webview embedding" in
 //! `docs/ARCHITECTURE.md` for the platform findings.
 
 use std::cell::Cell;
@@ -17,13 +20,15 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Task, Window, div,
+    AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Task, Window, div,
 };
 use gpui_component::WindowExt as _;
 use gpui_webview::WebView;
 use tokio::sync::mpsc;
 use wry::{NewWindowResponse, PageLoadEvent, WebViewBuilder};
+
+use crate::webview_cursor::WebviewCursor;
 
 /// How long the previous document stays up while the next one is prepared.
 const HOLD: Duration = Duration::from_millis(200);
@@ -36,11 +41,24 @@ const REVEAL_TIMEOUT: Duration = Duration::from_millis(400);
 /// view is loading (`loading`): `load_html` loads at `about:blank` on WebKit
 /// and as a `data:text/html` URL on WebView2. It may also follow links to
 /// anchors within the document. Everything else, link clicks included, is
-/// cancelled; PR 4.2 opens links in the system browser.
+/// cancelled (links are opened outside the webview: [`link_target`]).
 pub fn allows_navigation(url: &str, loading: bool) -> bool {
     let document = url == "about:blank" || url.starts_with("data:text/html");
     (document && loading) || url.starts_with("about:blank#")
 }
+
+/// The link a cancelled navigation to `url` should open outside the
+/// webview: an `http(s):` or `mailto:` URL, normalized. Anything else (the
+/// sanitizer drops other links) is ignored.
+pub fn link_target(url: &str) -> Option<String> {
+    let url = url::Url::parse(url).ok()?;
+    matches!(url.scheme(), "http" | "https" | "mailto").then(|| url.into())
+}
+
+/// The user clicked a link to this URL (from [`link_target`]) in the
+/// document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkClicked(pub String);
 
 /// The webview, once there has been something to show.
 enum Web {
@@ -71,6 +89,11 @@ pub struct MessageBodyView {
     /// Tells this view when a page has finished loading.
     page_loads: mpsc::UnboundedSender<()>,
     _page_loads: Task<()>,
+    /// Tells this view which links were clicked.
+    links: mpsc::UnboundedSender<String>,
+    _links: Task<()>,
+    /// Gives the webview the cursor while the pointer is over it.
+    cursor: WebviewCursor,
     /// WebView2's user data folder, kept alive with the webview.
     #[cfg(windows)]
     _context: Option<wry::WebContext>,
@@ -86,6 +109,14 @@ impl MessageBodyView {
                 }
             }
         });
+        let (links, mut clicked) = mpsc::unbounded_channel();
+        let listen_links = cx.spawn(async move |this, cx| {
+            while let Some(url) = clicked.recv().await {
+                if this.update(cx, |_, cx| cx.emit(LinkClicked(url))).is_err() {
+                    break;
+                }
+            }
+        });
         Self {
             web: Web::NotCreated,
             document: None,
@@ -96,6 +127,9 @@ impl MessageBodyView {
             hold: None,
             page_loads,
             _page_loads: listen,
+            links,
+            _links: listen_links,
+            cursor: WebviewCursor::default(),
             #[cfg(windows)]
             _context: None,
         }
@@ -135,6 +169,7 @@ impl MessageBodyView {
         if let Web::Ready(webview) = &self.web {
             let _ = webview.read(cx).set_visible(false);
         }
+        self.cursor.release();
         cx.notify();
     }
 
@@ -187,7 +222,12 @@ impl MessageBodyView {
         #[cfg(not(windows))]
         let builder = WebViewBuilder::new();
 
-        let builder = harden(builder, self.loading.clone(), self.page_loads.clone());
+        let builder = harden(
+            builder,
+            self.loading.clone(),
+            self.page_loads.clone(),
+            self.links.clone(),
+        );
         let built = WebView::build(builder, window, cx);
         #[cfg(windows)]
         {
@@ -229,13 +269,21 @@ impl MessageBodyView {
 /// The spike's hardening: JavaScript off, incognito, no devtools, autoplay,
 /// clipboard, zoom keys, swipe navigation or new windows, and navigation
 /// only to a document being loaded (`loading`). `page_loads` hears each page
-/// finish loading, which also clears `loading`.
+/// finish loading, which also clears `loading`; `links` hears the links
+/// clicked (or opened in a new window), which are cancelled.
 fn harden<'a>(
     builder: WebViewBuilder<'a>,
     loading: Rc<Cell<bool>>,
     page_loads: mpsc::UnboundedSender<()>,
+    links: mpsc::UnboundedSender<String>,
 ) -> WebViewBuilder<'a> {
     let loaded = loading.clone();
+    let new_window_links = links.clone();
+    let follow = move |url: &str, links: &mpsc::UnboundedSender<String>| {
+        if let Some(target) = link_target(url) {
+            let _ = links.send(target);
+        }
+    };
     builder
         .with_javascript_disabled()
         .with_incognito(true)
@@ -244,8 +292,17 @@ fn harden<'a>(
         .with_clipboard(false)
         .with_hotkeys_zoom(false)
         .with_back_forward_navigation_gestures(false)
-        .with_navigation_handler(move |url| allows_navigation(&url, loading.get()))
-        .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
+        .with_navigation_handler(move |url| {
+            let allowed = allows_navigation(&url, loading.get());
+            if !allowed {
+                follow(&url, &links);
+            }
+            allowed
+        })
+        .with_new_window_req_handler(move |url, _| {
+            follow(&url, &new_window_links);
+            NewWindowResponse::Deny
+        })
         .with_on_page_load_handler(move |event, _| {
             if matches!(event, PageLoadEvent::Finished) {
                 loaded.set(false);
@@ -266,6 +323,8 @@ fn webview_data_dir() -> Option<std::path::PathBuf> {
         }
     }
 }
+
+impl EventEmitter<LinkClicked> for MessageBodyView {}
 
 impl Render for MessageBodyView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -294,7 +353,11 @@ impl Render for MessageBodyView {
         if native.visible() != visible {
             let _ = native.set_visible(visible);
         }
-        div().size_full().child(webview)
+        div()
+            .relative()
+            .size_full()
+            .child(webview)
+            .child(self.cursor.tracker(visible))
     }
 }
 
@@ -311,6 +374,29 @@ mod tests {
         ));
         assert!(!allows_navigation("about:blank", false));
         assert!(!allows_navigation("data:text/html,<p>phish</p>", false));
+    }
+
+    #[test]
+    fn only_web_and_mail_links_open_outside() {
+        assert_eq!(
+            link_target("https://Example.com/a b?x=1#y").as_deref(),
+            Some("https://example.com/a%20b?x=1#y")
+        );
+        assert_eq!(
+            link_target("mailto:ada@example.com?subject=Hi").as_deref(),
+            Some("mailto:ada@example.com?subject=Hi")
+        );
+        for url in [
+            "about:blank",
+            "about:blank#top",
+            "data:text/html,<p>x</p>",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "tel:+15555555555",
+            "not a url",
+        ] {
+            assert_eq!(link_target(url), None, "{url}");
+        }
     }
 
     #[test]

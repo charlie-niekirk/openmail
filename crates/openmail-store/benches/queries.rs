@@ -136,6 +136,7 @@ fn seed(store: &Store) -> Result<(), Error> {
                             text: Some("Hi Charles,\n\nThe numbers are attached.\n".repeat(10)),
                             html: Some("<p>Hi Charles,</p><p>The numbers.</p>".repeat(10)),
                             fetched_at: date(last),
+                            inline: Vec::new(),
                         },
                     )?;
                 }

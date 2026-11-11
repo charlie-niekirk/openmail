@@ -22,6 +22,29 @@ pub struct MessageBody {
     pub html: Option<String>,
     /// When the body was fetched.
     pub fetched_at: OffsetDateTime,
+    /// The inline images its HTML references with `cid:` URLs.
+    pub inline: Vec<InlinePart>,
+}
+
+/// An inline image of a [`MessageBody`]: the target of a `cid:` URL.
+#[derive(Clone, PartialEq, Eq)]
+pub struct InlinePart {
+    /// The `Content-ID`, without angle brackets.
+    pub content_id: String,
+    /// The lowercased MIME type, such as `image/png`.
+    pub mime_type: String,
+    /// The decoded content.
+    pub data: Vec<u8>,
+}
+
+impl std::fmt::Debug for InlinePart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InlinePart")
+            .field("content_id", &self.content_id)
+            .field("mime_type", &self.mime_type)
+            .field("size", &self.data.len())
+            .finish()
+    }
 }
 
 impl Store {
@@ -211,41 +234,96 @@ impl Store {
         )
     }
 
-    /// Stores (or replaces) a message's body. The message must already be stored.
+    /// Stores (or replaces) a message's body, with its inline parts. The
+    /// message must already be stored.
     pub fn upsert_body(&self, id: &MessageId, body: &MessageBody) -> Result<()> {
-        self.conn().execute(
-            "INSERT INTO bodies (message_id, text, html, fetched_at)
-             VALUES (:id, :text, :html, :fetched_at)
-             ON CONFLICT (message_id) DO UPDATE SET
-                 text = excluded.text, html = excluded.html, fetched_at = excluded.fetched_at",
-            named_params! {
-                ":id": id.as_str(),
-                ":text": body.text,
-                ":html": body.html,
-                ":fetched_at": date_to_sql(body.fetched_at)?,
-            },
+        self.transaction(|store| {
+            let conn = store.conn();
+            conn.execute(
+                "INSERT INTO bodies (message_id, text, html, fetched_at)
+                 VALUES (:id, :text, :html, :fetched_at)
+                 ON CONFLICT (message_id) DO UPDATE SET
+                     text = excluded.text, html = excluded.html,
+                     fetched_at = excluded.fetched_at",
+                named_params! {
+                    ":id": id.as_str(),
+                    ":text": body.text,
+                    ":html": body.html,
+                    ":fetched_at": date_to_sql(body.fetched_at)?,
+                },
+            )?;
+            conn.execute(
+                "DELETE FROM inline_parts WHERE message_id = ?1",
+                [id.as_str()],
+            )?;
+            let mut insert = conn.prepare_cached(
+                "INSERT INTO inline_parts (message_id, content_id, mime_type, data)
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
+            )?;
+            for part in &body.inline {
+                insert.execute(rusqlite::params![
+                    id.as_str(),
+                    part.content_id,
+                    part.mime_type,
+                    part.data
+                ])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The inline parts stored with a message's body.
+    pub(crate) fn inline_parts(&self, id: &MessageId) -> Result<Vec<InlinePart>> {
+        let mut stmt = self.conn().prepare_cached(
+            "SELECT content_id, mime_type, data FROM inline_parts
+             WHERE message_id = ?1 ORDER BY content_id",
         )?;
-        Ok(())
+        let parts = stmt
+            .query_map([id.as_str()], |row| {
+                Ok(InlinePart {
+                    content_id: row.get(0)?,
+                    mime_type: row.get(1)?,
+                    data: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(parts)
     }
 
     /// A message's body, if it has been fetched.
     pub fn body(&self, id: &MessageId) -> Result<Option<MessageBody>> {
-        let row: Option<(Option<String>, Option<String>, i64)> = self
+        self.read(|store| {
+            let row: Option<(Option<String>, Option<String>, i64)> = store
+                .conn()
+                .query_row(
+                    "SELECT text, html, fetched_at FROM bodies WHERE message_id = ?1",
+                    [id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            row.map(|(text, html, fetched_at)| {
+                Ok(MessageBody {
+                    text,
+                    html,
+                    fetched_at: date_from_sql(fetched_at)?,
+                    inline: store.inline_parts(id)?,
+                })
+            })
+            .transpose()
+        })
+    }
+
+    /// Whether a message's body has been fetched, without reading it.
+    pub fn has_body(&self, id: &MessageId) -> Result<bool> {
+        let found = self
             .conn()
             .query_row(
-                "SELECT text, html, fetched_at FROM bodies WHERE message_id = ?1",
+                "SELECT 1 FROM bodies WHERE message_id = ?1",
                 [id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |_| Ok(()),
             )
             .optional()?;
-        row.map(|(text, html, fetched_at)| {
-            Ok(MessageBody {
-                text,
-                html,
-                fetched_at: date_from_sql(fetched_at)?,
-            })
-        })
-        .transpose()
+        Ok(found.is_some())
     }
 
     /// Messages matching an FTS5 query over subject, sender, recipients and body

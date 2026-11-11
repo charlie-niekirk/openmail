@@ -298,6 +298,7 @@ fn thread_detail_has_messages_oldest_first_with_labels_and_bodies() {
         text: Some("Hello".to_owned()),
         html: None,
         fetched_at: date(1_000),
+        inline: Vec::new(),
     };
     store.upsert_body(&MessageId::new("t-m1"), &body).unwrap();
 

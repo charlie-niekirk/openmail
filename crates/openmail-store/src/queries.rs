@@ -168,10 +168,15 @@ impl Store {
             let rows = stmt
                 .query_map([id.as_str()], DetailRow::read)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let messages = rows
+            let mut messages = rows
                 .into_iter()
                 .map(DetailRow::into_detail)
-                .collect::<Result<_>>()?;
+                .collect::<Result<Vec<_>>>()?;
+            for detail in &mut messages {
+                if let Some(body) = &mut detail.body {
+                    body.inline = store.inline_parts(&detail.message.id)?;
+                }
+            }
             Ok(Some(ThreadDetail { thread, messages }))
         })
     }
@@ -367,6 +372,7 @@ impl DetailRow {
                     text: self.text,
                     html: self.html,
                     fetched_at: date_from_sql(fetched_at)?,
+                    inline: Vec::new(),
                 })
             })
             .transpose()?;

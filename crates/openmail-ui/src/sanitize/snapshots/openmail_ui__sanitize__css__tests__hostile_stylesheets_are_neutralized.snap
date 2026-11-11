@@ -1,0 +1,5 @@
+---
+source: crates/openmail-ui/src/sanitize/css.rs
+expression: out
+---
+#b-m1,#b-m1{inset:0;z-index:99999;background:none}#b-m1 .overlay{top:0;left:0;width:100vw;height:100vh}@media screen and (max-width: 600px) {#b-m1 .col{width:100% !important}}@supports (display: grid) {@media print {#b-m1 p{display:none}}}#b-m1 p{color:red}

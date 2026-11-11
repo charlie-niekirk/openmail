@@ -9,34 +9,95 @@
 //!
 //! Everything here is plain string building, tested without a window. Text
 //! from the message (names, addresses, plain-text bodies) is escaped; HTML
-//! bodies go through [`clean_html`] first.
+//! bodies go through [`clean_html`](crate::sanitize::clean_html) first, and
+//! sit in a wrapper ([`scope_id`]) their styles are scoped to.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::sync::LazyLock;
 
 use time::OffsetDateTime;
 
 use crate::conversation::{BodyState, Conversation, MessageItem};
+use crate::sanitize::scope_id;
 
 /// Content Security Policy for every body document. Nothing loads from the
 /// network: only inline styles and `data:` images and fonts are allowed, and no
-/// script at all.
+/// script at all. [`document_csp`] adds the remote images the user chose to
+/// show to `img-src`.
 pub const BODY_CSP: &str = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; \
                             font-src data:; form-action 'none'; base-uri 'none'";
+
+/// [`BODY_CSP`] allowing `image_urls` as well: each one exactly (a source
+/// with a full path matches only that path), so showing a message's images
+/// allows nothing else. URLs that can't be written as a CSP source (no host,
+/// credentials, not `http(s):`) stay blocked.
+pub fn document_csp(image_urls: &BTreeSet<String>) -> String {
+    let sources: BTreeSet<String> = image_urls
+        .iter()
+        .filter_map(|url| csp_source(url))
+        .collect();
+    if sources.is_empty() {
+        return BODY_CSP.to_owned();
+    }
+    let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+    BODY_CSP.replacen(
+        "img-src data:",
+        &format!("img-src data: {}", sources.join(" ")),
+        1,
+    )
+}
+
+/// `url` as a CSP source expression matching just that resource: scheme,
+/// host, port and path, without the query (CSP ignores it) or fragment.
+fn csp_source(url: &str) -> Option<String> {
+    let url = url::Url::parse(url).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    let host = url.host_str()?;
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    // CSP compares paths percent-decoded, so these can be encoded; written
+    // as they are they would end the source, directive or policy.
+    let path = url
+        .path()
+        .replace(';', "%3B")
+        .replace(',', "%2C")
+        .replace('\'', "%27");
+    Some(format!("{}://{host}{port}{path}", url.scheme()))
+}
 
 /// What a message whose body is still loading shows in its section.
 pub const LOADING_BODY: &str = "Loading message…";
 
-/// The shell's own styles. Its classes all start with `om-`, and
-/// [`clean_html`] strips `class` and `id` from message HTML, so a message
-/// can't restyle the shell or take on its styles.
+/// The shell's own styles. Its classes all start with `om-`, which message
+/// HTML may not use, and message CSS is scoped to the message's wrapper, so
+/// a message can't restyle the shell or take on its styles. `.om-body`
+/// contains its message's painting (`contain: paint`): whatever the message
+/// positions or moves stays inside its box.
+///
+/// Wide mail fits the pane where it can, as in Gmail: images shrink to the
+/// message's width, and never pass the pane's (`100vw` less the shell's 82px
+/// of padding and borders; WebKit doesn't let a percentage alone shrink a
+/// sized image's min-content width), keeping their aspect ratio; long words
+/// and URLs break. What can't shrink (a fixed-width table) widens the thread instead
+/// of overflowing its box (`.om-thread` is at least its content's
+/// min-content width), so the document itself scrolls sideways, from
+/// anywhere in it, rather than a scroller at the bottom of the message.
+/// Message CSS outranks these defaults (its selectors start with an ID).
 const SHELL_CSS: &str = "\
 :root{color-scheme:light}\
 html,body{margin:0;padding:0;background:#ffffff;color:#1f1f23}\
 body{font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;\
 overflow-wrap:break-word}\
 img{max-width:100%}\
-.om-thread{max-width:860px;margin:0 auto;padding:4px 24px 24px;box-sizing:border-box}\
+.om-thread{max-width:860px;min-width:min-content;margin:0 auto;padding:4px 24px 24px;\
+box-sizing:border-box}\
 .om-message{border:1px solid #e4e4e9;border-radius:8px;margin:0 0 12px;overflow:hidden}\
 .om-header{display:block;list-style:none;cursor:pointer;padding:8px 16px}\
 .om-header::-webkit-details-marker{display:none}\
@@ -55,17 +116,25 @@ white-space:nowrap}\
 .om-participants th{font-weight:normal;text-align:left;vertical-align:top;\
 padding:0 8px 0 0;width:36px}\
 .om-participants td{padding:0;color:#1f1f23}\
-.om-body{padding:12px 16px 16px;border-top:1px solid #e4e4e9;overflow-x:auto}\
+.om-body{padding:12px 16px 16px;border-top:1px solid #e4e4e9;contain:paint}\
+.om-mail{overflow-wrap:anywhere}\
+.om-mail img{max-width:min(100%,calc(100vw - 82px));height:auto}\
 .om-text{white-space:pre-wrap}\
 .om-notice{margin:0;color:#6b6b75}";
 
 /// Wraps an HTML fragment in the trusted document shell the webview loads:
-/// charset, CSP and the shell's styles. `body_html` must be trusted, or
-/// built from [`clean_html`] output and [`escape_html`] text.
-pub fn body_document(body_html: &str) -> String {
+/// charset, CSP ([`document_csp`] for `image_urls`) and the shell's styles.
+/// `body_html` must be trusted, or built from sanitized HTML and
+/// [`escape_html`] text.
+pub fn body_document(body_html: &str, image_urls: &BTreeSet<String>) -> String {
+    // Quotes in the policy stay readable; only what would end the attribute
+    // is escaped.
+    let csp = document_csp(image_urls)
+        .replace('&', "&amp;")
+        .replace('"', "&quot;");
     format!(
         "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
-         <meta http-equiv=\"Content-Security-Policy\" content=\"{BODY_CSP}\">\
+         <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <style>{SHELL_CSS}</style></head><body>{body_html}</body></html>"
     )
@@ -80,12 +149,18 @@ pub fn conversation_document(
 ) -> String {
     // A line per section keeps the document (and its snapshots) readable.
     let mut html = String::from("<main class=\"om-thread\">\n");
+    let mut image_urls = BTreeSet::new();
     for message in &conversation.messages {
         let (short, full) = dates(message.date);
         message_section(&mut html, message, &short, &full);
+        if let BodyState::Loaded(body) = &message.body
+            && let Some(cleaned) = &body.html
+        {
+            image_urls.extend(cleaned.image_urls.iter().cloned());
+        }
     }
     html.push_str("</main>");
-    body_document(&html)
+    body_document(&html, &image_urls)
 }
 
 /// Appends one message's `<details>` section to `html`.
@@ -125,7 +200,14 @@ fn message_section(html: &mut String, message: &MessageItem, short_date: &str, f
 
     match &message.body {
         BodyState::Loaded(body) => match &body.html {
-            Some(cleaned) => html.push_str(cleaned),
+            Some(cleaned) => {
+                let _ = write!(
+                    html,
+                    "<div class=\"om-mail\" id=\"{}\">{}</div>",
+                    scope_id(message.id.as_str()),
+                    cleaned.html
+                );
+            }
             None => {
                 let _ = write!(
                     html,
@@ -160,39 +242,24 @@ pub fn escape_html(text: &str) -> String {
     escaped
 }
 
-/// The sanitizer for message HTML: `ammonia`'s defaults (no script, style
-/// element, form, frame or event handler; no `class` or `id`) plus the inline
-/// styles and presentational attributes email layouts rely on, and `data:`
-/// URLs for inline images.
-///
-/// This is an interim allowlist. PR 4.2 replaces it with the full email one
-/// (CSS property filtering, remote images behind a prompt, `cid:` images).
-static CLEANER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
-    let mut builder = ammonia::Builder::default();
-    builder
-        .add_tags(["center", "font"])
-        .add_generic_attributes([
-            "style", "align", "valign", "bgcolor", "width", "height", "border", "dir",
-        ])
-        .add_tag_attributes("table", ["cellpadding", "cellspacing"])
-        .add_tag_attributes("font", ["color", "face", "size"])
-        .add_url_schemes(["data"]);
-    builder
-});
-
-/// `html` (a message's HTML part) sanitized into a fragment the shell can
-/// hold. Parsing and re-serializing it also balances its tags, so it can't
-/// close the message's section and spill into the shell.
-pub fn clean_html(html: &str) -> String {
-    CLEANER.clean(html).to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use openmail_core::{MessageId, ThreadId};
 
     use super::*;
     use crate::conversation::LoadedBody;
+    use crate::sanitize::{CleanHtml, CleanOptions, clean_html};
+
+    fn clean(html: &str) -> CleanHtml {
+        clean_html(
+            html,
+            &CleanOptions {
+                message_id: "m4",
+                remote_images: false,
+                inline: &[],
+            },
+        )
+    }
 
     /// A sample newsletter body shaped like real email: a table layout with
     /// inline styles, a `data:` image and links.
@@ -202,6 +269,7 @@ mod tests {
         MessageItem {
             id: MessageId::new(id),
             sender: "Ada <Lovelace>".to_owned(),
+            sender_address: Some("ada@example.com".to_owned()),
             from: "Ada <ada@example.com>".to_owned(),
             to: "me@example.com".to_owned(),
             cc: String::new(),
@@ -210,6 +278,7 @@ mod tests {
             snippet: "Tea & cake?".to_owned(),
             unread: false,
             expanded,
+            show_images: false,
             body,
         }
     }
@@ -229,10 +298,49 @@ mod tests {
 
     #[test]
     fn document_carries_csp_and_body() {
-        let doc = body_document("<p>Hello</p>");
+        let doc = body_document("<p>Hello</p>", &BTreeSet::new());
         assert!(doc.starts_with("<!DOCTYPE html>"));
         assert!(doc.contains(&format!("content=\"{BODY_CSP}\"")));
         assert!(doc.contains("<body><p>Hello</p></body>"));
+    }
+
+    #[test]
+    fn shown_images_are_allowed_one_by_one() {
+        let urls: BTreeSet<String> = [
+            "https://cdn.example/logo.png?v=2#x",
+            "http://cdn.example:8080/a;b,c'd.gif",
+            "https://user:pw@cdn.example/secret.png",
+            "https://cdn.example/dir/",
+            "ftp://cdn.example/x.png",
+            "not a url",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            document_csp(&urls),
+            "default-src 'none'; img-src data: http://cdn.example:8080/a%3Bb%2Cc%27d.gif \
+             https://cdn.example/dir/ https://cdn.example/logo.png; \
+             style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'"
+        );
+        assert_eq!(document_csp(&BTreeSet::new()), BODY_CSP);
+        let doc = body_document("", &urls);
+        assert!(doc.contains("img-src data: http://cdn.example:8080/a%3Bb%2Cc%27d.gif"));
+    }
+
+    #[test]
+    fn wide_mail_fits_or_scrolls_the_document() {
+        let doc = body_document("", &BTreeSet::new());
+        // Images shrink to the message and long words break…
+        assert!(doc.contains(".om-mail{overflow-wrap:anywhere}"));
+        assert!(doc.contains(".om-mail img{max-width:min(100%,calc(100vw - 82px));height:auto}"));
+        // …and what can't shrink widens the thread, so the document scrolls
+        // sideways rather than a scroller inside the message.
+        assert!(doc.contains("min-width:min-content"));
+        assert!(!doc.contains("overflow-x"));
+        assert!(doc.contains(
+            ".om-body{padding:12px 16px 16px;border-top:1px solid #e4e4e9;contain:paint}"
+        ));
     }
 
     #[test]
@@ -256,7 +364,8 @@ mod tests {
         let loaded = |text: &str, html: Option<&str>| {
             BodyState::Loaded(LoadedBody {
                 text: text.to_owned(),
-                html: html.map(clean_html),
+                html: html.map(clean),
+                source: None,
             })
         };
         let doc = conversation_document(
@@ -302,6 +411,7 @@ mod tests {
             BodyState::Loaded(LoadedBody {
                 text: "</div></details><h1>Fake header</h1>".to_owned(),
                 html: None,
+                source: None,
             }),
         );
         message.sender = "<img src=x>".to_owned();
@@ -314,7 +424,7 @@ mod tests {
 
     #[test]
     fn cleaning_drops_active_content() {
-        let cleaned = clean_html(
+        let cleaned = clean(
             "<script>alert(1)</script><style>body{display:none}</style>\
              <form action=\"https://evil.example\"><input name=\"q\"></form>\
              <iframe src=\"https://evil.example\"></iframe>\
@@ -322,23 +432,27 @@ mod tests {
              <meta http-equiv=\"refresh\" content=\"0;url=https://evil.example\">\
              <base href=\"https://evil.example/\">",
         );
-        assert_eq!(cleaned, "<p>Hi</p>");
+        // The stylesheet only reaches the message's own wrapper.
+        assert_eq!(
+            cleaned.html,
+            "<style>#b-m4{display:none}</style><p id=\"b-m4-m-m1\">Hi</p>"
+        );
     }
 
     #[test]
     fn cleaning_balances_tags() {
-        let cleaned = clean_html("<div><b>bold</div></details></main><p>after");
+        let cleaned = clean("<div><b>bold</div></details></main><p>after");
         // The parser closes what the fragment left open, and drops end tags
         // it never opened.
-        assert_eq!(cleaned, "<div><b>bold</b></div><p><b>after</b></p>");
+        assert_eq!(cleaned.html, "<div><b>bold</b></div><p><b>after</b></p>");
     }
 
     #[test]
     fn cleaning_keeps_email_layout() {
-        let cleaned = clean_html(SAMPLE_NEWSLETTER);
+        let cleaned = clean(SAMPLE_NEWSLETTER).html;
         assert!(cleaned.contains("<table"));
         assert!(cleaned.contains("cellpadding=\"0\""));
-        assert!(cleaned.contains("style=\"background:#f2f2f7;\""));
+        assert!(cleaned.contains("style=\"background:#f2f2f7\""));
         assert!(cleaned.contains("<img src=\"data:image/"));
         assert!(cleaned.contains("href=\"https://"));
         assert!(!cleaned.contains("<!--"), "comments are dropped");

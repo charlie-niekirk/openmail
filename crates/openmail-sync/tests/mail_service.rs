@@ -172,6 +172,14 @@ async fn syncs_in_the_background_and_answers_queries() {
             .unwrap()
             .is_none()
     );
+
+    // "Always show images" senders are kept in the store.
+    assert!(handle.image_senders().await.unwrap().is_empty());
+    handle
+        .allow_images_from("News@Example.com".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(handle.image_senders().await.unwrap(), ["news@example.com"]);
 }
 
 #[tokio::test]

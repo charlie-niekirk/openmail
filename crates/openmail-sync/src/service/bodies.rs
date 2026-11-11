@@ -156,7 +156,7 @@ impl BodyFetcher {
             }
             // Some may have been fetched for someone meanwhile.
             let mut chunk = chunk.to_vec();
-            chunk.retain(|id| matches!(self.store.body(id), Ok(None)));
+            chunk.retain(|id| matches!(self.store.has_body(id), Ok(false)));
             if chunk.is_empty() {
                 continue;
             }

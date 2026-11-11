@@ -429,6 +429,7 @@ mod tests {
             text: Some("hi".to_owned()),
             html: None,
             fetched_at: date(10),
+            inline: Vec::new(),
         };
         store.upsert_body(&MessageId::new("new"), &body).unwrap();
         // Only the two newest are considered, so "old" is not pulled in.
