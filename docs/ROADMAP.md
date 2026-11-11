@@ -116,7 +116,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
   - Virtualized `uniform_list` with infinite scroll.
   - Rows: senders, subject, snippet, date, label chips, star and importance markers,
     unread styling, attachment icon.
-- [ ] **3.5 Conversation view** ∥ — `feat/3.5-conversation-view`
+- [x] **3.5 Conversation view** ∥ — `feat/3.5-conversation-view`
   - Native header, collapsed and expanded messages, participants, label chips.
   - Plain-text body for now.
 - [ ] **3.6 Layout** — `feat/3.6-layout`
