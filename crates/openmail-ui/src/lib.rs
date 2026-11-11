@@ -8,15 +8,18 @@
 //! [`AppState`] from the service's events and hands views a `MailHandle`.
 
 mod bridge;
+mod conversation;
 mod main_window;
 mod message_body;
 mod onboarding;
 mod onboarding_view;
 mod state;
 mod theme;
+mod time_format;
 mod typography;
 
 pub use bridge::{AppEvent, AppModel, Backend, Connection};
+pub use conversation::{BodyState, Conversation, LabelChip, MessageItem};
 pub use main_window::{Content, MainWindow, main_window_options};
 pub use message_body::{
     BODY_CSP, MessageBodyView, SAMPLE_NEWSLETTER, allows_navigation, body_document,
@@ -24,6 +27,7 @@ pub use message_body::{
 pub use onboarding::{Notice, Setup, SignIn, SignInError, inbox_ready};
 pub use state::{AppState, Changed, Session, SyncState};
 pub use theme::{Themes, follow_system_appearance};
+pub use time_format::{capture_local_offset, full_date, local_offset, short_date};
 pub use typography::{TextRole, TypographyExt};
 
 use gpui::{App, AppContext as _, Bounds, WindowHandle};
