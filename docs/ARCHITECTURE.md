@@ -387,8 +387,9 @@ another writes):
 ### UI state and the bridge
 
 `openmail-ui` keeps what the window shows about the account in `AppState`, a
-plain view-model with no GPUI types: the session (`Starting`, `SignedOut`,
-`Ready`, `Failed`), the sync state, connectivity, and whether sending stopped.
+plain view-model with no GPUI types: the session (`Starting`, `SignedOut` with
+the sign-in screen's state, `Ready`, `Failed`), the sync state, connectivity,
+whether sending stopped, and whether a new account is still setting up.
 `AppState::apply_all` takes a batch of `MailEvent`s and returns a `Changed`
 (status, threads, labels, bodies fetched), and `status_text` gives the title
 bar's line. Tests drive it with events directly.
@@ -396,10 +397,15 @@ bar's line. Tests drive it with events directly.
 `AppModel` is the GPUI entity around it, registered as a global
 (`AppModel::global(cx)`):
 
-- **Start-up.** `AppModel::init(cx, connect)` runs the app's `connect` on GPUI's
-  background executor, since opening the store and reading the keychain block.
-  It returns a `Connection`: `Started` (a `MailService`, its `MailEvents` and the
-  account), `SignedOut` (why there is no account) or `Failed`.
+- **Start-up.** `AppModel::init(cx, backend)` takes the app's `Backend` and runs
+  its `connect` on GPUI's background executor, since opening the store and
+  reading the keychain block. It returns a `Connection`: `Started` (a
+  `MailService`, its `MailEvents` and the account), `SignedOut` (no account,
+  maybe with a reason), `Unconfigured` (no OAuth client, with setup help) or
+  `Failed`.
+- **Sign-in.** `AppModel::sign_in` runs `Backend::sign_in` on a thread of its
+  own, since it waits for the user in the browser, and `cancel_sign_in` cancels
+  it through a `CancellationToken`. Success is a `Connection` like start-up's.
 - **Events.** A task started with `cx.spawn` awaits `MailEvents::recv` on GPUI's
   executor. For each event it also takes every event already waiting, applies
   the batch to `AppState`, then notifies observers if the status changed and
@@ -411,10 +417,34 @@ bar's line. Tests drive it with events directly.
 - **Shutdown.** On quit, `AppModel` shuts the service down on the background
   executor; unsent ops stay queued.
 
-Until onboarding (PR 3.2), `apps/openmail` opens the account the dev CLI
-signed in and synced: `OPENMAIL_ACCOUNT`, or else the only account with a
-database in the data directory. With none, or without a client ID or a
-refresh token, the window shows a signed-out notice instead of the panes.
+### Onboarding
+
+`apps/openmail` opens `OPENMAIL_ACCOUNT`, or else the only account with a
+database in the data directory. With none, or without a refresh token for it,
+the window shows the sign-in screen (`onboarding::SignIn`): "Sign in with
+Google", then a cancellable wait while the user finishes on Google's consent
+page. Without `OPENMAIL_GOOGLE_CLIENT_ID` the screen explains how to create an
+OAuth client instead of offering to sign in.
+
+The app's sign-in runs the PKCE + loopback flow (PR 1.2) on a current-thread
+tokio runtime of its own, raced against the cancellation token, and saves the
+refresh token to the keychain. It then creates the account's store and account
+row and starts its `MailService` with a fresh OAuth client, since the sign-in
+client's pooled connections belong to the runtime that just ended. Declining in
+the browser, cancelling and failures return to the sign-in screen with a
+notice.
+
+A newly signed-in account shows the setup screen (`onboarding::Setup`) with
+its initial-sync progress until the inbox is stored (`inbox_ready`: the sync
+reached `Prefetch`, `Backfill` or `Done`, or is up to date); older mail keeps
+syncing behind the mailbox. Accounts opened at start-up go straight to the
+mailbox.
+
+When the sync stops with an error that needs a new sign-in
+(`openmail_sync::Error::requires_sign_in`: a missing, revoked or expired
+refresh token), `AppState` returns to the sign-in screen with a notice naming
+the account and ignores that service's remaining events, and `AppModel` shuts
+the service down. Signing in again starts a new one.
 
 ### Theme, typography and window frame
 
