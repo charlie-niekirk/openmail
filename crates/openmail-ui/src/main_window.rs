@@ -1,6 +1,6 @@
 //! The main window: the frame (a transparent macOS title bar showing the
-//! account and sync status) around either the mailbox, still a placeholder
-//! three-pane layout (sidebar, thread list, reading pane), the onboarding
+//! account and sync status) around either the mailbox (the sidebar, then the
+//! thread list and reading pane, still placeholders), the onboarding
 //! screens (sign-in, then a new account's first sync), or a notice when the
 //! mailbox could not be opened.
 
@@ -14,6 +14,7 @@ use crate::bridge::AppModel;
 use crate::conversation_view::ConversationView;
 use crate::onboarding::{Setup, SignIn};
 use crate::onboarding_view::{setup_screen, sign_in_screen};
+use crate::sidebar_view::SidebarView;
 use crate::state::{AppState, Session};
 use crate::typography::{TextRole, TypographyExt as _};
 
@@ -81,6 +82,7 @@ impl Content {
 /// The root view of the main window.
 pub struct MainWindow {
     model: Entity<AppModel>,
+    sidebar: Entity<SidebarView>,
     conversation: Entity<ConversationView>,
     _subscriptions: [Subscription; 2],
 }
@@ -94,6 +96,7 @@ impl MainWindow {
         let status = cx.observe(&model, |_, _, cx| cx.notify());
         Self {
             model,
+            sidebar: cx.new(SidebarView::new),
             conversation: cx.new(ConversationView::new),
             _subscriptions: [appearance, status],
         }
@@ -122,7 +125,11 @@ impl MainWindow {
         )
     }
 
-    fn mailbox(conversation: &Entity<ConversationView>, cx: &App) -> impl IntoElement {
+    fn mailbox(
+        sidebar: Entity<SidebarView>,
+        conversation: &Entity<ConversationView>,
+        cx: &App,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         h_flex()
             .flex_1()
@@ -135,7 +142,8 @@ impl MainWindow {
                     .flex_none()
                     .bg(theme.sidebar)
                     .border_r_1()
-                    .border_color(theme.sidebar_border),
+                    .border_color(theme.sidebar_border)
+                    .child(sidebar),
             )
             // Thread list (PR 3.4).
             .child(
@@ -183,7 +191,9 @@ impl Render for MainWindow {
         let state = self.model.read(cx).state();
         let theme = cx.theme();
         let content = match Content::for_state(state) {
-            Content::Mailbox => Self::mailbox(&self.conversation, cx).into_any_element(),
+            Content::Mailbox => {
+                Self::mailbox(self.sidebar.clone(), &self.conversation, cx).into_any_element()
+            }
             Content::SignIn(sign_in) => sign_in_screen(&sign_in, cx),
             Content::Setup { account, setup } => setup_screen(&account, &setup, cx),
             Content::Notice { title, detail } => Self::notice(title, detail, cx).into_any_element(),
