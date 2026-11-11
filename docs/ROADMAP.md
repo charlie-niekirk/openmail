@@ -128,7 +128,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 - [x] **4.1 Webview component** — `feat/4.1-webview`
   - Production version of the 0.5 spike: lifecycle, resizing, scroll integration with
     the conversation, focus handling.
-- [ ] **4.2 Sanitization and privacy** — `feat/4.2-sanitize-privacy`
+- [x] **4.2 Sanitization and privacy** — `feat/4.2-sanitize-privacy`
   - `ammonia` email allowlist, strict CSP, JavaScript off.
   - Remote images blocked behind "show images" (per message, or always for a sender).
   - `cid:` rewriting; link clicks open in the system browser with the real URL shown.
