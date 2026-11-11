@@ -410,3 +410,92 @@ fn mail_that_is_not_adapted_keeps_its_colors_as_written() {
             .contains("@media (prefers-color-scheme: dark) {#b-m1{background:#121212 !important;")
     );
 }
+
+/// `cleaned`'s HTML with its quoted history in `[QUOTE[…]]` and its
+/// signature in `[SIGNATURE[…]]` (`+` if it joins the quote).
+fn marked(cleaned: &CleanHtml) -> String {
+    let mut marks = Vec::new();
+    if let Some(quote) = &cleaned.trimmed.quote {
+        marks.push((quote.start, "[QUOTE["));
+        marks.push((quote.end, "]]"));
+    }
+    if let Some(signature) = &cleaned.trimmed.signature {
+        let open = if signature.joins_quote {
+            "[SIGNATURE+["
+        } else {
+            "[SIGNATURE["
+        };
+        marks.push((signature.range.start, open));
+        marks.push((signature.range.end, "]]"));
+    }
+    marks.sort_by_key(|&(at, mark)| (at, mark != "]]"));
+    let mut html = cleaned.html.clone();
+    for (at, mark) in marks.into_iter().rev() {
+        html.insert_str(at, mark);
+    }
+    html
+}
+
+#[test]
+fn quoted_history_is_found_across_mail_clients() {
+    for (name, html) in [
+        ("gmail", include_str!("fixtures/quotes/gmail.html")),
+        ("gmail-old", include_str!("fixtures/quotes/gmail-old.html")),
+        ("apple", include_str!("fixtures/quotes/apple.html")),
+        (
+            "thunderbird",
+            include_str!("fixtures/quotes/thunderbird.html"),
+        ),
+        ("outlook", include_str!("fixtures/quotes/outlook.html")),
+        (
+            "outlook-desktop",
+            include_str!("fixtures/quotes/outlook-desktop.html"),
+        ),
+    ] {
+        let cleaned = clean(html, false);
+        let quote = cleaned
+            .trimmed
+            .quote
+            .clone()
+            .unwrap_or_else(|| panic!("{name}"));
+        // The quote is the end of the message, after text of its own.
+        let after = text_content(&cleaned.html[quote.end..]);
+        assert!(after.trim().is_empty(), "{name}: {after}");
+        insta::assert_snapshot!(format!("quotes-{name}"), marked(&cleaned));
+    }
+    // The signature beside Gmail's quote is found too.
+    let gmail = clean(include_str!("fixtures/quotes/gmail.html"), false);
+    let signature = gmail.trimmed.signature.unwrap();
+    assert_eq!(signature.text, "Ada Lovelace Analytical Engines");
+    assert!(!signature.joins_quote, "it sits inside the reply's div");
+}
+
+#[test]
+fn inline_replies_forwards_and_bare_quotes_stay_shown() {
+    for (name, html) in [
+        (
+            "inline-reply",
+            include_str!("fixtures/quotes/inline-reply.html"),
+        ),
+        ("forward", include_str!("fixtures/quotes/forward.html")),
+        (
+            "quote-only",
+            include_str!("fixtures/quotes/quote-only.html"),
+        ),
+        ("personal", PERSONAL),
+        ("newsletter", NEWSLETTER),
+    ] {
+        assert_eq!(clean(html, false).trimmed.quote, None, "{name}");
+    }
+}
+
+#[test]
+fn quote_ranges_point_into_the_final_html() {
+    // Adapted mail is cleaned twice; the ranges are of the second.
+    let html = "<div style=\"color:#333\">Yes.</div>\
+                <div class=\"gmail_quote\"><blockquote class=\"gmail_quote\">Q</blockquote></div>";
+    let cleaned = clean(html, false);
+    assert!(cleaned.html.contains("var(--om-c0,#333)"));
+    let quote = cleaned.trimmed.quote.clone().unwrap();
+    assert!(cleaned.html[quote].starts_with("<div class=\"gmail_quote\">"));
+}

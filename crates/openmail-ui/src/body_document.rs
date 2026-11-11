@@ -12,7 +12,7 @@
 //! bodies go through [`clean_html`](crate::sanitize::clean_html) first, and
 //! sit in a wrapper ([`scope_id`]) their styles are scoped to.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
 
 use time::OffsetDateTime;
@@ -20,7 +20,8 @@ use time::OffsetDateTime;
 use crate::conversation::{BodyState, Conversation, MessageItem};
 use crate::sanitize::color::{self, Parsed, Role};
 use crate::sanitize::dark::{AttributeColor, DarkStyle};
-use crate::sanitize::scope_id;
+use crate::sanitize::quotes::{self, Trimmed};
+use crate::sanitize::{CleanHtml, scope_id};
 
 /// Content Security Policy for every body document. Nothing loads from the
 /// network: only inline styles and `data:` images and fonts are allowed, and no
@@ -164,6 +165,10 @@ fn css_color(color: &str) -> &str {
 ///
 /// In dark mode a message that can't be adapted keeps its light colors on a
 /// light card (`.om-card`, which brings back the light palette inside it).
+///
+/// Quoted history sits in a `<details class="om-quote">` whose toggle is a
+/// small "•••" pill, as in Gmail. Its look is `!important`, so a message's
+/// own resets (which reach it: it is inside the message) leave it alone.
 const SHELL_CSS: &str = "\
 html,body{margin:0;padding:0;background:var(--om-bg);color:var(--om-fg)}\
 body{font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;\
@@ -198,6 +203,16 @@ padding:0 8px 0 0;width:36px}\
 color:var(--om-fg);padding:16px;border-radius:6px}\
 .om-dark .om-card img{max-width:min(100%,calc(100vw - 114px))}\
 .om-text{white-space:pre-wrap}\
+.om-quote{display:block;margin:8px 0 0}\
+.om-quote>.om-quote-toggle{display:inline-block!important;list-style:none!important;\
+cursor:pointer!important;margin:0!important;padding:0 7px!important;height:12px!important;\
+border:0!important;border-radius:6px!important;background:var(--om-muted-bg)!important;\
+color:var(--om-muted)!important;font:bold 8px/12px -apple-system,BlinkMacSystemFont,sans-serif!important;\
+letter-spacing:1px!important;vertical-align:middle!important;user-select:none}\
+.om-quote>.om-quote-toggle::-webkit-details-marker{display:none}\
+.om-quote>.om-quote-toggle:hover{background:var(--om-border)!important}\
+.om-quote>.om-quote-toggle:focus-visible{outline:2px solid var(--om-focus);outline-offset:2px}\
+.om-quote[open]>.om-quote-toggle{margin-bottom:8px!important}\
 .om-notice{margin:0;color:var(--om-muted)}";
 
 /// Wraps an HTML fragment in the trusted document shell the webview loads:
@@ -240,9 +255,11 @@ pub fn conversation_document(
     // A line per section keeps the document (and its snapshots) readable.
     let mut html = String::from("<main class=\"om-thread\">\n");
     let mut image_urls = BTreeSet::new();
+    // The signatures of the messages so far: one seen before is collapsed.
+    let mut signatures = HashSet::new();
     for message in &conversation.messages {
         let (short, full) = dates(message.date);
-        message_section(&mut html, message, palette, &short, &full);
+        message_section(&mut html, message, palette, &mut signatures, &short, &full);
         if let BodyState::Loaded(body) = &message.body
             && let Some(cleaned) = &body.html
         {
@@ -258,6 +275,7 @@ fn message_section(
     html: &mut String,
     message: &MessageItem,
     palette: &ShellPalette,
+    signatures: &mut HashSet<String>,
     short_date: &str,
     full_date: &str,
 ) {
@@ -311,19 +329,11 @@ fn message_section(
                         }
                     }
                 }
-                let _ = write!(
-                    html,
-                    "<div class=\"{class}\" id=\"{scope}\">{}</div>",
-                    cleaned.html
-                );
+                let _ = write!(html, "<div class=\"{class}\" id=\"{scope}\">");
+                trimmed_html(html, cleaned, &scope, signatures);
+                html.push_str("</div>");
             }
-            None => {
-                let _ = write!(
-                    html,
-                    "<div class=\"om-text\">{}</div>",
-                    escape_html(&body.text)
-                );
-            }
+            None => trimmed_text(html, &body.text, message, signatures),
         },
         BodyState::NotLoaded | BodyState::Loading => {
             let _ = write!(html, "<p class=\"om-notice\">{LOADING_BODY}</p>");
@@ -333,6 +343,79 @@ fn message_section(
         }
     }
     html.push_str("</div></details>\n");
+}
+
+/// The toggle that shows and hides a message's quoted history ("…").
+const TRIMMED_TOGGLE: &str = "<summary class=\"om-quote-toggle\" title=\"Show trimmed content\" \
+                              aria-label=\"Show trimmed content\">•••</summary>";
+
+/// Appends the HTML of a message (`cleaned`, in wrapper `scope`) to `html`,
+/// with its quoted history collapsed behind a toggle, and its signature
+/// too if one of the messages before ended with the same one (it joins
+/// the quote's toggle if it sits beside it).
+fn trimmed_html(
+    html: &mut String,
+    cleaned: &CleanHtml,
+    scope: &str,
+    signatures: &mut HashSet<String>,
+) {
+    let Trimmed { quote, signature } = &cleaned.trimmed;
+    let repeated = signature
+        .as_ref()
+        .filter(|signature| !signatures.insert(signature.text.clone()));
+    let collapsed = match (repeated, quote) {
+        (Some(signature), Some(quote)) if signature.joins_quote => {
+            Some(signature.range.start..quote.end)
+        }
+        (Some(signature), None) => Some(signature.range.clone()),
+        (_, Some(quote)) => Some(quote.clone()),
+        (None, None) => None,
+    };
+    let source = &cleaned.html;
+    match collapsed.filter(|range| range.end <= source.len() && range.start < range.end) {
+        Some(range) => {
+            let _ = write!(
+                html,
+                "{}<details class=\"om-quote\" id=\"q-{scope}\">{TRIMMED_TOGGLE}{}</details>{}",
+                &source[..range.start],
+                &source[range.clone()],
+                &source[range.end..],
+            );
+        }
+        None => html.push_str(source),
+    }
+}
+
+/// Appends a plain-text body to `html`, quoted history and repeated
+/// signature collapsed as [`trimmed_html`] does.
+fn trimmed_text(
+    html: &mut String,
+    text: &str,
+    message: &MessageItem,
+    signatures: &mut HashSet<String>,
+) {
+    let parts = quotes::split_text(text);
+    let offset = |part: &str| part.as_ptr() as usize - text.as_ptr() as usize;
+    let repeated = parts
+        .signature
+        .filter(|signature| !signatures.insert(quotes::normalize(signature)));
+    let cut = repeated.or(parts.quote).map_or(text.len(), offset);
+    let shown = if cut < text.len() {
+        text[..cut].trim_end()
+    } else {
+        text
+    };
+    let _ = write!(html, "<div class=\"om-text\">{}</div>", escape_html(shown));
+    let hidden = text[cut..].trim();
+    if !hidden.is_empty() {
+        let _ = write!(
+            html,
+            "<details class=\"om-quote\" id=\"q-{}\">{TRIMMED_TOGGLE}\
+             <div class=\"om-text\">{}</div></details>",
+            scope_id(message.id.as_str()),
+            escape_html(hidden)
+        );
+    }
 }
 
 /// The styles adapting a message's colors to a dark `palette` (see
@@ -556,7 +639,7 @@ mod tests {
             true,
             BodyState::Loaded(LoadedBody {
                 text: String::new(),
-                html: Some(clean(html)),
+                html: Some(Box::new(clean(html))),
                 source: None,
             }),
         )
@@ -602,6 +685,93 @@ mod tests {
         insta::assert_snapshot!(css.replace('}', "}\n"));
     }
 
+    /// The conversation part of a document, without the shell's head.
+    fn thread(doc: &str) -> &str {
+        &doc[doc.find("<main").unwrap()..]
+    }
+
+    fn text_message(id: &str, text: &str) -> MessageItem {
+        item(
+            id,
+            true,
+            BodyState::Loaded(LoadedBody {
+                text: text.to_owned(),
+                html: None,
+                source: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn quoted_history_collapses_behind_a_toggle() {
+        let reply = "<div>Yes.</div><div class=\"gmail_quote\"><div class=\"gmail_attr\">\
+                     On Mon, Ada wrote:</div><blockquote class=\"gmail_quote\">Lunch?</blockquote></div>";
+        let doc = conversation_document(
+            &conversation(vec![html_message(reply)]),
+            &ShellPalette::light(),
+            dates,
+        );
+        assert!(doc.contains(
+            "<div class=\"om-mail\" id=\"b-m4\"><div>Yes.</div><details class=\"om-quote\" \
+             id=\"q-b-m4\"><summary class=\"om-quote-toggle\" title=\"Show trimmed content\" \
+             aria-label=\"Show trimmed content\">•••</summary><div class=\"gmail_quote\">"
+        ));
+        assert!(doc.contains("</blockquote></div></details></div>"));
+    }
+
+    #[test]
+    fn a_signature_seen_before_collapses_with_the_quote() {
+        let signature = "<div class=\"gmail_signature\">Ada Lovelace<br>Engines</div>";
+        let first = html_message(&format!("<div>Hello</div>{signature}"));
+        let mut second = html_message(&format!(
+            "<div>Again</div>{signature}<div class=\"gmail_quote\"><blockquote>Hello</blockquote></div>"
+        ));
+        second.id = MessageId::new("m5");
+        let mut third = html_message(&format!("<div>Last</div>{signature}"));
+        third.id = MessageId::new("m6");
+        let doc = conversation_document(
+            &conversation(vec![first, second, third]),
+            &ShellPalette::light(),
+            dates,
+        );
+        // The first shows its signature; later ones fold it away, with the
+        // quote when it sits beside it.
+        assert!(doc.contains("<div>Hello</div><div class=\"gmail_signature\">"));
+        assert!(doc.contains(&format!(
+            "<div>Again</div><details class=\"om-quote\" id=\"q-b-m5\">{TRIMMED_TOGGLE}\
+             <div class=\"gmail_signature\">"
+        )));
+        assert!(doc.contains(&format!(
+            "<div>Last</div><details class=\"om-quote\" id=\"q-b-m6\">{TRIMMED_TOGGLE}\
+             <div class=\"gmail_signature\">"
+        )));
+        assert_eq!(doc.matches("<details class=\"om-quote\"").count(), 2);
+    }
+
+    #[test]
+    fn plain_text_replies_collapse_their_quotes() {
+        let doc = conversation_document(
+            &conversation(vec![
+                text_message(
+                    "m1",
+                    "Hi all,\n\nNotes attached.\n\n-- \nCarol\nMission control\n",
+                ),
+                text_message(
+                    "m2",
+                    "Looks good.\n\nOn Tue, Carol <c@example.com> wrote:\n> Hi all,\n>\n> Notes attached.\n",
+                ),
+                text_message(
+                    "m3",
+                    "Thursday works.\n\n-- \nCarol\nMission control\n\nOn Wed, Dan wrote:\n> Looks good.\n",
+                ),
+                text_message("m4", "> only a quote\n> of something"),
+            ]),
+            &ShellPalette::light(),
+            dates,
+        );
+        insta::assert_snapshot!(thread(&doc));
+    }
+
     #[test]
     fn csp_blocks_scripts_and_network() {
         assert!(BODY_CSP.starts_with("default-src 'none'"));
@@ -623,7 +793,7 @@ mod tests {
         let loaded = |text: &str, html: Option<&str>| {
             BodyState::Loaded(LoadedBody {
                 text: text.to_owned(),
-                html: html.map(clean),
+                html: html.map(|html| Box::new(clean(html))),
                 source: None,
             })
         };

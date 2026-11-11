@@ -1,0 +1,5 @@
+---
+source: crates/openmail-ui/src/sanitize/tests.rs
+expression: marked(&cleaned)
+---
+Sounds great, see you then.<br id="b-m1-lineBreakAtBeginningOfSignature"><div dir="ltr">Sent from my iPhone</div>[QUOTE[<div dir="ltr"><br><blockquote type="cite">On Nov 10, 2026, at 15:07, Carol Danvers &lt;carol@example.com&gt; wrote:<br><br></blockquote></div><blockquote type="cite"><div dir="ltr">Dinner at eight?</div></blockquote>]]

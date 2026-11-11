@@ -1,0 +1,5 @@
+---
+source: crates/openmail-ui/src/sanitize/tests.rs
+expression: marked(&cleaned)
+---
+<div dir="ltr">Thanks!</div><br>[QUOTE[<div class="gmail_attr">On Mon, Nov 9, 2026 Bob wrote:<br></div><blockquote class="gmail_quote" style="margin:0 0 0 0.8ex;border-left:1px var(--om-c0,#ccc) solid;padding-left:1ex">Here it is.</blockquote>]]

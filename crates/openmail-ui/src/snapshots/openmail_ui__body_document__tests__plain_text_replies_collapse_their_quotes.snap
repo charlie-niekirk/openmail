@@ -1,0 +1,26 @@
+---
+source: crates/openmail-ui/src/body_document.rs
+expression: thread(&doc)
+---
+<main class="om-thread">
+<details class="om-message" id="m-m1" open><summary class="om-header"><div class="om-header-row"><span class="om-sender">Ada &lt;Lovelace&gt;</span><span class="om-line"><span class="om-recipients">to me</span><span class="om-snippet">Tea &amp; cake?</span></span><span class="om-date">Nov 3</span></div></summary><div class="om-participants"><table><tr><th>from</th><td>Ada &lt;ada@example.com&gt;</td></tr><tr><th>to</th><td>me@example.com</td></tr><tr><th>date</th><td>Tue, Nov 3, 2026, 3:07 PM</td></tr></table></div><div class="om-body"><div class="om-text">Hi all,
+
+Notes attached.
+
+-- 
+Carol
+Mission control
+</div></div></details>
+<details class="om-message" id="m-m2" open><summary class="om-header"><div class="om-header-row"><span class="om-sender">Ada &lt;Lovelace&gt;</span><span class="om-line"><span class="om-recipients">to me</span><span class="om-snippet">Tea &amp; cake?</span></span><span class="om-date">Nov 3</span></div></summary><div class="om-participants"><table><tr><th>from</th><td>Ada &lt;ada@example.com&gt;</td></tr><tr><th>to</th><td>me@example.com</td></tr><tr><th>date</th><td>Tue, Nov 3, 2026, 3:07 PM</td></tr></table></div><div class="om-body"><div class="om-text">Looks good.</div><details class="om-quote" id="q-b-m2"><summary class="om-quote-toggle" title="Show trimmed content" aria-label="Show trimmed content">•••</summary><div class="om-text">On Tue, Carol &lt;c@example.com&gt; wrote:
+&gt; Hi all,
+&gt;
+&gt; Notes attached.</div></details></div></details>
+<details class="om-message" id="m-m3" open><summary class="om-header"><div class="om-header-row"><span class="om-sender">Ada &lt;Lovelace&gt;</span><span class="om-line"><span class="om-recipients">to me</span><span class="om-snippet">Tea &amp; cake?</span></span><span class="om-date">Nov 3</span></div></summary><div class="om-participants"><table><tr><th>from</th><td>Ada &lt;ada@example.com&gt;</td></tr><tr><th>to</th><td>me@example.com</td></tr><tr><th>date</th><td>Tue, Nov 3, 2026, 3:07 PM</td></tr></table></div><div class="om-body"><div class="om-text">Thursday works.</div><details class="om-quote" id="q-b-m3"><summary class="om-quote-toggle" title="Show trimmed content" aria-label="Show trimmed content">•••</summary><div class="om-text">-- 
+Carol
+Mission control
+
+On Wed, Dan wrote:
+&gt; Looks good.</div></details></div></details>
+<details class="om-message" id="m-m4" open><summary class="om-header"><div class="om-header-row"><span class="om-sender">Ada &lt;Lovelace&gt;</span><span class="om-line"><span class="om-recipients">to me</span><span class="om-snippet">Tea &amp; cake?</span></span><span class="om-date">Nov 3</span></div></summary><div class="om-participants"><table><tr><th>from</th><td>Ada &lt;ada@example.com&gt;</td></tr><tr><th>to</th><td>me@example.com</td></tr><tr><th>date</th><td>Tue, Nov 3, 2026, 3:07 PM</td></tr></table></div><div class="om-body"><div class="om-text">&gt; only a quote
+&gt; of something</div></div></details>
+</main></body></html>

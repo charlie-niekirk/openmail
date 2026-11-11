@@ -18,7 +18,9 @@
 //!   links whose text names another site than they go to
 //!   ([`CleanHtml::misleading_links`]);
 //! - decides how the message is shown in dark mode ([`dark`]), rewriting
-//!   its colors for it if it is to be adapted.
+//!   its colors for it if it is to be adapted;
+//! - finds its quoted history and signature ([`quotes`]), which the
+//!   document collapses.
 //!
 //! The document's CSP is the backstop: it allows no network loads except
 //! the remote images of messages whose images are shown
@@ -35,6 +37,7 @@ use openmail_store::InlinePart;
 pub mod color;
 pub mod css;
 pub mod dark;
+pub mod quotes;
 
 use dark::{DarkStyle, Probe};
 
@@ -73,8 +76,10 @@ const GENERIC_ATTRIBUTES: [&str; 12] = [
 ];
 
 /// Element-specific attributes on top of `ammonia`'s defaults.
-const TAG_ATTRIBUTES: [(&str, &[&str]); 10] = [
+const TAG_ATTRIBUTES: [(&str, &[&str]); 11] = [
     ("a", &["name"]),
+    // `type="cite"` marks quoted replies (Apple Mail, Thunderbird).
+    ("blockquote", &["type"]),
     ("table", &["cellpadding", "cellspacing", "frame", "rules"]),
     ("td", &["abbr", "scope"]),
     ("font", &["color", "face", "size"]),
@@ -117,6 +122,8 @@ pub struct CleanHtml {
     pub misleading_links: BTreeMap<String, String>,
     /// How it is shown in dark mode.
     pub dark: DarkStyle,
+    /// Its quoted history and signature, which the document collapses.
+    pub trimmed: quotes::Trimmed,
 }
 
 /// The `id` of the element wrapping a message's HTML, which its CSS is
@@ -145,6 +152,7 @@ pub fn clean_html(html: &str, options: &CleanOptions<'_>) -> CleanHtml {
         (cleaned, _) = clean_pass(html, options, Probe::rewriting(&probe));
     }
     cleaned.dark = probe.style();
+    cleaned.trimmed = quotes::find(&cleaned.html, &format!("{}-", scope_id(options.message_id)));
     cleaned
 }
 
@@ -210,6 +218,7 @@ fn clean_pass(html: &str, options: &CleanOptions<'_>, probe: Probe) -> (CleanHtm
         image_urls: std::mem::take(&mut state.images.urls),
         misleading_links,
         dark: DarkStyle::Card,
+        trimmed: quotes::Trimmed::default(),
     };
     (cleaned, std::mem::take(&mut state.probe))
 }
@@ -492,7 +501,7 @@ fn post_process(
 }
 
 /// The value of attribute `name` in serialized `tag`, unescaped.
-fn attribute(tag: &str, name: &str) -> Option<String> {
+pub(crate) fn attribute(tag: &str, name: &str) -> Option<String> {
     let marker = format!(" {name}=\"");
     let start = tag.find(&marker)? + marker.len();
     let len = tag[start..].find('"')?;
@@ -500,7 +509,7 @@ fn attribute(tag: &str, name: &str) -> Option<String> {
 }
 
 /// The text of serialized `html`, tags dropped and unescaped.
-fn text_content(html: &str) -> String {
+pub(crate) fn text_content(html: &str) -> String {
     let mut text = String::new();
     let mut rest = html;
     while let Some(start) = rest.find('<') {
@@ -523,7 +532,7 @@ fn unescape(text: &str) -> String {
 
 /// The length of the tag `html` starts with, up to and including its `>`
 /// (skipping `>` inside quoted attribute values).
-fn tag_end(html: &str) -> Option<usize> {
+pub(crate) fn tag_end(html: &str) -> Option<usize> {
     let mut quoted = false;
     for (i, byte) in html.bytes().enumerate() {
         match byte {
@@ -536,7 +545,7 @@ fn tag_end(html: &str) -> Option<usize> {
 }
 
 /// The name of `tag` (`<name …>`), as in `p` or `/p`.
-fn tag_name(tag: &str) -> &str {
+pub(crate) fn tag_name(tag: &str) -> &str {
     let name = tag.get(1..).unwrap_or_default();
     let len = name
         .find(|c: char| c.is_ascii_whitespace() || c == '>')
