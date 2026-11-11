@@ -154,6 +154,12 @@ impl MessageBodyView {
         }
     }
 
+    /// Whether there is a document to show (or one held while the next is
+    /// prepared).
+    pub fn has_document(&self) -> bool {
+        self.document.is_some()
+    }
+
     /// Why the webview can't be shown here, if it can't.
     pub fn unavailable(&self) -> Option<&SharedString> {
         match &self.web {

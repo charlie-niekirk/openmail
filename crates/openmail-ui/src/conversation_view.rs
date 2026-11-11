@@ -1,13 +1,18 @@
-//! The reading pane: the open conversation's header, then its messages,
-//! collapsed to a line or expanded to participants and plain-text body, or
-//! the pane's state in their place. The state is a [`ReadingPane`]; this view
-//! loads it and keeps it current, retrying bodies that failed offline once
-//! Gmail is reachable again.
+//! The reading pane: the open conversation's header (subject, labels and
+//! message count, in GPUI), then its messages, or the pane's state in their
+//! place. The state is a [`ReadingPane`]; this view loads it and keeps it
+//! current, retrying bodies that failed offline once Gmail is reachable again.
+//!
+//! The messages are one document in the window's webview
+//! ([`MessageBodyView`]), shown once every body has loaded or failed to.
+//! Where no webview can be created (a native Wayland window, for example)
+//! they are drawn in GPUI as text instead, collapsed to a line or expanded to
+//! participants and body.
 
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, div, px, rgb,
+    AnyElement, App, AppContext as _, Context, Entity, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, div, px, rgb,
 };
 use gpui_component::button::Button;
 use gpui_component::scroll::ScrollableElement as _;
@@ -18,9 +23,11 @@ use openmail_core::{Label, LabelColor, MessageId, ThreadId};
 use openmail_store::ThreadDetail;
 use time::OffsetDateTime;
 
+use crate::body_document::conversation_document;
 use crate::bridge::{AppEvent, AppModel};
 use crate::conversation::{BodyState, Conversation, LabelChip, MessageItem, ReadingPane};
-use crate::placeholder::{loading, placeholder};
+use crate::message_body::MessageBodyView;
+use crate::placeholder::{banner, loading, placeholder};
 use crate::sidebar::parse_hex_color;
 use crate::state::Session;
 use crate::thread_list::format_date;
@@ -40,6 +47,10 @@ pub struct ConversationView {
     online: bool,
     /// Loading the thread (replacing it cancels the previous load).
     load: Option<Task<()>>,
+    /// The webview showing the conversation.
+    body: Entity<MessageBodyView>,
+    /// The thread whose document the webview was last given.
+    shown: Option<ThreadId>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -57,6 +68,8 @@ impl ConversationView {
             account: None,
             online: true,
             load: None,
+            body: cx.new(MessageBodyView::new),
+            shown: None,
             _subscriptions: [events, status],
         };
         view.status_changed(cx);
@@ -67,6 +80,7 @@ impl ConversationView {
     pub fn open_thread(&mut self, id: ThreadId, cx: &mut Context<'_, Self>) {
         if self.pane.open(id) {
             self.reload(cx);
+            self.sync_body(cx);
             cx.notify();
         }
     }
@@ -75,6 +89,7 @@ impl ConversationView {
     pub fn close(&mut self, cx: &mut Context<'_, Self>) {
         if self.pane.close() {
             self.load = None;
+            self.sync_body(cx);
             cx.notify();
         }
     }
@@ -88,6 +103,7 @@ impl ConversationView {
     fn retry(&mut self, cx: &mut Context<'_, Self>) {
         if self.pane.retry() {
             self.reload(cx);
+            self.sync_body(cx);
             cx.notify();
         }
     }
@@ -100,15 +116,18 @@ impl ConversationView {
         }
     }
 
-    /// Follows the session: a different account closes the open thread, a
-    /// thread that waited for the mail service loads once it runs, and bodies
-    /// that couldn't be fetched load again once Gmail is reachable.
+    /// Follows the session: a different account (or signing out) closes the
+    /// open thread and drops the webview, a thread that waited for the mail
+    /// service loads once it runs, and bodies that couldn't be fetched load
+    /// again once Gmail is reachable.
     fn status_changed(&mut self, cx: &mut Context<'_, Self>) {
         let account = self.current_account(cx);
         if account != self.account {
             self.account = account;
             self.pane = ReadingPane::Empty;
             self.load = None;
+            self.shown = None;
+            self.body.update(cx, MessageBodyView::tear_down);
             cx.notify();
         }
         if matches!(self.pane, ReadingPane::Loading(_)) && self.load.is_none() {
@@ -122,6 +141,7 @@ impl ConversationView {
             && conversation.retry_unavailable()
         {
             self.load_bodies(cx);
+            self.sync_body(cx);
             cx.notify();
         }
     }
@@ -154,7 +174,36 @@ impl ConversationView {
         let detail = detail.map_err(|err| err.to_string());
         if self.pane.loaded(id, detail, labels, me) {
             self.load_bodies(cx);
+            self.sync_body(cx);
             cx.notify();
+        }
+    }
+
+    /// Gives the webview what the pane now shows: the conversation's
+    /// document once every body is in, nothing for an empty or failed pane.
+    /// While a thread or its bodies load, the document already up stays: for
+    /// the same thread until the new one is ready, for another thread only
+    /// briefly ([`MessageBodyView::hold`]), so switching doesn't flash.
+    fn sync_body(&mut self, cx: &mut Context<'_, Self>) {
+        match &self.pane {
+            ReadingPane::Open(conversation) if conversation.bodies_settled() => {
+                let now = local(OffsetDateTime::now_utc());
+                let document = conversation_document(conversation, |date| {
+                    let date = local(date);
+                    (format_date(date, now), full_date(date))
+                });
+                self.shown = Some(conversation.thread_id.clone());
+                self.body.update(cx, |body, cx| body.show(document, cx));
+            }
+            ReadingPane::Open(conversation)
+                if self.shown.as_ref() == Some(&conversation.thread_id) => {}
+            ReadingPane::Open(_) | ReadingPane::Loading(_) => {
+                self.body.update(cx, MessageBodyView::hold);
+            }
+            ReadingPane::Empty | ReadingPane::Missing(_) | ReadingPane::Failed(..) => {
+                self.shown = None;
+                self.body.update(cx, MessageBodyView::clear);
+            }
         }
     }
 
@@ -180,6 +229,7 @@ impl ConversationView {
                             Err(_) if !online => conversation.body_offline(&id),
                             Err(error) => conversation.body_failed(&id, &error.to_string()),
                         }
+                        this.sync_body(cx);
                         cx.notify();
                     }
                 })
@@ -194,14 +244,15 @@ impl ConversationView {
             && conversation.body_fetched(id)
         {
             self.load_bodies(cx);
+            self.sync_body(cx);
             cx.notify();
         }
     }
 
+    /// Expands or collapses a message drawn in GPUI (without a webview).
     fn toggle(&mut self, id: &MessageId, cx: &mut Context<'_, Self>) {
         if let Some(conversation) = self.pane.conversation_mut() {
             conversation.toggle(id);
-            self.load_bodies(cx);
             cx.notify();
         }
     }
@@ -215,7 +266,6 @@ impl ConversationView {
         let count = conversation.messages.len();
         let header = v_flex()
             .gap_2()
-            .pb_2()
             .child(
                 div()
                     .text_role(TextRole::Title)
@@ -238,29 +288,66 @@ impl ConversationView {
                     ),
             );
 
-        let messages = conversation
-            .messages
-            .iter()
-            .map(|message| self.render_message(message, now, cx));
+        let header = div()
+            .flex_none()
+            .w_full()
+            .max_w(MAX_WIDTH)
+            .mx_auto()
+            .px_6()
+            .pt_5()
+            .pb_3()
+            .child(header);
+
+        let body = self.body.read(cx);
+        let (unavailable, has_document) = (body.unavailable().cloned(), body.has_document());
+        let messages = if let Some(reason) = unavailable {
+            let messages: Vec<AnyElement> = conversation
+                .messages
+                .iter()
+                .map(|message| self.render_message(message, now, cx))
+                .collect();
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .child(banner(format!("{reason} Showing text instead."), cx))
+                .child(
+                    v_flex()
+                        .id(SharedString::from(format!(
+                            "conversation-{}",
+                            conversation.thread_id
+                        )))
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .max_w(MAX_WIDTH)
+                                .mx_auto()
+                                .px_6()
+                                .pt_1()
+                                .pb_5()
+                                .gap_3()
+                                .children(messages),
+                        ),
+                )
+                .into_any_element()
+        } else if conversation.bodies_settled() || has_document {
+            // While the next document is prepared, the webview keeps the
+            // previous one in place (see `sync_body`).
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(self.body.clone())
+                .into_any_element()
+        } else {
+            loading().flex_1().min_h_0().into_any_element()
+        };
 
         v_flex()
-            .id(SharedString::from(format!(
-                "conversation-{}",
-                conversation.thread_id
-            )))
             .size_full()
-            .overflow_y_scrollbar()
-            .child(
-                v_flex()
-                    .w_full()
-                    .max_w(MAX_WIDTH)
-                    .mx_auto()
-                    .px_6()
-                    .py_5()
-                    .gap_3()
-                    .child(header)
-                    .children(messages),
-            )
+            .child(header)
+            .child(messages)
             .into_any_element()
     }
 
@@ -437,7 +524,10 @@ fn hex_color(hex: &str) -> Option<Hsla> {
 }
 
 impl Render for ConversationView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        // The webview is created on the first frame that has a document for
+        // it, so whether it is available is known before laying out.
+        self.body.update(cx, |body, cx| body.prepare(window, cx));
         let theme = cx.theme();
         let pane = v_flex().size_full().min_w_0().bg(theme.background);
         let content = match &self.pane {
