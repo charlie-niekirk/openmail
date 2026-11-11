@@ -5749,8 +5749,10 @@ dependencies = [
  "lb-wry",
  "openmail-core",
  "openmail-gmail",
+ "openmail-store",
  "openmail-sync",
  "serde_json",
+ "time",
  "tokio",
  "tokio-util",
 ]

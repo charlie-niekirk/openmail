@@ -14,14 +14,17 @@ gpui.workspace = true
 gpui-component.workspace = true
 gpui-webview.workspace = true
 openmail-core = { path = "../openmail-core" }
+openmail-store = { path = "../openmail-store" }
 openmail-sync = { path = "../openmail-sync" }
 serde_json.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 wry.workspace = true
 
 [dev-dependencies]
 openmail-gmail = { path = "../openmail-gmail" }
+time = { workspace = true, features = ["macros"] }
 
 [lints]
 workspace = true

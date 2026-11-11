@@ -14,6 +14,7 @@ mod onboarding;
 mod onboarding_view;
 mod state;
 mod theme;
+mod thread_list;
 mod typography;
 
 pub use bridge::{AppEvent, AppModel, Backend, Connection};
@@ -24,6 +25,10 @@ pub use message_body::{
 pub use onboarding::{Notice, Setup, SignIn, SignInError, inbox_ready};
 pub use state::{AppState, Changed, Session, SyncState};
 pub use theme::{Themes, follow_system_appearance};
+pub use thread_list::{
+    Finished, LabelChip, Query, QueryKind, ThreadList, ThreadRow, condense_senders, format_date,
+    inbox,
+};
 pub use typography::{TextRole, TypographyExt};
 
 use gpui::{App, AppContext as _, Bounds, WindowHandle};
