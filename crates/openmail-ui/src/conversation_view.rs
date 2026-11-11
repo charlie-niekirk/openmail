@@ -1,22 +1,26 @@
 //! The reading pane: the open conversation's header, then its messages,
-//! collapsed to a line or expanded to participants and plain-text body. The
-//! state is a [`Conversation`]; this view loads it and keeps it current.
+//! collapsed to a line or expanded to participants and plain-text body, or
+//! the pane's state in their place. The state is a [`ReadingPane`]; this view
+//! loads it and keeps it current, retrying bodies that failed offline once
+//! Gmail is reachable again.
 
 use gpui::{
     AnyElement, App, Context, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, px, rgb,
 };
+use gpui_component::button::Button;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::spinner::Spinner;
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
-use openmail_core::{Label, LabelColor, MessageId, SystemLabel, ThreadId};
-use openmail_store::{ThreadDetail, ThreadView};
+use openmail_core::{Label, LabelColor, MessageId, ThreadId};
+use openmail_store::ThreadDetail;
 use time::OffsetDateTime;
 
 use crate::bridge::{AppEvent, AppModel};
-use crate::conversation::{BodyState, Conversation, LabelChip, MessageItem};
+use crate::conversation::{BodyState, Conversation, LabelChip, MessageItem, ReadingPane};
+use crate::placeholder::{loading, placeholder};
 use crate::sidebar::parse_hex_color;
 use crate::state::Session;
 use crate::thread_list::format_date;
@@ -26,38 +30,16 @@ use crate::typography::{TextRole, TypographyExt as _};
 /// Widest a conversation's text runs, for readable lines on wide windows.
 const MAX_WIDTH: gpui::Pixels = px(860.);
 
-/// What the reading pane shows.
-enum State {
-    /// No thread is open.
-    Empty,
-    Loading(ThreadId),
-    /// The thread is not in the store (deleted, or not synced).
-    Missing(ThreadId),
-    Failed(ThreadId, String),
-    Open(Conversation),
-}
-
-impl State {
-    fn thread_id(&self) -> Option<&ThreadId> {
-        match self {
-            Self::Empty => None,
-            Self::Loading(id) | Self::Missing(id) | Self::Failed(id, _) => Some(id),
-            Self::Open(conversation) => Some(&conversation.thread_id),
-        }
-    }
-}
-
 /// The conversation view. Open a thread with [`ConversationView::open_thread`].
 pub struct ConversationView {
     model: Entity<AppModel>,
-    state: State,
+    pane: ReadingPane,
     /// The account the open thread belongs to.
     account: Option<String>,
+    /// Whether Gmail was reachable when last told.
+    online: bool,
     /// Loading the thread (replacing it cancels the previous load).
     load: Option<Task<()>>,
-    /// Finding a thread to open while there is no thread list (see
-    /// [`Self::open_newest_inbox_thread`]).
-    stopgap: Option<Task<()>>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -71,10 +53,10 @@ impl ConversationView {
         let status = cx.observe(&model, |this, _, cx| this.status_changed(cx));
         let mut view = Self {
             model,
-            state: State::Empty,
+            pane: ReadingPane::Empty,
             account: None,
+            online: true,
             load: None,
-            stopgap: None,
             _subscriptions: [events, status],
         };
         view.status_changed(cx);
@@ -83,17 +65,31 @@ impl ConversationView {
 
     /// Opens `id`, replacing the open thread.
     pub fn open_thread(&mut self, id: ThreadId, cx: &mut Context<'_, Self>) {
-        if self.state.thread_id() == Some(&id) {
-            return;
+        if self.pane.open(id) {
+            self.reload(cx);
+            cx.notify();
         }
-        self.state = State::Loading(id);
-        self.reload(cx);
-        cx.notify();
+    }
+
+    /// Closes the open thread, if any.
+    pub fn close(&mut self, cx: &mut Context<'_, Self>) {
+        if self.pane.close() {
+            self.load = None;
+            cx.notify();
+        }
     }
 
     /// The open thread, if any.
     pub fn thread_id(&self) -> Option<&ThreadId> {
-        self.state.thread_id()
+        self.pane.thread_id()
+    }
+
+    /// Loads a thread that failed again.
+    fn retry(&mut self, cx: &mut Context<'_, Self>) {
+        if self.pane.retry() {
+            self.reload(cx);
+            cx.notify();
+        }
     }
 
     /// The signed-in account, if the mailbox is open.
@@ -104,53 +100,35 @@ impl ConversationView {
         }
     }
 
-    /// Follows the session: a different account closes the open thread, and
-    /// a thread that waited for the mail service loads once it runs.
+    /// Follows the session: a different account closes the open thread, a
+    /// thread that waited for the mail service loads once it runs, and bodies
+    /// that couldn't be fetched load again once Gmail is reachable.
     fn status_changed(&mut self, cx: &mut Context<'_, Self>) {
         let account = self.current_account(cx);
         if account != self.account {
             self.account = account;
-            self.state = State::Empty;
+            self.pane = ReadingPane::Empty;
             self.load = None;
-            self.stopgap = None;
             cx.notify();
         }
-        match self.state {
-            State::Empty => self.open_newest_inbox_thread(cx),
-            State::Loading(_) if self.load.is_none() => self.reload(cx),
-            _ => {}
+        if matches!(self.pane, ReadingPane::Loading(_)) && self.load.is_none() {
+            self.reload(cx);
         }
-    }
-
-    /// Stopgap until the thread list (3.4) and the layout (3.6) select
-    /// threads: opens the newest Inbox thread once there is one.
-    fn open_newest_inbox_thread(&mut self, cx: &mut Context<'_, Self>) {
-        if self.stopgap.is_some() {
-            return;
+        let online = self.model.read(cx).state().is_online();
+        let reconnected = online && !self.online;
+        self.online = online;
+        if reconnected
+            && let Some(conversation) = self.pane.conversation_mut()
+            && conversation.retry_unavailable()
+        {
+            self.load_bodies(cx);
+            cx.notify();
         }
-        let Some(mail) = self.model.read(cx).mail().cloned() else {
-            return;
-        };
-        self.stopgap = Some(cx.spawn(async move |this, cx| {
-            let page = mail
-                .thread_page(ThreadView::Label(SystemLabel::Inbox.id()), None, 1)
-                .await;
-            this.update(cx, |this, cx| {
-                this.stopgap = None;
-                let newest = page.ok().and_then(|page| page.threads.into_iter().next());
-                if let (State::Empty, Some(newest)) = (&this.state, newest) {
-                    this.open_thread(newest.id, cx);
-                }
-            })
-            .ok();
-        }));
     }
 
     /// Queries the open thread (and the labels, for its chips) again.
     fn reload(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(id) = self.state.thread_id().cloned() else {
-            // Nothing open yet: maybe the first Inbox thread just synced.
-            self.open_newest_inbox_thread(cx);
+        let Some(id) = self.pane.thread_id().cloned() else {
             return;
         };
         let Some(mail) = self.model.read(cx).mail().cloned() else {
@@ -172,29 +150,17 @@ impl ConversationView {
         labels: &[Label],
         cx: &mut Context<'_, Self>,
     ) {
-        if self.state.thread_id() != Some(id) {
-            return;
-        }
         let me = self.account.as_deref();
-        match (detail, &mut self.state) {
-            (Ok(Some(detail)), State::Open(conversation)) => {
-                conversation.refresh(detail, labels, me);
-            }
-            (Ok(Some(detail)), _) => {
-                self.state = State::Open(Conversation::new(detail, labels, me));
-            }
-            (Ok(None), _) => self.state = State::Missing(id.clone()),
-            // A failed refresh keeps showing what was loaded.
-            (Err(_), State::Open(_)) => {}
-            (Err(error), _) => self.state = State::Failed(id.clone(), error.to_string()),
+        let detail = detail.map_err(|err| err.to_string());
+        if self.pane.loaded(id, detail, labels, me) {
+            self.load_bodies(cx);
+            cx.notify();
         }
-        self.load_bodies(cx);
-        cx.notify();
     }
 
     /// Requests the bodies of expanded messages that have none.
     fn load_bodies(&mut self, cx: &mut Context<'_, Self>) {
-        let State::Open(conversation) = &mut self.state else {
+        let Some(conversation) = self.pane.conversation_mut() else {
             return;
         };
         let Some(mail) = self.model.read(cx).mail().cloned() else {
@@ -207,9 +173,11 @@ impl ConversationView {
             cx.spawn(async move |this, cx| {
                 let body = mail.body(id.clone()).await;
                 this.update(cx, |this, cx| {
-                    if let State::Open(conversation) = &mut this.state {
+                    let online = this.online;
+                    if let Some(conversation) = this.pane.conversation_mut() {
                         match body {
                             Ok(body) => conversation.body_loaded(&id, body.as_ref()),
+                            Err(_) if !online => conversation.body_offline(&id),
                             Err(error) => conversation.body_failed(&id, &error.to_string()),
                         }
                         cx.notify();
@@ -222,7 +190,7 @@ impl ConversationView {
     }
 
     fn body_fetched(&mut self, id: &MessageId, cx: &mut Context<'_, Self>) {
-        if let State::Open(conversation) = &mut self.state
+        if let Some(conversation) = self.pane.conversation_mut()
             && conversation.body_fetched(id)
         {
             self.load_bodies(cx);
@@ -231,7 +199,7 @@ impl ConversationView {
     }
 
     fn toggle(&mut self, id: &MessageId, cx: &mut Context<'_, Self>) {
-        if let State::Open(conversation) = &mut self.state {
+        if let Some(conversation) = self.pane.conversation_mut() {
             conversation.toggle(id);
             self.load_bodies(cx);
             cx.notify();
@@ -472,32 +440,34 @@ impl Render for ConversationView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = cx.theme();
         let pane = v_flex().size_full().min_w_0().bg(theme.background);
-        let centered = |text: &str, cx: &App| {
-            v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .px_8()
-                .text_center()
-                .text_role(TextRole::Secondary)
-                .text_color(cx.theme().muted_foreground)
-                .child(text.to_owned())
-                .into_any_element()
-        };
-        let content = match &self.state {
-            State::Empty => centered("No conversation selected", cx),
-            State::Loading(_) => v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .child(Spinner::new())
-                .into_any_element(),
-            State::Missing(_) => centered("This conversation is no longer available.", cx),
-            State::Failed(_, error) => centered(
-                &format!("This conversation couldn't be loaded: {error}"),
+        let content = match &self.pane {
+            ReadingPane::Empty => placeholder(
+                "No conversation selected",
+                Some("Choose a conversation from the list to read it here.".into()),
                 cx,
-            ),
-            State::Open(conversation) => self.render_conversation(conversation, cx),
+            )
+            .into_any_element(),
+            ReadingPane::Loading(_) => loading().into_any_element(),
+            ReadingPane::Missing(_) => placeholder(
+                "This conversation is no longer available.",
+                Some("It may have been deleted, or not synced yet.".into()),
+                cx,
+            )
+            .into_any_element(),
+            ReadingPane::Failed(_, error) => placeholder(
+                "This conversation couldn't be loaded.",
+                Some(error.clone().into()),
+                cx,
+            )
+            .child(
+                Button::new("retry-conversation")
+                    .outline()
+                    .small()
+                    .label("Try again")
+                    .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
+            )
+            .into_any_element(),
+            ReadingPane::Open(conversation) => self.render_conversation(conversation, cx),
         };
         pane.child(content)
     }

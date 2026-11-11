@@ -3,7 +3,8 @@
 //! [`SidebarView`] queries labels and counts through the mail service when the
 //! service starts and again on [`AppEvent::LabelsChanged`] or
 //! [`AppEvent::ThreadsChanged`], and emits [`SidebarEvent::Selected`] when the
-//! selected mailbox changes.
+//! selected mailbox changes. Under the mailboxes it says while the labels
+//! load, or why they didn't, with a retry.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -11,10 +12,13 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, Render,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px, rgb,
 };
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use crate::bridge::{AppEvent, AppModel};
-use crate::sidebar::{Counts, Group, Mailbox, MailboxRow, Row, Sidebar, parse_hex_color};
+use crate::sidebar::{
+    Counts, Group, LabelsState, Mailbox, MailboxRow, Row, Sidebar, parse_hex_color,
+};
 use crate::typography::{TextRole, TypographyExt as _};
 
 /// Indentation per level of nesting.
@@ -100,10 +104,17 @@ impl SidebarView {
         self.query = Some(cx.spawn(async move |this, cx| {
             let labels = mail.labels().await;
             let counts = mail.label_counts().await;
-            // If the service stopped meanwhile, keep showing what we had: the
-            // window leaves the mailbox once the session ends.
-            let (Ok(labels), Ok(counts)) = (labels, counts) else {
-                return;
+            let (labels, counts) = match (labels, counts) {
+                (Ok(labels), Ok(counts)) => (labels, counts),
+                (Err(err), _) | (_, Err(err)) => {
+                    // Labels already shown stay; the next change refreshes them.
+                    this.update(cx, |this, cx| {
+                        this.sidebar.labels_failed(err.to_string());
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
             };
             let counts = counts.into_iter().map(|counts| {
                 let id = counts.label_id;
@@ -122,6 +133,50 @@ impl SidebarView {
             })
             .ok();
         }));
+    }
+
+    fn retry(&mut self, cx: &mut Context<'_, Self>) {
+        self.sidebar.retry_labels();
+        self.refresh(cx);
+        cx.notify();
+    }
+
+    /// What shows under the mailboxes until the labels load.
+    fn labels_status(&self, cx: &Context<'_, Self>) -> Option<AnyElement> {
+        let theme = cx.theme();
+        let text = |text: String| {
+            div()
+                .px_2()
+                .text_role(TextRole::Secondary)
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        match self.sidebar.labels_state() {
+            LabelsState::Loaded => None,
+            LabelsState::Loading => Some(
+                div()
+                    .pt_4()
+                    .child(text("Loading labels…".to_owned()))
+                    .into_any_element(),
+            ),
+            LabelsState::Failed(error) => Some(
+                v_flex()
+                    .pt_4()
+                    .gap_2()
+                    .items_start()
+                    .child(text(format!("Labels couldn't be loaded: {error}")))
+                    .child(
+                        div().px_2().child(
+                            Button::new("retry-labels")
+                                .ghost()
+                                .xsmall()
+                                .label("Try again")
+                                .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
+                        ),
+                    )
+                    .into_any_element(),
+            ),
+        }
     }
 
     fn mailbox_row(&self, ix: usize, row: MailboxRow, cx: &Context<'_, Self>) -> AnyElement {
@@ -251,5 +306,6 @@ impl Render for SidebarView {
             .p_2()
             .text_role(TextRole::Body)
             .children(rows)
+            .children(self.labels_status(cx))
     }
 }

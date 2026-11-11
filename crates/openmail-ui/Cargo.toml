@@ -19,14 +19,17 @@ openmail-core = { path = "../openmail-core" }
 openmail-mime = { path = "../openmail-mime" }
 openmail-store = { path = "../openmail-store" }
 openmail-sync = { path = "../openmail-sync" }
+serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
+tracing.workspace = true
 wry.workspace = true
 
 [dev-dependencies]
 openmail-gmail = { path = "../openmail-gmail" }
+tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 
 [lints]

@@ -2,8 +2,9 @@
 //! collapsed or expanded the way Gmail shows them, with each expanded
 //! message's body loaded lazily.
 //!
-//! [`Conversation`] has no GPUI types; `conversation_view` renders it and
-//! drives its loading.
+//! [`ReadingPane`] is what the pane shows: nothing, a thread loading or
+//! failing to, or the open [`Conversation`]. Neither has GPUI types;
+//! `conversation_view` renders them and drives their loading.
 
 use std::collections::HashMap;
 
@@ -18,6 +19,95 @@ pub const NO_SUBJECT: &str = "(no subject)";
 
 /// What an expanded message shows when its body has no text at all.
 pub const EMPTY_BODY: &str = "(This message has no text.)";
+
+/// What an expanded message says when its body can't be fetched offline.
+pub const OFFLINE_BODY: &str = "You're offline. This message will load once you reconnect.";
+
+/// What the reading pane shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ReadingPane {
+    /// No thread is open.
+    #[default]
+    Empty,
+    /// The thread is being read from the store.
+    Loading(ThreadId),
+    /// The thread is not in the store (deleted, or not synced).
+    Missing(ThreadId),
+    /// Reading the thread failed; a retry is offered.
+    Failed(ThreadId, String),
+    Open(Conversation),
+}
+
+impl ReadingPane {
+    /// The thread shown, or being loaded, if any.
+    pub fn thread_id(&self) -> Option<&ThreadId> {
+        match self {
+            Self::Empty => None,
+            Self::Loading(id) | Self::Missing(id) | Self::Failed(id, _) => Some(id),
+            Self::Open(conversation) => Some(&conversation.thread_id),
+        }
+    }
+
+    /// The open conversation, if it has loaded.
+    pub fn conversation_mut(&mut self) -> Option<&mut Conversation> {
+        match self {
+            Self::Open(conversation) => Some(conversation),
+            _ => None,
+        }
+    }
+
+    /// Starts loading `id`, replacing what is shown. Returns `false` if it
+    /// is already shown.
+    pub fn open(&mut self, id: ThreadId) -> bool {
+        if self.thread_id() == Some(&id) {
+            return false;
+        }
+        *self = Self::Loading(id);
+        true
+    }
+
+    /// Shows nothing. Returns whether a thread was shown.
+    pub fn close(&mut self) -> bool {
+        std::mem::take(self) != Self::Empty
+    }
+
+    /// Loads a thread that failed again. Returns whether one had.
+    pub fn retry(&mut self) -> bool {
+        match self {
+            Self::Failed(id, _) => {
+                *self = Self::Loading(id.clone());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Applies a load of thread `id` (with the account's `labels` and
+    /// address `me`). An open thread refreshes in place, keeping what the
+    /// user expanded, and keeps showing if a refresh fails. Returns `false`,
+    /// changing nothing, if `id` is no longer the thread shown.
+    pub fn loaded(
+        &mut self,
+        id: &ThreadId,
+        result: Result<Option<ThreadDetail>, String>,
+        labels: &[Label],
+        me: Option<&str>,
+    ) -> bool {
+        if self.thread_id() != Some(id) {
+            return false;
+        }
+        match (result, &mut *self) {
+            (Ok(Some(detail)), Self::Open(conversation)) => {
+                conversation.refresh(detail, labels, me);
+            }
+            (Ok(Some(detail)), _) => *self = Self::Open(Conversation::new(detail, labels, me)),
+            (Ok(None), _) => *self = Self::Missing(id.clone()),
+            (Err(_), Self::Open(_)) => {}
+            (Err(error), _) => *self = Self::Failed(id.clone(), error),
+        }
+        true
+    }
+}
 
 /// An open thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +275,26 @@ impl Conversation {
             message.body =
                 BodyState::Unavailable(format!("This message couldn't be loaded: {error}"));
         }
+    }
+
+    /// The body of `id` couldn't be fetched because Gmail is unreachable.
+    pub fn body_offline(&mut self, id: &MessageId) {
+        if let Some(message) = self.message_mut(id) {
+            message.body = BodyState::Unavailable(OFFLINE_BODY.to_owned());
+        }
+    }
+
+    /// Asks again for the expanded messages' bodies that were unavailable,
+    /// as after reconnecting. Returns whether any need loading.
+    pub fn retry_unavailable(&mut self) -> bool {
+        let mut any = false;
+        for message in &mut self.messages {
+            if message.expanded && matches!(message.body, BodyState::Unavailable(_)) {
+                message.body = BodyState::NotLoaded;
+                any = true;
+            }
+        }
+        any
     }
 
     /// Handles a body the mail service fetched and stored: an expanded
@@ -615,5 +725,90 @@ mod tests {
             .map(|chip| chip.name)
             .collect();
         assert_eq!(names, ["Inbox", "Trash", "Receipts", "work/projects"]);
+    }
+
+    #[test]
+    fn the_reading_pane_opens_and_closes_threads() {
+        let mut pane = ReadingPane::default();
+        let t1 = ThreadId::new("t1");
+        assert!(!pane.close(), "nothing to close");
+
+        assert!(pane.open(t1.clone()));
+        assert_eq!(pane, ReadingPane::Loading(t1.clone()));
+        assert!(!pane.open(t1.clone()), "already opening");
+
+        assert!(pane.loaded(&t1, Ok(Some(detail(ids(2)))), &[], ME));
+        assert_eq!(pane.thread_id(), Some(&t1));
+        assert!(pane.conversation_mut().is_some());
+        assert!(!pane.open(t1.clone()), "already open");
+
+        assert!(pane.close());
+        assert_eq!(pane, ReadingPane::Empty);
+        assert_eq!(pane.thread_id(), None);
+    }
+
+    #[test]
+    fn late_loads_for_another_thread_are_dropped() {
+        let mut pane = ReadingPane::default();
+        pane.open(ThreadId::new("t1"));
+        pane.open(ThreadId::new("t2"));
+        assert!(!pane.loaded(&ThreadId::new("t1"), Ok(Some(detail(ids(1)))), &[], ME));
+        assert_eq!(pane, ReadingPane::Loading(ThreadId::new("t2")));
+
+        pane.close();
+        assert!(!pane.loaded(&ThreadId::new("t2"), Ok(None), &[], ME));
+        assert_eq!(pane, ReadingPane::Empty);
+    }
+
+    #[test]
+    fn missing_and_failed_threads_and_retry() {
+        let t1 = ThreadId::new("t1");
+        let mut pane = ReadingPane::default();
+        pane.open(t1.clone());
+        pane.loaded(&t1, Ok(None), &[], ME);
+        assert_eq!(pane, ReadingPane::Missing(t1.clone()));
+        assert!(!pane.retry(), "only failures retry");
+
+        let mut pane = ReadingPane::default();
+        pane.open(t1.clone());
+        pane.loaded(&t1, Err("disk I/O error".to_owned()), &[], ME);
+        assert_eq!(
+            pane,
+            ReadingPane::Failed(t1.clone(), "disk I/O error".to_owned())
+        );
+        assert!(pane.retry());
+        assert_eq!(pane, ReadingPane::Loading(t1.clone()));
+        pane.loaded(&t1, Ok(Some(detail(ids(1)))), &[], ME);
+        assert!(matches!(pane, ReadingPane::Open(_)));
+    }
+
+    #[test]
+    fn an_open_thread_survives_a_failed_refresh() {
+        let t1 = ThreadId::new("t1");
+        let mut pane = ReadingPane::default();
+        pane.open(t1.clone());
+        pane.loaded(&t1, Ok(Some(detail(ids(2)))), &[], ME);
+        let before = pane.clone();
+        assert!(pane.loaded(&t1, Err("busy".to_owned()), &[], ME));
+        assert_eq!(pane, before);
+    }
+
+    #[test]
+    fn offline_bodies_retry_on_reconnect() {
+        let mut conversation = Conversation::new(detail(ids(2)), &[], ME);
+        let latest = MessageId::new("m2");
+        assert_eq!(
+            conversation.take_bodies_to_load(),
+            std::slice::from_ref(&latest)
+        );
+        conversation.body_offline(&latest);
+        assert_eq!(
+            conversation.messages[1].body,
+            BodyState::Unavailable(OFFLINE_BODY.to_owned())
+        );
+        // The collapsed message never asked, so it isn't retried.
+        assert!(conversation.retry_unavailable());
+        assert_eq!(conversation.take_bodies_to_load(), [latest]);
+        assert!(!conversation.retry_unavailable(), "nothing left to retry");
     }
 }

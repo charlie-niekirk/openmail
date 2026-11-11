@@ -497,8 +497,10 @@ Dates are in local time, with the same conversion as the thread list
 (`time_format::local`): compact dates on collapsed and expanded messages
 (`format_date`), and the full date among an expanded message's participants.
 
-Until the layout (3.6) connects the thread list's selection, the view opens
-the newest Inbox thread on its own.
+The pane's state is a `ReadingPane` (`Empty`, `Loading`, `Missing`,
+`Failed` with a retry, or `Open(Conversation)`), also in the view-model. A
+body that can't be fetched while offline says so, and the expanded messages'
+unavailable bodies load again when Gmail is reachable once more.
 
 ### Theme, typography and window frame
 
@@ -514,8 +516,8 @@ sizes; `Body` is the themes' 14 px base size.
 
 The main window has a transparent title bar with the macOS traffic lights
 (`gpui-component`'s `TitleBar`), showing the account and the sync status. Below
-it are the three panes, which are placeholders until PRs 3.3–3.5, or a notice
-when there is no mailbox.
+it are the three panes (see [Layout](#layout)), or a notice when there is no
+mailbox.
 
 Icons are SVGs served by `openmail_ui::Assets`, which the app registers with
 `with_assets`: `gpui-component`'s default set (from `gpui-kit-assets`), the
@@ -548,6 +550,33 @@ Lucide icons the app adds to it through `icon_assets!`, and the app's own
   stars, Gmail's importance marker and a paperclip show when they apply.
 - **Selection.** Clicking a row selects it and emits
   `ThreadListEvent::Selected(ThreadId)`; `selected()` returns it.
+- **States.** `ThreadList::content` says what the pane shows: a spinner until
+  the first page arrives, the failure with a retry if it doesn't, the rows, or
+  "No conversations in <label>" with a reason more may come (offline, or still
+  syncing). `ThreadList::banner` adds a strip above the rows when offline, or
+  when loading more or refreshing failed (with a retry).
+
+### Layout
+
+`MainWindow` lays the sidebar, the thread list and the reading pane side by
+side and wires them together through `panes.rs`, plain functions from one
+pane's event to commands for the others: `SidebarEvent::Selected(mailbox)`
+shows that mailbox's `ThreadView` in the list and closes the open thread;
+`ThreadListEvent::Selected(id)` opens the thread in the reading pane.
+
+The sidebar and the thread list end in dividers (`gpui-component`'s
+standalone `resize_handle`); dragging one resizes its pane. `PaneSizes`
+(`pane_sizes.rs`) holds the widths: each pane has a range (sidebar 160–400 px,
+list 280–640 px), and a drag leaves the reading pane at least 300 px. The
+widths laid out come from `PaneSizes::fit`, which shrinks the list, then the
+sidebar, towards their minimums when the window is too narrow, without
+changing the saved preference. The sizes are saved to `layout.json` in the
+data directory (they belong to the user, not an account, so not in a mail
+database) 300 ms after a divider stops moving, and read once before the
+window's first frame.
+
+The sidebar shows the system mailboxes at once, then "Loading labels…" until
+the labels arrive, or why they didn't with a retry (`Sidebar::labels_state`).
 
 ## Sync model
 

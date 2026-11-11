@@ -15,6 +15,9 @@ mod main_window;
 mod message_body;
 mod onboarding;
 mod onboarding_view;
+mod pane_sizes;
+mod panes;
+mod placeholder;
 mod sidebar;
 mod sidebar_view;
 mod state;
@@ -26,20 +29,27 @@ mod typography;
 
 pub use assets::{Assets, IMPORTANCE_ICON};
 pub use bridge::{AppEvent, AppModel, Backend, Connection};
-pub use conversation::{BodyState, Conversation, MessageItem};
+pub use conversation::{BodyState, Conversation, MessageItem, OFFLINE_BODY, ReadingPane};
 pub use conversation_view::ConversationView;
 pub use main_window::{Content, MainWindow, main_window_options};
 pub use message_body::{
     BODY_CSP, MessageBodyView, SAMPLE_NEWSLETTER, allows_navigation, body_document,
 };
 pub use onboarding::{Notice, Setup, SignIn, SignInError, inbox_ready};
-pub use sidebar::{Counts, Group, Mailbox, MailboxRow, Row, SNOOZED, Sidebar, parse_hex_color};
+pub use pane_sizes::{
+    CONVERSATION_MIN_WIDTH, Divider, LAYOUT_FILE, PaneSizes, SIDEBAR_WIDTH, THREAD_LIST_WIDTH,
+    WidthRange, layout_path,
+};
+pub use panes::{PaneCommand, on_sidebar, on_thread_list, thread_view};
+pub use sidebar::{
+    Counts, Group, LabelsState, Mailbox, MailboxRow, Row, SNOOZED, Sidebar, parse_hex_color,
+};
 pub use sidebar_view::{SidebarEvent, SidebarView};
 pub use state::{AppState, Changed, Session, SyncState};
 pub use theme::{Themes, follow_system_appearance};
 pub use thread_list::{
-    Finished, LabelChip, Query, QueryKind, ThreadList, ThreadRow, condense_senders, format_date,
-    inbox,
+    Finished, LabelChip, ListBanner, ListContent, Query, QueryKind, ThreadList, ThreadRow,
+    condense_senders, format_date, inbox,
 };
 pub use thread_list_view::{ROW_HEIGHT, ThreadListEvent, ThreadListView};
 pub use typography::{TextRole, TypographyExt};

@@ -1,22 +1,30 @@
 //! The main window: the frame (a transparent macOS title bar showing the
 //! account and sync status) around either the mailbox (the sidebar, the
-//! thread list, then the reading pane, still a placeholder), the onboarding
+//! thread list, then the reading pane, wired together by [`panes`] and
+//! separated by dividers that resize them), the onboarding
 //! screens (sign-in, then a new account's first sync), or a notice when the
 //! mailbox could not be opened.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
 use gpui::{
-    App, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Styled as _, Subscription, Window, WindowBounds, WindowOptions, div, px, size,
+    App, AppContext as _, Axis, Bounds, Context, DragMoveEvent, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription, Task,
+    Window, WindowBounds, WindowOptions, div, px, size,
 };
+use gpui_component::resizable::{HandleEdge, resize_handle};
 use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
 
 use crate::bridge::AppModel;
 use crate::conversation_view::ConversationView;
 use crate::onboarding::{Setup, SignIn};
 use crate::onboarding_view::{setup_screen, sign_in_screen};
-use crate::sidebar_view::SidebarView;
+use crate::pane_sizes::{Divider, PaneSizes, layout_path};
+use crate::panes::{self, PaneCommand};
+use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::state::{AppState, Session};
-use crate::thread_list_view::ThreadListView;
+use crate::thread_list_view::{ThreadListEvent, ThreadListView};
 use crate::typography::{TextRole, TypographyExt as _};
 
 /// The window title shown by the OS (Window menu, Mission Control, task bar).
@@ -28,11 +36,8 @@ pub const DEFAULT_SIZE: gpui::Size<Pixels> = size(px(1200.), px(780.));
 /// Smallest size the main window can be resized to while all three panes fit.
 pub const MIN_SIZE: gpui::Size<Pixels> = size(px(760.), px(480.));
 
-/// Width of the label sidebar.
-pub const SIDEBAR_WIDTH: Pixels = px(220.);
-
-/// Width of the thread list.
-pub const THREAD_LIST_WIDTH: Pixels = px(360.);
+/// How long after a divider last moved its pane sizes are saved.
+const SAVE_DELAY: Duration = Duration::from_millis(300);
 
 /// Window options for the main window: a transparent macOS title bar with traffic
 /// lights (drawn by `gpui-component`'s [`TitleBar`]), titled "Openmail".
@@ -80,29 +85,117 @@ impl Content {
     }
 }
 
+/// What a divider drag carries: the divider. GPUI draws it as nothing.
+#[derive(Clone)]
+struct DividerDrag(Divider);
+
+impl Render for DividerDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
 /// The root view of the main window.
 pub struct MainWindow {
     model: Entity<AppModel>,
     sidebar: Entity<SidebarView>,
     thread_list: Entity<ThreadListView>,
     conversation: Entity<ConversationView>,
-    _subscriptions: [Subscription; 2],
+    /// The user's pane widths.
+    panes: PaneSizes,
+    /// Where they are saved, if there is a data directory.
+    layout_path: Option<PathBuf>,
+    /// Saving them, once the divider stops moving.
+    save: Option<Task<()>>,
+    _subscriptions: [Subscription; 4],
 }
 
 impl MainWindow {
     /// Creates the view. It re-renders when the session or sync status
-    /// changes, and keeps the theme in step with the system appearance.
+    /// changes, keeps the theme in step with the system appearance, and
+    /// passes each pane's selection on to the next.
     pub fn new(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let model = AppModel::global(cx);
         let appearance = crate::theme::follow_system_appearance(window, cx);
         let status = cx.observe(&model, |_, _, cx| cx.notify());
-        Self {
+        let sidebar = cx.new(SidebarView::new);
+        let thread_list = cx.new(ThreadListView::new);
+        let conversation = cx.new(ConversationView::new);
+        let mailbox = cx.subscribe(&sidebar, |this, _, event: &SidebarEvent, cx| {
+            this.apply(panes::on_sidebar(event), cx);
+        });
+        let thread = cx.subscribe(&thread_list, |this, _, event: &ThreadListEvent, cx| {
+            this.apply(panes::on_thread_list(event), cx);
+        });
+        // A few bytes, read once before the first frame so the panes open at
+        // their saved widths rather than jumping to them.
+        let layout_path = layout_path();
+        let panes = layout_path
+            .as_deref()
+            .map(PaneSizes::load)
+            .unwrap_or_default();
+        let mut this = Self {
             model,
-            sidebar: cx.new(SidebarView::new),
-            thread_list: cx.new(ThreadListView::new),
-            conversation: cx.new(ConversationView::new),
-            _subscriptions: [appearance, status],
+            sidebar,
+            thread_list,
+            conversation,
+            panes,
+            layout_path,
+            save: None,
+            _subscriptions: [appearance, status, mailbox, thread],
+        };
+        // Start the list on whatever the sidebar selected.
+        let view = panes::thread_view(this.sidebar.read(cx).selected());
+        this.apply(vec![PaneCommand::ShowThreads(view)], cx);
+        this
+    }
+
+    /// Carries out what one pane's selection asks of the others.
+    fn apply(&mut self, commands: Vec<PaneCommand>, cx: &mut Context<'_, Self>) {
+        for command in commands {
+            match command {
+                PaneCommand::ShowThreads(view) => self
+                    .thread_list
+                    .update(cx, |list, cx| list.set_view(view, cx)),
+                PaneCommand::OpenThread(id) => self
+                    .conversation
+                    .update(cx, |conversation, cx| conversation.open_thread(id, cx)),
+                PaneCommand::CloseThread => self.conversation.update(cx, ConversationView::close),
+            }
         }
+    }
+
+    /// Follows a divider being dragged: resizes its pane, then saves the
+    /// sizes once it stops.
+    fn drag_divider(
+        &mut self,
+        event: &DragMoveEvent<DividerDrag>,
+        _: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let divider = event.drag(cx).0;
+        let x = f32::from(event.event.position.x - event.bounds.left());
+        let width = f32::from(event.bounds.size.width);
+        if self.panes.drag(divider, x, width) {
+            self.save_panes(cx);
+            cx.notify();
+        }
+    }
+
+    /// Saves the pane sizes after [`SAVE_DELAY`], unless they change again
+    /// first (which replaces this save with a later one).
+    fn save_panes(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(path) = self.layout_path.clone() else {
+            return;
+        };
+        let panes = self.panes;
+        self.save = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(SAVE_DELAY).await;
+            let saved = cx.background_spawn(async move { panes.save(&path) }).await;
+            if let Err(err) = saved {
+                tracing::warn!("could not save the pane sizes: {err}");
+            }
+        }));
     }
 
     fn title_bar(state: &AppState, cx: &App) -> impl IntoElement {
@@ -128,33 +221,34 @@ impl MainWindow {
         )
     }
 
-    fn mailbox(&self, cx: &App) -> impl IntoElement {
+    fn mailbox(&self, window: &Window, cx: &Context<'_, Self>) -> impl IntoElement {
         let theme = cx.theme();
+        // The mailbox spans the window, so its width is the window's.
+        let shown = self.panes.fit(f32::from(window.viewport_size().width));
         h_flex()
+            .id("mailbox")
             .flex_1()
             .min_h_0()
-            // Sidebar (PR 3.3).
+            .on_drag_move(cx.listener(Self::drag_divider))
             .child(
                 div()
+                    .relative()
                     .h_full()
-                    .w(SIDEBAR_WIDTH)
+                    .w(px(shown.sidebar))
                     .flex_none()
                     .bg(theme.sidebar)
-                    .border_r_1()
-                    .border_color(theme.sidebar_border)
-                    .child(self.sidebar.clone()),
+                    .child(self.sidebar.clone())
+                    .child(divider(Divider::Sidebar)),
             )
-            // Thread list (PR 3.4).
             .child(
                 div()
+                    .relative()
                     .h_full()
-                    .w(THREAD_LIST_WIDTH)
+                    .w(px(shown.thread_list))
                     .flex_none()
-                    .border_r_1()
-                    .border_color(theme.border)
-                    .child(self.thread_list.clone()),
+                    .child(self.thread_list.clone())
+                    .child(divider(Divider::ThreadList)),
             )
-            // Conversation view (PR 3.5).
             .child(
                 div()
                     .h_full()
@@ -185,12 +279,26 @@ impl MainWindow {
     }
 }
 
+/// The draggable divider on a pane's right edge.
+fn divider(divider: Divider) -> impl IntoElement {
+    let id = match divider {
+        Divider::Sidebar => "sidebar-divider",
+        Divider::ThreadList => "thread-list-divider",
+    };
+    resize_handle::<DividerDrag, DividerDrag>(id, Axis::Horizontal)
+        .inside(HandleEdge::Trailing)
+        .on_drag(DividerDrag(divider), |drag, _, _, cx| {
+            cx.stop_propagation();
+            cx.new(|_| drag.clone())
+        })
+}
+
 impl Render for MainWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let state = self.model.read(cx).state();
         let theme = cx.theme();
         let content = match Content::for_state(state) {
-            Content::Mailbox => self.mailbox(cx).into_any_element(),
+            Content::Mailbox => self.mailbox(window, cx).into_any_element(),
             Content::SignIn(sign_in) => sign_in_screen(&sign_in, cx),
             Content::Setup { account, setup } => setup_screen(&account, &setup, cx),
             Content::Notice { title, detail } => Self::notice(title, detail, cx).into_any_element(),
@@ -238,8 +346,9 @@ mod tests {
     }
 
     #[test]
-    fn minimum_width_fits_fixed_panes() {
-        assert!(MIN_SIZE.width > SIDEBAR_WIDTH + THREAD_LIST_WIDTH);
+    fn default_size_fits_the_default_panes() {
+        let width = f32::from(DEFAULT_SIZE.width);
+        assert_eq!(PaneSizes::default().fit(width), PaneSizes::default());
         assert!(DEFAULT_SIZE.width >= MIN_SIZE.width);
         assert!(DEFAULT_SIZE.height >= MIN_SIZE.height);
     }

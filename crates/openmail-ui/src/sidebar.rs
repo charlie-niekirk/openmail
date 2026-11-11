@@ -59,6 +59,17 @@ pub enum Group {
     Label(LabelId),
 }
 
+/// Whether the labels have loaded. The system mailboxes show either way.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LabelsState {
+    /// Not loaded yet.
+    #[default]
+    Loading,
+    Loaded,
+    /// The first load failed; a retry is offered.
+    Failed(String),
+}
+
 /// One row of the sidebar, top to bottom.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
@@ -156,6 +167,7 @@ pub struct Sidebar {
     counts: HashMap<LabelId, Counts>,
     collapsed: HashSet<Group>,
     selected: Mailbox,
+    state: LabelsState,
 }
 
 impl Default for Sidebar {
@@ -172,6 +184,27 @@ impl Sidebar {
             counts: HashMap::new(),
             collapsed: HashSet::from([Group::Categories]),
             selected: Mailbox::inbox(),
+            state: LabelsState::Loading,
+        }
+    }
+
+    /// Whether the labels have loaded.
+    pub fn labels_state(&self) -> &LabelsState {
+        &self.state
+    }
+
+    /// Loading the labels failed. Labels already loaded keep showing (they
+    /// are refreshed on the next change); otherwise the failure shows.
+    pub fn labels_failed(&mut self, error: String) {
+        if self.state != LabelsState::Loaded {
+            self.state = LabelsState::Failed(error);
+        }
+    }
+
+    /// Loading the labels again after a failure.
+    pub fn retry_labels(&mut self) {
+        if matches!(self.state, LabelsState::Failed(_)) {
+            self.state = LabelsState::Loading;
         }
     }
 
@@ -179,6 +212,7 @@ impl Sidebar {
     /// and returns `true`.
     pub fn set_labels(&mut self, labels: Vec<Label>) -> bool {
         self.labels = labels;
+        self.state = LabelsState::Loaded;
         let exists = match &self.selected {
             Mailbox::AllMail => true,
             Mailbox::Label(id) => {
@@ -733,5 +767,28 @@ mod tests {
         assert_eq!(parse_hex_color("#fff"), None);
         assert_eq!(parse_hex_color("#zzzzzz"), None);
         assert_eq!(parse_hex_color("#+12345"), None);
+    }
+
+    #[test]
+    fn labels_load_or_fail_with_a_retry() {
+        let mut sidebar = Sidebar::new();
+        assert_eq!(sidebar.labels_state(), &LabelsState::Loading);
+        // The system mailboxes show while the labels load.
+        assert!(render(&sidebar).iter().any(|row| row.starts_with("Inbox")));
+
+        sidebar.labels_failed("disk I/O error".to_owned());
+        assert_eq!(
+            sidebar.labels_state(),
+            &LabelsState::Failed("disk I/O error".to_owned())
+        );
+        sidebar.retry_labels();
+        assert_eq!(sidebar.labels_state(), &LabelsState::Loading);
+
+        sidebar.set_labels(vec![user("Label_1", "Work")]);
+        assert_eq!(sidebar.labels_state(), &LabelsState::Loaded);
+        // A later failure keeps the labels that loaded.
+        sidebar.labels_failed("busy".to_owned());
+        assert_eq!(sidebar.labels_state(), &LabelsState::Loaded);
+        assert!(render(&sidebar).iter().any(|row| row.contains("Work")));
     }
 }
