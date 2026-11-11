@@ -104,7 +104,7 @@ built and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## Phase 3 — App shell and read-only UI
 
-- [ ] **3.1 UI architecture** — `feat/3.1-ui-architecture`
+- [x] **3.1 UI architecture** — `feat/3.1-ui-architecture`
   - `openmail-ui` crate, bridge from tokio events to GPUI entities, `AppState`.
   - Light and dark themes that follow the system, typography, the window frame.
 - [ ] **3.2 Onboarding** — `feat/3.2-onboarding`
