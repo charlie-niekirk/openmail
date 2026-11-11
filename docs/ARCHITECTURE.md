@@ -101,7 +101,10 @@ app chrome.
   trusted, app-injected one used for auto-height.
 - Remote images are blocked by default, behind a per-message or per-sender
   "show images" choice. `cid:` references are rewritten to local content.
+- Message CSS is scoped to its message by selector prefixing.
 - Link clicks are intercepted and opened in the system browser, showing the real URL.
+
+The details are under [Sanitization and privacy](#sanitization-and-privacy).
 
 Spike 0.5 proved the embedding on macOS; the findings, the approach and the
 per-platform constraints are under [Webview embedding](#webview-embedding).
@@ -183,7 +186,8 @@ with synthetic input:
   stop scrolling after a (blocked) link click; with 4.1's document Space, Page
   Down and the arrows all scroll after a link click.
 - **Privacy.** Link clicks reach the navigation handler and are cancelled; nothing
-  navigates away. JavaScript is off and the CSP blocks every network load.
+  navigates away. JavaScript is off and the CSP blocks every network load
+  (since 4.2, except the remote images the user chose to show).
 - **Occlusion.** WebKit does not paint while the window is fully covered by other
   windows, so a capture of a hidden window shows an empty grey rect. It paints as
   soon as the window is visible again.
@@ -221,17 +225,18 @@ constraints above require.
   the From/To/Cc/date lines and the body. Opening and closing messages is the
   engine's own `<details>` behaviour, so it works with JavaScript off. Unread
   messages and the latest start open, as in 3.5. Shell classes start with
-  `om-`; message HTML loses `class` and `id`, so neither side styles the other.
+  `om-`, which message HTML may not use, and message CSS is scoped to its
+  message, so neither side styles the other.
 - **Every body loads when the thread opens**, not when a message is first
   expanded: toggles happen inside the webview, out of GPUI's sight. The mail
   service fetches requests that arrive together in one batch, and the document
   is shown once every body has loaded or failed (a spinner until then).
-- **Message HTML goes through an interim `ammonia` allowlist** (`clean_html`):
-  `ammonia`'s defaults plus inline `style`, presentational attributes
-  (`align`, `bgcolor`, `width`, `cellpadding`, …), `<center>`/`<font>` and
-  `data:` images. Re-serializing balances the fragment's tags, so it can't close
-  its section and spill into the shell. Plain-text bodies are escaped into a
-  `white-space: pre-wrap` block.
+- **Message HTML is sanitized** (`clean_html`, since 4.2 the full email
+  allowlist: see [Sanitization and privacy](#sanitization-and-privacy)) and
+  sits in a wrapper, `<div class="om-mail" id="b-<message id>">`, that its
+  styles are scoped to. Re-serializing balances the fragment's tags, so it
+  can't close its section and spill into the shell. Plain-text bodies are
+  escaped into a `white-space: pre-wrap` block.
 - **Lifecycle.** One webview per window, created on the first frame that has a
   document (`MessageBodyView::prepare`) and reused: a new thread is loaded into
   it with `load_html`, and an unchanged document isn't reloaded (so sync
@@ -255,11 +260,6 @@ constraints above require.
 
 Left for later, without blocking it:
 
-- **4.2** replaces `clean_html`'s allowlist. Email `<style>` elements are
-  dropped for now; keeping them needs scoping to the message (selector
-  prefixing, or a declarative shadow root per message). Remote images, `cid:`
-  rewriting and opening links slot into `clean_html` and the navigation
-  handler.
 - **4.3.** One document grows with its content, so per-message auto-height is
   not needed. A trusted injected script could keep open sections and the
   scroll position across reloads (today a reload, as when a new message
@@ -267,6 +267,91 @@ Left for later, without blocking it:
   (its colours are in one CSS block, `SHELL_CSS`).
 - **Large threads on Windows**: `NavigateToString` caps a document at 2 MB, so a
   long thread of newsletters needs a custom protocol to serve it.
+
+### Sanitization and privacy
+
+PR 4.2. The code is `crates/openmail-ui/src/sanitize.rs` (HTML) and
+`sanitize/css.rs` (CSS), tested over the fixture corpus in `sanitize/fixtures/`
+(a newsletter, hostile HTML) and the MIME crate's `newsletter-cid.eml`.
+
+**The allowlist.** `ammonia`'s defaults (no script, form, frame, object,
+embed, media, `<base>`, `<meta>`, `<link>`, SVG, event handler or `srcset`)
+plus what newsletters are built from: `<style>`, `<center>`, `<font>`,
+`<big>`, `<section>`; `style`, `class`, `id`, `align`, `valign`, `bgcolor`,
+`background`, `width`, `height`, `border`, `dir` and `nowrap` everywhere;
+table spacing and rules, `<font>` and `<img>` presentation, list types.
+`<title>` and `<template>` go with their content. Links keep only `http(s):`
+and `mailto:` URLs and in-message anchors; `target` and `ping` go.
+
+**Scoping message CSS: selector prefixing.** The conversation is one
+document, so a message's `<style>` would otherwise style the shell and the
+other messages. Two ways were considered:
+
+- *A declarative shadow root per message* (`<template shadowrootmode>`)
+  scopes selectors natively, but `ammonia` (html5ever) neither parses nor
+  serializes it, so the sanitized tree would have to be rebuilt by hand; it
+  needs Safari 16.4+ and a recent WebKitGTK; `:host` rules still reach the
+  host; and it does nothing about `position: fixed`, which escapes any scope.
+- *Selector prefixing*, chosen. `css.rs` tokenizes the stylesheet with
+  `cssparser` (already in the tree through `ammonia`) and rebuilds it from
+  the tokens it keeps. Every selector is prefixed with the message's wrapper
+  (`#b-<id> …`); a leading `html`, `body` or `:root` becomes the wrapper
+  itself, so `body { background }` colours the message, not the app; IDs (in
+  the HTML, in selectors and in `#anchor` links) take the prefix `b-<id>-`;
+  message classes starting with `om-` are dropped; a selector starting with
+  `+` or `~` (the wrapper's siblings) drops its rule. Only `@media` and
+  `@supports` survive (scoped in turn); `@import`, `@font-face`,
+  `@keyframes`, `@namespace` and every other at-rule are dropped. Working on
+  tokens means CSS escapes (`\70 osition: fi\78 ed`) are compared decoded.
+
+Declarations, in `<style>` and in `style` attributes, lose `position: fixed`
+and `sticky` (only `static`, `relative`, `absolute` and the global keywords
+pass, so `var()` can't smuggle `fixed` in), bad tokens, nested blocks, and
+functions that load without `url()` (`image-set()`, `src()`, `element()`,
+`expression()`). As a backstop each `.om-body` has `contain: paint`: whatever
+a message positions, transforms or pulls up with negative margins is clipped
+to its own box, which is also the containing block for anything `absolute`
+or `fixed` inside it.
+
+**Remote images** are blocked by default. Every image source (`<img src>`,
+the `background` attribute, CSS `url()`) goes through one policy: `data:`
+images (PNG, JPEG, GIF, WebP, BMP, SVG) stay, `cid:` becomes a `data:` URL,
+`http(s):` is dropped (and reported) unless the message's images are shown,
+and anything else is dropped. A blocked `<img>` keeps its size and alt text;
+a blocked CSS `url()` becomes `none`. The reading pane shows a strip above
+the conversation for messages with hidden images: **Show images** (that
+message, while the thread is open) and **Always show from &lt;address&gt;**
+(saved per account in `image_senders`, applied to every message from that
+address). Showing images cleans the message again with its remote URLs kept,
+and the document's CSP allows **exactly those URLs** in `img-src`: a source
+with a full path matches only that path (CSP ignores the query), so no other
+message, font, stylesheet or tag can load anything, and nothing but images
+is ever allowed. Limits: a CSP source ending in `/` matches its whole path
+prefix; after a redirect CSP only checks the host; images load directly from
+the sender's servers (there is no proxy as in Gmail), so showing them reveals
+the reader's IP address; `From` can be forged, so "always" trusts a claim;
+and showing images reloads the document, which resets scroll and open
+sections (4.3 keeps them).
+
+**`cid:` images.** Bodies are fetched as raw MIME. `parse_body` keeps the
+parts the HTML mentions by `Content-ID` whose type (declared, or sniffed for
+generic types) is an image, up to 10 MiB per body, in `inline_parts`,
+written and replaced with the body. Migration 0005 deletes stored bodies
+whose HTML contains `cid:`, so they are fetched again with their parts. The
+sanitizer matches `cid:` URLs percent-decoded, without angle brackets, and
+case-insensitively as a fallback.
+
+**Links.** The navigation handler cancels everything but the document's own
+loads and anchors. A cancelled `http(s):` or `mailto:` URL (or a new-window
+request for one, as on cmd-click) is sent to the reading pane, which opens it
+with the system browser or mail app (`open`) and says so in a strip showing
+the full URL. The sanitizer notes links whose visible text is a web address
+on another site than the `href` (`paypal.com` pointing elsewhere; hosts are
+compared in punycode, so a look-alike Unicode name counts as another site,
+and subdomains of the named site don't): clicking one shows "This link says
+“paypal.com” but goes to evil.example: …" with **Open link** and **Cancel**,
+and opens nothing until confirmed. Other schemes never reach the handler (the
+sanitizer drops them) and are ignored if they do.
 
 ### Windows (WebView2): not tested
 
@@ -348,6 +433,8 @@ Dates are Unix milliseconds, history IDs integers, address lists JSON arrays.
 | `message_labels` | Labels per message: the source of truth for labels. |
 | `thread_labels` | Labels per thread (the union over its messages), with a per-label message count and a copy of the thread's last-message date. |
 | `bodies` | Lazily fetched bodies: text, HTML, fetched-at. |
+| `inline_parts` | The images a body's HTML references with `cid:` URLs (content ID, type, bytes), saved and deleted with the body. |
+| `image_senders` | Senders whose remote images are always shown (lowercased address, added at). |
 | `attachments` | Attachment metadata keyed by message and MIME part ID, with an optional local path. |
 | `drafts` | Draft IDs, pointing at their message. |
 | `sync_state` | One row: `history_id`, an opaque backfill cursor, backfill-complete, last full sync, and the learned Gmail quota budget with the quota it was learned under. |
@@ -380,7 +467,7 @@ The UI's read queries (`queries.rs`):
 - `Store::label_counts()` returns total and unread thread counts for every label
   in one query.
 - `Store::thread_detail(id)` returns a thread with its messages oldest first, their
-  labels, and any bodies already fetched.
+  labels, and any bodies already fetched (with their inline parts).
 
 Tests check with `EXPLAIN QUERY PLAN` that these use indexes (and that pages and
 thread detail never sort), and
