@@ -16,6 +16,7 @@ mod onboarding_view;
 mod state;
 mod theme;
 mod thread_list;
+mod thread_list_view;
 mod typography;
 
 pub use assets::{Assets, IMPORTANCE_ICON};
@@ -31,6 +32,7 @@ pub use thread_list::{
     Finished, LabelChip, Query, QueryKind, ThreadList, ThreadRow, condense_senders, format_date,
     inbox,
 };
+pub use thread_list_view::{ROW_HEIGHT, ThreadListEvent, ThreadListView};
 pub use typography::{TextRole, TypographyExt};
 
 use gpui::{App, AppContext as _, Bounds, WindowHandle};

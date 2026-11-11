@@ -5,8 +5,8 @@
 //! mailbox could not be opened.
 
 use gpui::{
-    App, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    Styled as _, Subscription, Window, WindowBounds, WindowOptions, div, px, size,
+    App, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels, Render,
+    SharedString, Styled as _, Subscription, Window, WindowBounds, WindowOptions, div, px, size,
 };
 use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
 
@@ -14,6 +14,7 @@ use crate::bridge::AppModel;
 use crate::onboarding::{Setup, SignIn};
 use crate::onboarding_view::{setup_screen, sign_in_screen};
 use crate::state::{AppState, Session};
+use crate::thread_list_view::ThreadListView;
 use crate::typography::{TextRole, TypographyExt as _};
 
 /// The window title shown by the OS (Window menu, Mission Control, task bar).
@@ -80,6 +81,7 @@ impl Content {
 /// The root view of the main window.
 pub struct MainWindow {
     model: Entity<AppModel>,
+    thread_list: Entity<ThreadListView>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -92,6 +94,7 @@ impl MainWindow {
         let status = cx.observe(&model, |_, _, cx| cx.notify());
         Self {
             model,
+            thread_list: cx.new(ThreadListView::new),
             _subscriptions: [appearance, status],
         }
     }
@@ -119,7 +122,7 @@ impl MainWindow {
         )
     }
 
-    fn mailbox(cx: &App) -> impl IntoElement {
+    fn mailbox(&self, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
         h_flex()
             .flex_1()
@@ -140,9 +143,9 @@ impl MainWindow {
                     .h_full()
                     .w(THREAD_LIST_WIDTH)
                     .flex_none()
-                    .bg(theme.colors.list)
                     .border_r_1()
-                    .border_color(theme.border),
+                    .border_color(theme.border)
+                    .child(self.thread_list.clone()),
             )
             // Conversation view (PR 3.5).
             .child(
@@ -185,7 +188,7 @@ impl Render for MainWindow {
         let state = self.model.read(cx).state();
         let theme = cx.theme();
         let content = match Content::for_state(state) {
-            Content::Mailbox => Self::mailbox(cx).into_any_element(),
+            Content::Mailbox => self.mailbox(cx).into_any_element(),
             Content::SignIn(sign_in) => sign_in_screen(&sign_in, cx),
             Content::Setup { account, setup } => setup_screen(&account, &setup, cx),
             Content::Notice { title, detail } => Self::notice(title, detail, cx).into_any_element(),
