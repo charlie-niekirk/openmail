@@ -185,13 +185,18 @@ with synthetic input:
   hands focus back, and keys then no longer scroll the page. The spike saw Space
   stop scrolling after a (blocked) link click; with 4.1's document Space, Page
   Down and the arrows all scroll after a link click.
-- **Cursor.** GPUI covers its view with one AppKit cursor rect in its own
-  cursor style, and AppKit keeps applying it over the webview too, so WebKit's
-  cursor (a hand over links, an I-beam over text) never showed. Since 4.2,
-  `WebviewCursor` turns the window's cursor rects off while the pointer is
-  over the visible webview and back on when it leaves or the webview hides.
-  GPUI does receive the mouse moves over the webview, so it can tell. This is
-  the crate's one `unsafe` call (turning GPUI's raw `NSView` handle into a
+- **Cursor.** WebKit sets the cursor a page asks for (a hand over links, an
+  I-beam over text) only while no AppKit cursor rect is in force:
+  `PageClientImpl::setCursor` returns early while `[NSApp _cursorRectCursor]`
+  is set. GPUI covers its whole view, the webview's superview, with one
+  cursor rect in its own style, so the arrow always won. Since 4.2,
+  `WebviewCursor` drops GPUI's view's cursor rects while the pointer is over
+  the visible webview (again on each move, in case they were rebuilt), and
+  has AppKit rebuild them when it leaves or the webview hides, which brings
+  GPUI's cursor back. GPUI does receive the mouse moves over the webview, so
+  it can tell. Verified by running the app on a synthetic store and reading
+  the system cursor while hovering links, text and GPUI content. This is the
+  crate's one `unsafe` call (turning GPUI's raw `NSView` handle into a
   reference); WebView2 and WebKitGTK set their own cursors.
 - **Privacy.** Link clicks reach the navigation handler and are cancelled; nothing
   navigates away. JavaScript is off and the CSP blocks every network load
