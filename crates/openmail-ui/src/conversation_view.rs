@@ -246,8 +246,10 @@ impl ConversationView {
                     let date = local(date);
                     (format_date(date, now), full_date(date))
                 });
+                let key = conversation.thread_id.as_str().to_owned();
                 self.shown = Some(conversation.thread_id.clone());
-                self.body.update(cx, |body, cx| body.show(document, cx));
+                self.body
+                    .update(cx, |body, cx| body.show(document, &key, cx));
             }
             ReadingPane::Open(conversation)
                 if self.shown.as_ref() == Some(&conversation.thread_id) => {}
